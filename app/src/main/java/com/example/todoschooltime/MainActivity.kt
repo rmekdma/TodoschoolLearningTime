@@ -10,12 +10,14 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowInsets
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import org.json.JSONArray
 import org.json.JSONObject
@@ -30,6 +32,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
     private lateinit var swipeRefreshLayout: SwipeRefreshLayout
@@ -41,6 +44,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
+        setupSystemBars()
 
         val savedCredentials = CredentialStore(this).load()
         if (savedCredentials == null) {
@@ -50,11 +54,19 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun setupSystemBars() {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
+    }
+
     private fun buildUi() {
         val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).toInt()
+        fun dp(value: Int) = (value * density).roundToInt()
 
         swipeRefreshLayout = SwipeRefreshLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -83,7 +95,7 @@ class MainActivity : Activity() {
             setPadding(dp(24), dp(24), dp(24), dp(24))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
             )
         }
 
@@ -107,19 +119,22 @@ class MainActivity : Activity() {
         }
 
         errorView = TextView(this).apply {
+            visibility = View.GONE
             textSize = 15f
             setTextColor(Color.rgb(176, 0, 32))
             setPadding(0, dp(16), 0, 0)
         }
 
-        swipeRefreshLayout.setOnApplyWindowInsetsListener { view, insets ->
-            val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
+        ViewCompat.setOnApplyWindowInsetsListener(swipeRefreshLayout) { view, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+
             view.setPadding(
                 systemBars.left,
                 systemBars.top,
                 systemBars.right,
                 systemBars.bottom,
             )
+
             insets
         }
 
@@ -127,14 +142,16 @@ class MainActivity : Activity() {
         contentLayout.addView(progressBar)
         contentLayout.addView(childrenContainer)
         contentLayout.addView(errorView)
+
         scrollView.addView(contentLayout)
         swipeRefreshLayout.addView(scrollView)
+
         setContentView(swipeRefreshLayout)
     }
 
     private fun askCredentials(message: String? = null) {
         val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).toInt()
+        fun dp(value: Int) = (value * density).roundToInt()
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -186,6 +203,7 @@ class MainActivity : Activity() {
         checkedAtView.text = "확인 중..."
         progressBar.visibility = View.VISIBLE
         childrenContainer.removeAllViews()
+        errorView.visibility = View.GONE
         errorView.text = ""
 
         Thread {
@@ -212,6 +230,7 @@ class MainActivity : Activity() {
                     swipeRefreshLayout.isRefreshing = false
                     checkedAtView.text = koreaNow().text
                     childrenContainer.removeAllViews()
+                    errorView.visibility = View.VISIBLE
                     errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
 
                     if (e is AuthenticationException) {

@@ -17,5 +17,6 @@ android {
 
 dependencies {
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+    implementation("androidx.core:core-ktx:1.15.0")
 }
 
