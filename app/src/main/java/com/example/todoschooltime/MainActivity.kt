@@ -14,7 +14,9 @@ import android.view.WindowInsets
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -30,6 +32,7 @@ import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.ceil
 
 class MainActivity : Activity() {
+    private lateinit var swipeRefreshLayout: SwipeRefreshLayout
     private lateinit var checkedAtView: TextView
     private lateinit var childrenContainer: LinearLayout
     private lateinit var errorView: TextView
@@ -51,7 +54,31 @@ class MainActivity : Activity() {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
 
-        val root = LinearLayout(this).apply {
+        swipeRefreshLayout = SwipeRefreshLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            setOnRefreshListener {
+                val savedCredentials = CredentialStore(this@MainActivity).load()
+                if (savedCredentials == null) {
+                    isRefreshing = false
+                    askCredentials()
+                } else {
+                    loadLearningTime(savedCredentials)
+                }
+            }
+        }
+
+        val scrollView = ScrollView(this).apply {
+            isFillViewport = true
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+        }
+
+        val contentLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(24), dp(24), dp(24))
             layoutParams = ViewGroup.LayoutParams(
@@ -85,22 +112,24 @@ class MainActivity : Activity() {
             setPadding(0, dp(16), 0, 0)
         }
 
-        root.setOnApplyWindowInsetsListener { view, insets ->
+        swipeRefreshLayout.setOnApplyWindowInsetsListener { view, insets ->
             val systemBars = insets.getInsets(WindowInsets.Type.systemBars())
             view.setPadding(
-                dp(24) + systemBars.left,
-                dp(24) + systemBars.top,
-                dp(24) + systemBars.right,
-                dp(24) + systemBars.bottom,
+                systemBars.left,
+                systemBars.top,
+                systemBars.right,
+                systemBars.bottom,
             )
             insets
         }
 
-        root.addView(checkedAtView)
-        root.addView(progressBar)
-        root.addView(childrenContainer)
-        root.addView(errorView)
-        setContentView(root)
+        contentLayout.addView(checkedAtView)
+        contentLayout.addView(progressBar)
+        contentLayout.addView(childrenContainer)
+        contentLayout.addView(errorView)
+        scrollView.addView(contentLayout)
+        swipeRefreshLayout.addView(scrollView)
+        setContentView(swipeRefreshLayout)
     }
 
     private fun askCredentials(message: String? = null) {
@@ -138,6 +167,7 @@ class MainActivity : Activity() {
                 if (email.isBlank() || password.isBlank()) {
                     checkedAtView.text = "확인 취소"
                     progressBar.visibility = View.GONE
+                    swipeRefreshLayout.isRefreshing = false
                 } else {
                     val credentials = Credentials(email, password)
                     CredentialStore(this).save(credentials)
@@ -147,6 +177,7 @@ class MainActivity : Activity() {
             .setNegativeButton("취소") { _, _ ->
                 checkedAtView.text = "확인 취소"
                 progressBar.visibility = View.GONE
+                swipeRefreshLayout.isRefreshing = false
             }
             .show()
     }
@@ -162,6 +193,7 @@ class MainActivity : Activity() {
                 val result = TodoSchoolClient().load(credentials.email, credentials.password)
                 runOnUiThread {
                     progressBar.visibility = View.GONE
+                    swipeRefreshLayout.isRefreshing = false
                     checkedAtView.text = result.checkedAt
                     childrenContainer.removeAllViews()
 
@@ -177,6 +209,7 @@ class MainActivity : Activity() {
             } catch (e: Exception) {
                 runOnUiThread {
                     progressBar.visibility = View.GONE
+                    swipeRefreshLayout.isRefreshing = false
                     checkedAtView.text = koreaNow().text
                     childrenContainer.removeAllViews()
                     errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"

@@ -14,3 +14,8 @@ android {
         versionName = "1.0"
     }
 }
+
+dependencies {
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+}
+
