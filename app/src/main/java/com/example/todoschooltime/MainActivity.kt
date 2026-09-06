@@ -318,7 +318,7 @@ private class TodoSchoolClient {
                         .put("yyyymmdd", today.yyyymmdd)
                         .put("languageCode", "ko"),
                     token = token,
-                ) as? JSONObject ?: throw IllegalStateException("${subject.name}: 리포트 형식이 예상과 다릅니다.")
+                ) as? JSONObject ?: continue
 
                 val name = report.optString("name").ifBlank { userName }
                 val seconds = learningSecondsWithoutEtc(report)
@@ -398,7 +398,7 @@ private class TodoSchoolClient {
             val json = JSONObject(responseText)
             if (!json.optBoolean("result", false)) {
                 if (path == "/v3/account/signin") throw AuthenticationException("로그인에 실패했습니다.")
-                throw IllegalStateException("$path: API 요청 실패")
+                return null
             }
             return json.opt("data")
         } finally {
