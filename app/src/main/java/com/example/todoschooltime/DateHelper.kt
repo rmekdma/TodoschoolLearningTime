@@ -16,9 +16,6 @@ object DateHelper {
     private val CHECKED_AT_FORMATTER: DateTimeFormatter =
         DateTimeFormatter.ofPattern("HH:mm", Locale.KOREAN)
 
-    private val YYYYMMDD_FORMATTER: DateTimeFormatter =
-        DateTimeFormatter.ofPattern("yyyyMMdd", Locale.KOREAN)
-
     fun today(zoneId: ZoneId = SEOUL_ZONE): LocalDate {
         return LocalDate.now(zoneId)
     }
@@ -32,7 +29,7 @@ object DateHelper {
     }
 
     fun toYyyyMmDd(date: LocalDate): Int {
-        return date.format(YYYYMMDD_FORMATTER).toInt()
+        return date.year * 10000 + date.monthValue * 100 + date.dayOfMonth
     }
 
     fun formatCheckedAt(dateTime: ZonedDateTime): String {

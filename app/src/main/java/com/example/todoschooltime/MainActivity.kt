@@ -63,7 +63,13 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        updateDateNavUi()
+    }
+
     private fun setupSystemBars() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowCompat.getInsetsController(window, window.decorView).apply {
             isAppearanceLightStatusBars = true
             isAppearanceLightNavigationBars = true
@@ -99,6 +105,8 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(30, 30, 30))
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
             setPadding(dp(16), dp(8), dp(16), dp(8))
@@ -114,6 +122,7 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(17, 17, 17))
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
+            minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
             setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -128,6 +137,8 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(30, 30, 30))
             setTypeface(typeface, android.graphics.Typeface.BOLD)
             gravity = Gravity.CENTER
+            minimumWidth = dp(48)
+            minimumHeight = dp(48)
             isClickable = true
             isFocusable = true
             setPadding(dp(16), dp(8), dp(16), dp(8))
@@ -251,7 +262,8 @@ class MainActivity : Activity() {
         val dialog = DatePickerDialog(
             this,
             { _, year, month, dayOfMonth ->
-                val pickedDate = LocalDate.of(year, month + 1, dayOfMonth)
+                val rawPickedDate = LocalDate.of(year, month + 1, dayOfMonth)
+                val pickedDate = if (rawPickedDate.isAfter(today)) today else rawPickedDate
                 if (pickedDate != selectedDate) {
                     selectedDate = pickedDate
                     updateDateNavUi()
@@ -340,7 +352,7 @@ class MainActivity : Activity() {
 
         checkedAtView.text = "확인 중..."
         setNavButtonsEnabled(false)
-        progressBar.visibility = View.VISIBLE
+        progressBar.visibility = if (swipeRefreshLayout.isRefreshing) View.GONE else View.VISIBLE
         childrenContainer.removeAllViews()
         errorView.visibility = View.GONE
         errorView.text = ""
@@ -376,6 +388,7 @@ class MainActivity : Activity() {
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
                     childrenContainer.removeAllViews()
+                    checkedAtView.text = "확인 실패"
                     errorView.visibility = View.VISIBLE
                     errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
 
