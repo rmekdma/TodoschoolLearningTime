@@ -1,6 +1,8 @@
 package com.example.todoschooltime
 
 object SubjectStatusFormatter {
+    const val CHECKMARK = "✔"
+
     val DEFAULT_TARGET_COUNTS: Map<String, Int>
         get() = TargetDefaults.DEFAULT_COUNTS
 
@@ -9,7 +11,7 @@ object SubjectStatusFormatter {
 
     fun formatSubject(name: String, count: Int, targetCount: Int): String {
         val completed = count >= targetCount
-        val prefix = if (completed) "✔ " else ""
+        val prefix = if (completed) "$CHECKMARK " else ""
         return "$prefix$name ($count/$targetCount)"
     }
 

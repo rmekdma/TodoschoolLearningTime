@@ -13,6 +13,7 @@ import android.text.InputFilter
 import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.util.TypedValue
@@ -418,6 +419,9 @@ class MainActivity : Activity() {
                 textSize = 22f
                 setTextColor(Color.rgb(17, 17, 17))
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                maxWidth = dp(240)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -432,8 +436,8 @@ class MainActivity : Activity() {
                     setBackgroundResource(outValue.resourceId)
                 }
                 gravity = Gravity.CENTER
-                minimumWidth = dp(36)
-                minimumHeight = dp(36)
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -482,24 +486,25 @@ class MainActivity : Activity() {
     }
 
     private fun colorizeCheckmarks(text: String): CharSequence {
-        if (!text.contains("✔")) return text
+        val checkmark = SubjectStatusFormatter.CHECKMARK
+        if (!text.contains(checkmark)) return text
         val spannable = SpannableStringBuilder(text)
         val greenColor = Color.rgb(46, 125, 50)
-        var index = text.indexOf("✔")
+        var index = text.indexOf(checkmark)
         while (index >= 0) {
             spannable.setSpan(
                 ForegroundColorSpan(greenColor),
                 index,
-                index + 1,
+                index + checkmark.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
             )
             spannable.setSpan(
                 StyleSpan(Typeface.BOLD),
                 index,
-                index + 1,
+                index + checkmark.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
             )
-            index = text.indexOf("✔", index + 1)
+            index = text.indexOf(checkmark, index + checkmark.length)
         }
         return spannable
     }
