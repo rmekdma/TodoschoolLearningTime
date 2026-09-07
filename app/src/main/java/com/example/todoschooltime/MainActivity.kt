@@ -2,6 +2,8 @@ package com.example.todoschooltime
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.DatePickerDialog
+import android.content.DialogInterface
 import android.graphics.Color
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
@@ -24,9 +26,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.KeyStore
-import java.time.ZoneId
-import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
+import java.time.LocalDate
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -35,8 +35,16 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
-    private lateinit var swipeRefreshLayout: SwipeRefreshLayout
+    private var selectedDate: LocalDate = DateHelper.today()
+    private val requestTracker = AsyncRequestTracker()
+
+    private lateinit var rootLayout: LinearLayout
+    private lateinit var topNavLayout: LinearLayout
+    private lateinit var prevDateButton: TextView
+    private lateinit var datePickerButton: TextView
+    private lateinit var nextDateButton: TextView
     private lateinit var checkedAtView: TextView
+    private lateinit var swipeRefreshLayout: SwipeRefreshLayout
     private lateinit var childrenContainer: LinearLayout
     private lateinit var errorView: TextView
     private lateinit var progressBar: ProgressBar
@@ -45,12 +53,13 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         buildUi()
         setupSystemBars()
+        updateDateNavUi()
 
         val savedCredentials = CredentialStore(this).load()
         if (savedCredentials == null) {
             askCredentials()
         } else {
-            loadLearningTime(savedCredentials)
+            loadLearningTime(savedCredentials, selectedDate)
         }
     }
 
@@ -65,20 +74,93 @@ class MainActivity : Activity() {
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).roundToInt()
 
-        swipeRefreshLayout = SwipeRefreshLayout(this).apply {
+        rootLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
-            setOnRefreshListener {
-                val savedCredentials = CredentialStore(this@MainActivity).load()
-                if (savedCredentials == null) {
-                    isRefreshing = false
-                    askCredentials()
-                } else {
-                    loadLearningTime(savedCredentials)
+        }
+
+        topNavLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(12), dp(16), dp(4))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
+        prevDateButton = TextView(this).apply {
+            text = "<"
+            textSize = 22f
+            setTextColor(Color.rgb(30, 30, 30))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener {
+                selectedDate = selectedDate.minusDays(1)
+                updateDateNavUi()
+                loadLearningTimeForSelectedDate()
+            }
+        }
+
+        datePickerButton = TextView(this).apply {
+            textSize = 18f
+            setTextColor(Color.rgb(17, 17, 17))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setOnClickListener {
+                showDatePicker()
+            }
+        }
+
+        nextDateButton = TextView(this).apply {
+            text = ">"
+            textSize = 22f
+            setTextColor(Color.rgb(30, 30, 30))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener {
+                if (DateHelper.canGoNext(selectedDate, DateHelper.today())) {
+                    selectedDate = selectedDate.plusDays(1)
+                    updateDateNavUi()
+                    loadLearningTimeForSelectedDate()
                 }
+            }
+        }
+
+        topNavLayout.addView(prevDateButton)
+        topNavLayout.addView(datePickerButton)
+        topNavLayout.addView(nextDateButton)
+
+        checkedAtView = TextView(this).apply {
+            text = "확인 중..."
+            textSize = 13f
+            setTextColor(Color.rgb(140, 140, 140))
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, dp(8))
+        }
+
+        swipeRefreshLayout = SwipeRefreshLayout(this).apply {
+            setBackgroundColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f,
+            )
+            setOnRefreshListener {
+                loadLearningTimeForSelectedDate()
             }
         }
 
@@ -92,18 +174,11 @@ class MainActivity : Activity() {
 
         val contentLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(24), dp(24), dp(24))
+            setPadding(dp(24), dp(16), dp(24), dp(24))
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             )
-        }
-
-        checkedAtView = TextView(this).apply {
-            text = "확인 중..."
-            textSize = 17f
-            setTextColor(Color.rgb(102, 102, 102))
-            setPadding(0, 0, 0, dp(14))
         }
 
         progressBar = ProgressBar(this).apply {
@@ -125,20 +200,17 @@ class MainActivity : Activity() {
             setPadding(0, dp(16), 0, 0)
         }
 
-        ViewCompat.setOnApplyWindowInsetsListener(swipeRefreshLayout) { view, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(rootLayout) { view, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-
             view.setPadding(
                 systemBars.left,
                 systemBars.top,
                 systemBars.right,
                 systemBars.bottom,
             )
-
             insets
         }
 
-        contentLayout.addView(checkedAtView)
         contentLayout.addView(progressBar)
         contentLayout.addView(childrenContainer)
         contentLayout.addView(errorView)
@@ -146,7 +218,69 @@ class MainActivity : Activity() {
         scrollView.addView(contentLayout)
         swipeRefreshLayout.addView(scrollView)
 
-        setContentView(swipeRefreshLayout)
+        rootLayout.addView(topNavLayout)
+        rootLayout.addView(checkedAtView)
+        rootLayout.addView(swipeRefreshLayout)
+
+        setContentView(rootLayout)
+    }
+
+    private fun updateDateNavUi() {
+        val today = DateHelper.today()
+        datePickerButton.text = DateHelper.formatDisplayDate(selectedDate)
+        val canNext = DateHelper.canGoNext(selectedDate, today)
+        nextDateButton.visibility = if (canNext) View.VISIBLE else View.INVISIBLE
+        nextDateButton.isEnabled = canNext
+        swipeRefreshLayout.isEnabled = DateHelper.isToday(selectedDate, today)
+    }
+
+    private fun setNavButtonsEnabled(enabled: Boolean) {
+        prevDateButton.isEnabled = enabled
+        prevDateButton.alpha = if (enabled) 1.0f else 0.3f
+
+        datePickerButton.isEnabled = enabled
+        datePickerButton.alpha = if (enabled) 1.0f else 0.3f
+
+        val canNext = DateHelper.canGoNext(selectedDate, DateHelper.today())
+        nextDateButton.isEnabled = enabled && canNext
+        nextDateButton.alpha = if (enabled && canNext) 1.0f else 0.3f
+    }
+
+    private fun showDatePicker() {
+        val today = DateHelper.today()
+        val dialog = DatePickerDialog(
+            this,
+            { _, year, month, dayOfMonth ->
+                val pickedDate = LocalDate.of(year, month + 1, dayOfMonth)
+                if (pickedDate != selectedDate) {
+                    selectedDate = pickedDate
+                    updateDateNavUi()
+                    loadLearningTimeForSelectedDate()
+                }
+            },
+            selectedDate.year,
+            selectedDate.monthValue - 1,
+            selectedDate.dayOfMonth,
+        )
+        dialog.datePicker.maxDate = DateHelper.maxDateEpochMillis(today)
+        dialog.setButton(DialogInterface.BUTTON_NEUTRAL, "오늘") { _, _ ->
+            selectedDate = DateHelper.today()
+            updateDateNavUi()
+            loadLearningTimeForSelectedDate()
+        }
+        dialog.show()
+    }
+
+    private fun loadLearningTimeForSelectedDate() {
+        val savedCredentials = CredentialStore(this).load()
+        if (savedCredentials == null) {
+            if (swipeRefreshLayout.isRefreshing) {
+                swipeRefreshLayout.isRefreshing = false
+            }
+            askCredentials()
+        } else {
+            loadLearningTime(savedCredentials, selectedDate)
+        }
     }
 
     private fun askCredentials(message: String? = null) {
@@ -155,7 +289,7 @@ class MainActivity : Activity() {
 
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(24), dp(8), dp(24), 0)
+            setPadding(dp(24), dp(8), dp(24), dp(0))
         }
 
         val emailInput = EditText(this).apply {
@@ -185,22 +319,27 @@ class MainActivity : Activity() {
                     checkedAtView.text = "확인 취소"
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
+                    setNavButtonsEnabled(true)
                 } else {
                     val credentials = Credentials(email, password)
                     CredentialStore(this).save(credentials)
-                    loadLearningTime(credentials)
+                    loadLearningTime(credentials, selectedDate)
                 }
             }
             .setNegativeButton("취소") { _, _ ->
                 checkedAtView.text = "확인 취소"
                 progressBar.visibility = View.GONE
                 swipeRefreshLayout.isRefreshing = false
+                setNavButtonsEnabled(true)
             }
             .show()
     }
 
-    private fun loadLearningTime(credentials: Credentials) {
+    private fun loadLearningTime(credentials: Credentials, targetDate: LocalDate) {
+        val requestId = requestTracker.nextRequestId()
+
         checkedAtView.text = "확인 중..."
+        setNavButtonsEnabled(false)
         progressBar.visibility = View.VISIBLE
         childrenContainer.removeAllViews()
         errorView.visibility = View.GONE
@@ -208,8 +347,12 @@ class MainActivity : Activity() {
 
         Thread {
             try {
-                val result = TodoSchoolClient().load(credentials.email, credentials.password)
+                val result = TodoSchoolClient().load(credentials.email, credentials.password, targetDate)
                 runOnUiThread {
+                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
                     checkedAtView.text = result.checkedAt
@@ -226,9 +369,12 @@ class MainActivity : Activity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
+                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
+                        return@runOnUiThread
+                    }
+                    setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
-                    checkedAtView.text = koreaNow().text
                     childrenContainer.removeAllViews()
                     errorView.visibility = View.VISIBLE
                     errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
@@ -253,19 +399,6 @@ private data class LearningResult(
     val minutesByChild: LinkedHashMap<String, Int>,
 )
 
-private data class KoreaNow(
-    val yyyymmdd: Int,
-    val text: String,
-)
-
-private fun koreaNow(): KoreaNow {
-    val now = ZonedDateTime.now(ZoneId.of("Asia/Seoul"))
-    return KoreaNow(
-        yyyymmdd = now.format(DateTimeFormatter.ofPattern("yyyyMMdd")).toInt(),
-        text = now.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")),
-    )
-}
-
 private class TodoSchoolClient {
     private data class Subject(
         val name: String,
@@ -279,14 +412,15 @@ private class TodoSchoolClient {
         Subject("수학", "/v3/math/user", "/v3/todoschool/report/daily/math"),
     )
 
-    fun load(email: String, password: String): LearningResult {
+    fun load(email: String, password: String, date: LocalDate = DateHelper.today()): LearningResult {
         val login = signIn(email, password)
         val token = login.optString("authToken").ifBlank { login.optString("sessionId") }
         if (token.isBlank()) throw AuthenticationException("로그인 토큰을 받지 못했습니다.")
 
         val accountId = login.opt("accountId")
             ?: throw IllegalStateException("accountId를 받지 못했습니다.")
-        val today = koreaNow()
+        val yyyymmdd = DateHelper.toYyyyMmDd(date)
+        val checkedAt = DateHelper.formatCheckedAt(DateHelper.nowZoned())
 
         val totals = LinkedHashMap<String, Long>()
         val childOrder = mutableListOf<String>()
@@ -315,7 +449,7 @@ private class TodoSchoolClient {
                     path = subject.reportPath,
                     body = JSONObject()
                         .put("userId", userId)
-                        .put("yyyymmdd", today.yyyymmdd)
+                        .put("yyyymmdd", yyyymmdd)
                         .put("languageCode", "ko"),
                     token = token,
                 ) as? JSONObject ?: continue
@@ -335,7 +469,7 @@ private class TodoSchoolClient {
             minutes[name] = ceil((totals[name] ?: 0L) / 60.0).toInt()
         }
 
-        return LearningResult(today.text, minutes)
+        return LearningResult(checkedAt, minutes)
     }
 
     private fun signIn(email: String, password: String): JSONObject {
