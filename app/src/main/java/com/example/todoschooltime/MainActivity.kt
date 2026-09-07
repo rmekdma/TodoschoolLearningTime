@@ -37,6 +37,7 @@ import kotlin.math.roundToInt
 class MainActivity : Activity() {
     private var selectedDate: LocalDate = DateHelper.today()
     private val requestTracker = AsyncRequestTracker()
+    private var currentResult: LearningResult? = null
 
     private lateinit var rootLayout: LinearLayout
     private lateinit var topNavLayout: LinearLayout
@@ -364,20 +365,12 @@ class MainActivity : Activity() {
                     if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
                         return@runOnUiThread
                     }
+                    currentResult = result
                     setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
                     checkedAtView.text = result.checkedAt
-                    childrenContainer.removeAllViews()
-
-                    result.minutesByChild.forEach { (name, minutes) ->
-                        childrenContainer.addView(TextView(this).apply {
-                            text = "$name: ${minutes}분"
-                            textSize = 26f
-                            setTextColor(Color.rgb(17, 17, 17))
-                            setTypeface(typeface, android.graphics.Typeface.BOLD)
-                        })
-                    }
+                    renderChildren(result)
                 }
             } catch (e: Exception) {
                 runOnUiThread {
@@ -400,16 +393,60 @@ class MainActivity : Activity() {
             }
         }.start()
     }
+
+    private fun renderChildren(result: LearningResult) {
+        val density = resources.displayMetrics.density
+        fun dp(value: Int) = (value * density).roundToInt()
+
+        childrenContainer.removeAllViews()
+        result.children.forEachIndexed { index, child ->
+            val cardLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                if (index > 0) {
+                    setPadding(0, dp(24), 0, 0)
+                }
+            }
+
+            // 1행: 아이 이름
+            val nameView = TextView(this).apply {
+                text = child.name
+                textSize = 22f
+                setTextColor(Color.rgb(17, 17, 17))
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            }
+
+            // 2행: ${minutes}분
+            val minutesView = TextView(this).apply {
+                text = "${child.minutes}분"
+                textSize = 26f
+                setTextColor(Color.rgb(17, 17, 17))
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+                setPadding(0, dp(4), 0, 0)
+            }
+
+            // 3행: 과목 현황
+            val statusText = SubjectStatusFormatter.formatStatus(child.subjects)
+            val statusView = TextView(this).apply {
+                text = statusText
+                textSize = 15f
+                setTextColor(Color.rgb(80, 80, 80))
+                setPadding(0, dp(4), 0, 0)
+            }
+
+            cardLayout.addView(nameView)
+            cardLayout.addView(minutesView)
+            if (statusText.isNotEmpty()) {
+                cardLayout.addView(statusView)
+            }
+
+            childrenContainer.addView(cardLayout)
+        }
+    }
 }
 
 private data class Credentials(
     val email: String,
     val password: String,
-)
-
-private data class LearningResult(
-    val checkedAt: String,
-    val minutesByChild: LinkedHashMap<String, Int>,
 )
 
 private class TodoSchoolClient {
@@ -421,8 +458,8 @@ private class TodoSchoolClient {
 
     private val subjects = listOf(
         Subject("한글", "/v3/todohangeul/user", "/v3/todoschool/report/daily/hangeul"),
-        Subject("영어", "/v3/english/user", "/v3/todoschool/report/daily/english"),
         Subject("수학", "/v3/math/user", "/v3/todoschool/report/daily/math"),
+        Subject("영어", "/v3/english/user", "/v3/todoschool/report/daily/english"),
     )
 
     fun load(email: String, password: String, date: LocalDate = DateHelper.today()): LearningResult {
@@ -436,6 +473,7 @@ private class TodoSchoolClient {
         val checkedAt = DateHelper.formatCheckedAt(DateHelper.nowZoned())
 
         val totals = LinkedHashMap<String, Long>()
+        val subjectsByChild = LinkedHashMap<String, MutableList<SubjectProgress>>()
         val childOrder = mutableListOf<String>()
 
         subjects.forEach { subject ->
@@ -445,18 +483,20 @@ private class TodoSchoolClient {
                 token = token,
             ) as? JSONArray ?: throw IllegalStateException("${subject.name}: 사용자 목록 형식이 예상과 다릅니다.")
 
-            if (childOrder.isEmpty()) {
-                for (i in 0 until users.length()) {
-                    val name = users.getJSONObject(i).optString("name")
-                    if (name.isNotBlank()) childOrder.add(name)
-                }
-            }
-
             for (i in 0 until users.length()) {
                 val user = users.getJSONObject(i)
-                val userId = user.opt("userId")
-                    ?: throw IllegalStateException("${subject.name}: userId가 없습니다.")
-                val userName = user.optString("name")
+                val userName = user.optString("name").trim()
+                if (userName.isBlank()) continue
+
+                if (!TodoSchoolDataParser.isSubscribed(user)) {
+                    continue
+                }
+
+                val userId = user.optString("userId").ifBlank { user.opt("userId")?.toString().orEmpty() }
+
+                if (userName !in childOrder) {
+                    childOrder.add(userName)
+                }
 
                 val report = post(
                     path = subject.reportPath,
@@ -465,24 +505,28 @@ private class TodoSchoolClient {
                         .put("yyyymmdd", yyyymmdd)
                         .put("languageCode", "ko"),
                     token = token,
-                ) as? JSONObject ?: continue
+                ) as? JSONObject
 
-                val name = report.optString("name").ifBlank { userName }
-                val seconds = learningSecondsWithoutEtc(report)
-                totals[name] = (totals[name] ?: 0L) + seconds
-                if (name.isNotBlank() && name !in childOrder) childOrder.add(name)
+                val seconds = ReportParser.extractLearningSeconds(report)
+                val progress = TodoSchoolDataParser.parseSubjectProgress(subject.name, user, report)
+
+                totals[userName] = (totals[userName] ?: 0L) + seconds
+                if (progress != null) {
+                    subjectsByChild.getOrPut(userName) { mutableListOf() }.add(progress)
+                }
             }
         }
 
-        val names = childOrder.distinct().filter { it.isNotBlank() }
+        val names = childOrder.distinct()
         if (names.isEmpty()) throw IllegalStateException("아이 정보를 찾지 못했습니다.")
 
-        val minutes = LinkedHashMap<String, Int>()
-        names.forEach { name ->
-            minutes[name] = ceil((totals[name] ?: 0L) / 60.0).toInt()
+        val children = names.map { name ->
+            val minutes = ceil((totals[name] ?: 0L) / 60.0).toInt()
+            val subjectList = subjectsByChild[name] ?: emptyList()
+            ChildLearningInfo(name = name, minutes = minutes, subjects = subjectList)
         }
 
-        return LearningResult(checkedAt, minutes)
+        return LearningResult(checkedAt, children)
     }
 
     private fun signIn(email: String, password: String): JSONObject {
@@ -505,22 +549,6 @@ private class TodoSchoolClient {
             }
             throw e
         }
-    }
-
-    private fun learningSecondsWithoutEtc(report: JSONObject): Long {
-        val categories = report.optJSONObject("learningSecondsByCategory") ?: return 0L
-        var total = 0L
-        val keys = categories.keys()
-        while (keys.hasNext()) {
-            val category = keys.next()
-            if (category == "etc") continue
-            total += when (val value = categories.opt(category)) {
-                is Number -> value.toLong()
-                is String -> value.toDoubleOrNull()?.toLong() ?: 0L
-                else -> 0L
-            }
-        }
-        return total
     }
 
     private fun post(path: String, body: JSONObject, token: String?): Any? {
