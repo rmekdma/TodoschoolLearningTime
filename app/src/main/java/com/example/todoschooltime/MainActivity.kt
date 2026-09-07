@@ -5,11 +5,16 @@ import android.app.AlertDialog
 import android.app.DatePickerDialog
 import android.content.DialogInterface
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.text.InputFilter
 import android.text.InputType
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -455,7 +460,7 @@ class MainActivity : Activity() {
                 childTargets[subjectName] ?: SubjectStatusFormatter.defaultTargetCount(subjectName)
             }
             val statusView = TextView(this).apply {
-                text = statusText
+                text = colorizeCheckmarks(statusText)
                 textSize = 15f
                 setTextColor(Color.rgb(80, 80, 80))
                 setPadding(0, dp(4), 0, 0)
@@ -469,6 +474,29 @@ class MainActivity : Activity() {
 
             childrenContainer.addView(cardLayout)
         }
+    }
+
+    private fun colorizeCheckmarks(text: String): CharSequence {
+        if (!text.contains("✔")) return text
+        val spannable = SpannableStringBuilder(text)
+        val greenColor = Color.rgb(46, 125, 50)
+        var index = text.indexOf("✔")
+        while (index >= 0) {
+            spannable.setSpan(
+                ForegroundColorSpan(greenColor),
+                index,
+                index + 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            spannable.setSpan(
+                StyleSpan(Typeface.BOLD),
+                index,
+                index + 1,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            index = text.indexOf("✔", index + 1)
+        }
+        return spannable
     }
 
     private fun showTargetCountDialog(child: ChildLearningInfo) {
