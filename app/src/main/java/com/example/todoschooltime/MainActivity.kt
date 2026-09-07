@@ -39,7 +39,7 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 
 class MainActivity : Activity() {
-    private var selectedDate: LocalDate = DateHelper.today()
+    private var learningDate: LocalDate = DateHelper.today()
     private val requestTracker = AsyncRequestTracker()
     private val targetCountStore by lazy { TargetCountStore(this) }
     private var currentResult: LearningResult? = null
@@ -65,7 +65,7 @@ class MainActivity : Activity() {
         if (savedCredentials == null) {
             askCredentials()
         } else {
-            loadLearningTime(savedCredentials, selectedDate)
+            loadLearningTime(savedCredentials, learningDate)
         }
     }
 
@@ -104,22 +104,8 @@ class MainActivity : Activity() {
             )
         }
 
-        prevDateButton = TextView(this).apply {
-            text = "<"
-            textSize = 22f
-            setTextColor(Color.rgb(30, 30, 30))
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            gravity = Gravity.CENTER
-            minimumWidth = dp(48)
-            minimumHeight = dp(48)
-            isClickable = true
-            isFocusable = true
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                selectedDate = selectedDate.minusDays(1)
-                updateDateNavUi()
-                loadLearningTimeForSelectedDate()
-            }
+        prevDateButton = createNavButton("<") {
+            changeLearningDate(learningDate.minusDays(1))
         }
 
         datePickerButton = TextView(this).apply {
@@ -136,23 +122,9 @@ class MainActivity : Activity() {
             }
         }
 
-        nextDateButton = TextView(this).apply {
-            text = ">"
-            textSize = 22f
-            setTextColor(Color.rgb(30, 30, 30))
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            gravity = Gravity.CENTER
-            minimumWidth = dp(48)
-            minimumHeight = dp(48)
-            isClickable = true
-            isFocusable = true
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            setOnClickListener {
-                if (DateHelper.canGoNext(selectedDate, DateHelper.today())) {
-                    selectedDate = selectedDate.plusDays(1)
-                    updateDateNavUi()
-                    loadLearningTimeForSelectedDate()
-                }
+        nextDateButton = createNavButton(">") {
+            if (DateHelper.canGoNext(learningDate, DateHelper.today())) {
+                changeLearningDate(learningDate.plusDays(1))
             }
         }
 
@@ -176,7 +148,7 @@ class MainActivity : Activity() {
                 1f,
             )
             setOnRefreshListener {
-                loadLearningTimeForSelectedDate()
+                loadLearningTimeForLearningDate()
             }
         }
 
@@ -243,11 +215,31 @@ class MainActivity : Activity() {
 
     private fun updateDateNavUi() {
         val today = DateHelper.today()
-        datePickerButton.text = DateHelper.formatDisplayDate(selectedDate)
-        val canNext = DateHelper.canGoNext(selectedDate, today)
+        datePickerButton.text = DateHelper.formatDisplayDate(learningDate)
+        val canNext = DateHelper.canGoNext(learningDate, today)
         nextDateButton.visibility = if (canNext) View.VISIBLE else View.INVISIBLE
         nextDateButton.isEnabled = canNext
-        swipeRefreshLayout.isEnabled = DateHelper.isToday(selectedDate, today)
+        swipeRefreshLayout.isEnabled = DateHelper.isToday(learningDate, today)
+    }
+
+    private fun createNavButton(label: String, onClick: () -> Unit) = TextView(this).apply {
+        text = label
+        textSize = 22f
+        setTextColor(Color.rgb(30, 30, 30))
+        setTypeface(typeface, android.graphics.Typeface.BOLD)
+        gravity = Gravity.CENTER
+        minimumWidth = dp(48)
+        minimumHeight = dp(48)
+        isClickable = true
+        isFocusable = true
+        setPadding(dp(16), dp(8), dp(16), dp(8))
+        setOnClickListener { onClick() }
+    }
+
+    private fun changeLearningDate(newDate: LocalDate) {
+        learningDate = newDate
+        updateDateNavUi()
+        loadLearningTimeForLearningDate()
     }
 
     private fun setNavButtonsEnabled(enabled: Boolean) {
@@ -257,7 +249,7 @@ class MainActivity : Activity() {
         datePickerButton.isEnabled = enabled
         datePickerButton.alpha = if (enabled) 1.0f else 0.3f
 
-        val canNext = DateHelper.canGoNext(selectedDate, DateHelper.today())
+        val canNext = DateHelper.canGoNext(learningDate, DateHelper.today())
         nextDateButton.isEnabled = enabled && canNext
         nextDateButton.alpha = if (enabled && canNext) 1.0f else 0.3f
     }
@@ -269,26 +261,23 @@ class MainActivity : Activity() {
             { _, year, month, dayOfMonth ->
                 val rawPickedDate = LocalDate.of(year, month + 1, dayOfMonth)
                 val pickedDate = if (rawPickedDate.isAfter(today)) today else rawPickedDate
-                if (pickedDate != selectedDate) {
-                    selectedDate = pickedDate
-                    updateDateNavUi()
-                    loadLearningTimeForSelectedDate()
+                if (pickedDate != learningDate) {
+                    changeLearningDate(pickedDate)
                 }
             },
-            selectedDate.year,
-            selectedDate.monthValue - 1,
-            selectedDate.dayOfMonth,
+            learningDate.year,
+            learningDate.monthValue - 1,
+            learningDate.dayOfMonth,
         )
         dialog.datePicker.maxDate = DateHelper.maxDateEpochMillis(today)
-        dialog.setButton(DialogInterface.BUTTON_NEUTRAL, "오늘") { _, _ ->
-            selectedDate = DateHelper.today()
-            updateDateNavUi()
-            loadLearningTimeForSelectedDate()
+        dialog.setButton(DialogInterface.BUTTON_NEUTRAL, "오늘") { d, _ ->
+            d.dismiss()
+            changeLearningDate(DateHelper.today())
         }
         dialog.show()
     }
 
-    private fun loadLearningTimeForSelectedDate() {
+    private fun loadLearningTimeForLearningDate() {
         val savedCredentials = CredentialStore(this).load()
         if (savedCredentials == null) {
             if (swipeRefreshLayout.isRefreshing) {
@@ -296,8 +285,15 @@ class MainActivity : Activity() {
             }
             askCredentials()
         } else {
-            loadLearningTime(savedCredentials, selectedDate)
+            loadLearningTime(savedCredentials, learningDate)
         }
+    }
+
+    private fun handleAuthCancelled() {
+        checkedAtView.text = "확인 취소"
+        progressBar.visibility = View.GONE
+        swipeRefreshLayout.isRefreshing = false
+        setNavButtonsEnabled(true)
     }
 
     private fun askCredentials(message: String? = null) {
@@ -330,21 +326,15 @@ class MainActivity : Activity() {
                 val email = emailInput.text.toString().trim()
                 val password = passwordInput.text.toString()
                 if (email.isBlank() || password.isBlank()) {
-                    checkedAtView.text = "확인 취소"
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                    setNavButtonsEnabled(true)
+                    handleAuthCancelled()
                 } else {
                     val credentials = Credentials(email, password)
                     CredentialStore(this).save(credentials)
-                    loadLearningTime(credentials, selectedDate)
+                    loadLearningTime(credentials, learningDate)
                 }
             }
             .setNegativeButton("취소") { _, _ ->
-                checkedAtView.text = "확인 취소"
-                progressBar.visibility = View.GONE
-                swipeRefreshLayout.isRefreshing = false
-                setNavButtonsEnabled(true)
+                handleAuthCancelled()
             }
             .show()
     }
