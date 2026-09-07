@@ -419,22 +419,27 @@ class MainActivity : Activity() {
                 setTextColor(Color.rgb(17, 17, 17))
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(
-                    0,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
-                    1f,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
                 )
             }
 
             val settingsButton = TextView(this).apply {
                 text = "⚙️"
-                textSize = 18f
+                textSize = 16f
                 contentDescription = "${child.name} 목표 설정"
                 if (outValue.resourceId != 0) {
                     setBackgroundResource(outValue.resourceId)
                 }
                 gravity = Gravity.CENTER
-                minimumWidth = dp(48)
-                minimumHeight = dp(48)
+                minimumWidth = dp(36)
+                minimumHeight = dp(36)
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ).apply {
+                    marginStart = dp(4)
+                }
                 isClickable = true
                 isFocusable = true
                 setOnClickListener {
