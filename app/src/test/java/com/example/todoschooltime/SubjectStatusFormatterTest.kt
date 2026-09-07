@@ -72,6 +72,18 @@ class SubjectStatusFormatterTest {
     }
 
     @Test
+    fun testFormatStatusWithCustomTargets() {
+        val subjects = listOf(
+            SubjectProgress("한글", 4),
+            SubjectProgress("수학", 0),
+            SubjectProgress("영어", 5),
+        )
+        val customTargets = mapOf("한글" to 4, "수학" to 0, "영어" to 10)
+        val status = SubjectStatusFormatter.formatStatus(subjects) { customTargets[it] ?: 5 }
+        assertEquals("✔ 한글 (4/4), ✔ 수학 (0/0), 영어 (5/10)", status)
+    }
+
+    @Test
     fun testFormatStatusEmptyList() {
         val status = SubjectStatusFormatter.formatStatus(emptyList())
         assertEquals("", status)

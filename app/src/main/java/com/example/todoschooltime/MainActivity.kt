@@ -8,15 +8,19 @@ import android.graphics.Color
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.text.InputFilter
 import android.text.InputType
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -37,6 +41,7 @@ import kotlin.math.roundToInt
 class MainActivity : Activity() {
     private var selectedDate: LocalDate = DateHelper.today()
     private val requestTracker = AsyncRequestTracker()
+    private val targetCountStore by lazy { TargetCountStore(this) }
     private var currentResult: LearningResult? = null
 
     private lateinit var rootLayout: LinearLayout
@@ -77,10 +82,9 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun buildUi() {
-        val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).roundToInt()
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
+    private fun buildUi() {
         rootLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.WHITE)
@@ -297,9 +301,6 @@ class MainActivity : Activity() {
     }
 
     private fun askCredentials(message: String? = null) {
-        val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).roundToInt()
-
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(24), dp(8), dp(24), dp(0))
@@ -395,8 +396,8 @@ class MainActivity : Activity() {
     }
 
     private fun renderChildren(result: LearningResult) {
-        val density = resources.displayMetrics.density
-        fun dp(value: Int) = (value * density).roundToInt()
+        val outValue = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
 
         childrenContainer.removeAllViews()
         result.children.forEachIndexed { index, child ->
@@ -407,13 +408,47 @@ class MainActivity : Activity() {
                 }
             }
 
-            // 1행: 아이 이름
+            // 1행: 아이 이름 + ⚙️ 설정 버튼
+            val headerLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                )
+            }
+
             val nameView = TextView(this).apply {
                 text = child.name
                 textSize = 22f
                 setTextColor(Color.rgb(17, 17, 17))
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f,
+                )
             }
+
+            val settingsButton = TextView(this).apply {
+                text = "⚙️"
+                textSize = 18f
+                contentDescription = "${child.name} 목표 설정"
+                if (outValue.resourceId != 0) {
+                    setBackgroundResource(outValue.resourceId)
+                }
+                gravity = Gravity.CENTER
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    showTargetCountDialog(child)
+                }
+            }
+
+            headerLayout.addView(nameView)
+            headerLayout.addView(settingsButton)
 
             // 2행: ${minutes}분
             val minutesView = TextView(this).apply {
@@ -424,8 +459,11 @@ class MainActivity : Activity() {
                 setPadding(0, dp(4), 0, 0)
             }
 
-            // 3행: 과목 현황
-            val statusText = SubjectStatusFormatter.formatStatus(child.subjects)
+            // 3행: 과목 현황 (아이별 1회 목표 개수 조회로 파싱 오버헤드 최적화)
+            val childTargets = targetCountStore.getTargetCounts(child.name)
+            val statusText = SubjectStatusFormatter.formatStatus(child.subjects) { subjectName ->
+                childTargets[subjectName] ?: SubjectStatusFormatter.defaultTargetCount(subjectName)
+            }
             val statusView = TextView(this).apply {
                 text = statusText
                 textSize = 15f
@@ -433,13 +471,106 @@ class MainActivity : Activity() {
                 setPadding(0, dp(4), 0, 0)
             }
 
-            cardLayout.addView(nameView)
+            cardLayout.addView(headerLayout)
             cardLayout.addView(minutesView)
             if (statusText.isNotEmpty()) {
                 cardLayout.addView(statusView)
             }
 
             childrenContainer.addView(cardLayout)
+        }
+    }
+
+    private fun showTargetCountDialog(child: ChildLearningInfo) {
+        val savedCounts = targetCountStore.getTargetCounts(child.name)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(24), dp(16), dp(24), dp(8))
+        }
+
+        val inputFields = mutableMapOf<String, EditText>()
+
+        if (child.subjects.isEmpty()) {
+            val emptyNotice = TextView(this).apply {
+                text = "구독 중인 과목이 없습니다."
+                textSize = 15f
+                setTextColor(Color.rgb(100, 100, 100))
+                setPadding(0, dp(8), 0, dp(8))
+            }
+            container.addView(emptyNotice)
+        } else {
+            child.subjects.forEachIndexed { index, subject ->
+                val rowLayout = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(4), 0, dp(4))
+                }
+
+                val labelView = TextView(this).apply {
+                    text = subject.name
+                    textSize = 16f
+                    setTextColor(Color.rgb(30, 30, 30))
+                    layoutParams = LinearLayout.LayoutParams(
+                        dp(56),
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                    )
+                }
+
+                val defaultTarget = SubjectStatusFormatter.defaultTargetCount(subject.name)
+                val savedTarget = savedCounts[subject.name]
+
+                val isLast = index == child.subjects.size - 1
+                val editInput = EditText(this).apply {
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    filters = arrayOf(InputFilter.LengthFilter(2))
+                    imeOptions = if (isLast) EditorInfo.IME_ACTION_DONE else EditorInfo.IME_ACTION_NEXT
+                    hint = defaultTarget.toString()
+                    if (savedTarget != null) {
+                        setText(savedTarget.toString())
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        1f,
+                    )
+                }
+
+                inputFields[subject.name] = editInput
+                rowLayout.addView(labelView)
+                rowLayout.addView(editInput)
+                container.addView(rowLayout)
+            }
+        }
+
+        val dialogScrollView = ScrollView(this).apply {
+            isFillViewport = true
+            addView(container)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("${child.name} 목표 설정")
+            .setView(dialogScrollView)
+            .setPositiveButton("저장", null)
+            .setNegativeButton("취소", null)
+            .create()
+
+        dialog.show()
+
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val newTargets = mutableMapOf<String, Int>()
+            for ((subjectName, editText) in inputFields) {
+                val text = editText.text.toString()
+                val parsed = TargetCountValidator.parse(text)
+                if (parsed == null) {
+                    Toast.makeText(this, "0부터 99까지의 숫자를 입력해주세요.", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                newTargets[subjectName] = parsed
+            }
+
+            targetCountStore.saveTargetCounts(child.name, newTargets)
+            currentResult?.let { renderChildren(it) }
+            dialog.dismiss()
         }
     }
 }

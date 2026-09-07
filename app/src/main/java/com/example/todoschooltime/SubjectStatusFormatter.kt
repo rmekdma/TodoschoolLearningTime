@@ -1,14 +1,11 @@
 package com.example.todoschooltime
 
 object SubjectStatusFormatter {
-    val DEFAULT_TARGET_COUNTS: Map<String, Int> = mapOf(
-        "한글" to 6,
-        "수학" to 5,
-        "영어" to 8,
-    )
+    val DEFAULT_TARGET_COUNTS: Map<String, Int>
+        get() = TargetDefaults.DEFAULT_COUNTS
 
     fun defaultTargetCount(subjectName: String): Int =
-        DEFAULT_TARGET_COUNTS[subjectName] ?: 5
+        TargetDefaults.defaultCount(subjectName)
 
     fun formatSubject(name: String, count: Int, targetCount: Int): String {
         val completed = count >= targetCount
