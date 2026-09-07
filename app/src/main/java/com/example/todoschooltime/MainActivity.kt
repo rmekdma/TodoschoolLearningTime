@@ -481,7 +481,7 @@ private class TodoSchoolClient {
                 path = subject.usersPath,
                 body = JSONObject().put("user", JSONObject().put("accountId", accountId)),
                 token = token,
-            ) as? JSONArray ?: throw IllegalStateException("${subject.name}: 사용자 목록 형식이 예상과 다릅니다.")
+            ) as? JSONArray ?: throw IllegalStateException("${subject.name}: 아이 목록 형식이 예상과 다릅니다.")
 
             for (i in 0 until users.length()) {
                 val user = users.getJSONObject(i)
