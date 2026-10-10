@@ -13,6 +13,546 @@ import org.junit.Test
 
 class LearningMonitorEngineTest {
     @Test
+    fun regularReportsWaitForScreenForegroundAndTheSharedStartBasedInterval() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 4, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertEquals(listOf(30_000L), fixture.timers.scheduledDelays)
+
+        fixture.clock.advanceBy(59_999L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+
+        fixture.clock.advanceBy(1L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "영어"), fixture.repository.reportedPairs)
+    }
+
+    @Test
+    fun screenOffCancelsCadenceAndBlocksRegularReportsUntilScreenReturns() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        assertEquals(listOf(30_000L), fixture.timers.scheduledDelays)
+
+        fixture.engine.screenOnChanged(false)
+        fixture.commands.drain()
+        fixture.clock.advanceBy(120_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertEquals(listOf(30_000L), fixture.timers.scheduledDelays)
+
+        fixture.engine.screenOnChanged(true)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+    }
+
+    @Test
+    fun switchingForegroundSubjectsDoesNotResetTheSharedCadence() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+
+        fixture.clock.advanceBy(20_000L)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(10_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        assertEquals(listOf(30_000L, 30_000L, 30_000L), fixture.timers.scheduledDelays)
+    }
+
+    @Test
+    fun aSlowRegularCycleBlocksOverlappingWorkAndRunsAtMostOneDueFollowUp() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+
+        assertEquals(1, fixture.workers.size())
+        fixture.clock.advanceBy(120_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        assertEquals("A running cycle must not queue another sign-in or report", 1, fixture.workers.size())
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학", "철수" to "수학"), fixture.repository.reportedPairs)
+        assertEquals(3, fixture.repository.signInCalls)
+        assertEquals(30_000L, fixture.timers.scheduledDelays.last())
+    }
+
+    @Test
+    fun anUnboundedIntervalUsesBoundedTimerWakeupsWithoutOverflowOrPolling() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        val hugeInterval = BigInteger.TEN.pow(100)
+        fixture.engine.setIntervalMinutes("account-A", hugeInterval)
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+
+        repeat(5) {
+            fixture.clock.advanceBy(30_000L)
+            fixture.timers.runDue()
+            fixture.commands.drain()
+            assertTrue(fixture.repository.reportedPairs.isEmpty())
+        }
+
+        assertEquals(hugeInterval, fixture.engine.snapshot().intervalMinutes)
+        assertTrue(fixture.timers.scheduledDelays.isNotEmpty())
+        assertTrue(fixture.timers.scheduledDelays.all { it in 1L..30_000L })
+        assertEquals(1, fixture.repository.signInCalls)
+    }
+
+    @Test
+    fun completeAndZeroTargetSubjectsDoNotStartRegularCycles() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 100, 0))
+            },
+            targets = mapOf("영어" to 0),
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        val signInsAfterBaseline = fixture.repository.signInCalls
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todohangeul")
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+
+        fixture.clock.advanceBy(120_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertEquals(signInsAfterBaseline, fixture.repository.signInCalls)
+        assertTrue(fixture.timers.scheduledDelays.isEmpty())
+        assertEquals(MonitorSubjectStatus.COMPLETE,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("영어").status)
+    }
+
+    @Test
+    fun serviceReattachRequiresANewForegroundEventBeforeRegularPolling() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        assertEquals(listOf(30_000L), fixture.timers.scheduledDelays)
+
+        fixture.engine.detachServiceLease()
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        fixture.engine.attachServiceLease()
+        fixture.engine.screenOnChanged(true)
+        fixture.commands.drain()
+        fixture.clock.advanceBy(120_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertEquals(listOf(30_000L), fixture.timers.scheduledDelays)
+
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "영어"), fixture.repository.reportedPairs)
+    }
+
+    @Test
+    fun initialMetadataFailureConsumesCadenceAndRetriesOnlyTheCurrentForegroundSubject() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, if (subject == "영어") 8 else 2, 0))
+            },
+        )
+        fixture.repository.enqueueCatalogResult(
+            LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("catalog unavailable")),
+        )
+        fixture.repository.enqueueCatalogResult(
+            LearningRepositoryResult.Success(
+                LearningCatalog(
+                    childOrder = listOf("철수"),
+                    subscriptions = listOf("한글", "수학", "영어").map {
+                        ChildSubjectSubscription("철수", it, "철수-$it")
+                    },
+                ),
+            ),
+        )
+        fixture.startAndRegister("철수")
+
+        val initial = fixture.engine.snapshot().children.getValue("철수")
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertTrue(initial.subjects.values.all { it.status == MonitorSubjectStatus.CONFIRMATION_PENDING })
+        assertEquals("catalog unavailable", initial.error)
+
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "영어"), fixture.repository.reportedPairs)
+        val retried = fixture.engine.snapshot().children.getValue("철수")
+        assertNull(retried.error)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING,
+            retried.subjects.getValue("한글").status)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING,
+            retried.subjects.getValue("수학").status)
+        assertEquals(MonitorSubjectStatus.COMPLETE, retried.subjects.getValue("영어").status)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun aNewCrossingUpdatesTheChildNotificationWithTheExactNewestSubjectAndAllStatuses() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 6, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 4, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.notifications.updates.clear()
+        fixture.repository.clearReports()
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.Success(SubjectReport("철수", "수학", 5, 0)),
+        )
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        val completion = fixture.notifications.updates.single { it.completion }
+        assertEquals("수학", completion.completionSubjectName)
+        assertEquals("철수 · 수학 완료", MonitorNotificationText.title(completion.child, completion.completionSubjectName))
+        assertEquals(MonitorSubjectStatus.COMPLETE, completion.child.subjects.getValue("한글").status)
+        assertEquals(MonitorSubjectStatus.COMPLETE, completion.child.subjects.getValue("수학").status)
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, completion.child.subjects.getValue("영어").status)
+        assertTrue(MonitorNotificationText.body(completion.child).contains("✔ 한글"))
+        assertTrue(MonitorNotificationText.body(completion.child).contains("✔ 수학"))
+        assertTrue(MonitorNotificationText.body(completion.child).contains("영어 미달성 2/8"))
+
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "영어",
+            LearningRepositoryResult.Success(SubjectReport("철수", "영어", 3, 0)),
+        )
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+        val silentProgress = fixture.notifications.updates.last()
+        assertFalse(silentProgress.completion)
+        assertEquals("수학", silentProgress.completionSubjectName)
+        assertEquals("철수 · 수학 완료", MonitorNotificationText.title(
+            silentProgress.child,
+            silentProgress.completionSubjectName,
+        ))
+    }
+
+    @Test
+    fun regularReportFailurePreservesLastCountAndCheckedTimeWithoutCompletingThePair() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 3, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("temporary error")),
+        )
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val child = fixture.engine.snapshot().children.getValue("철수")
+        val math = child.subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, math.status)
+        assertEquals(3, math.activityCount)
+        assertEquals("마지막 확인 10:15", math.checkedAt)
+        assertEquals("마지막 확인 10:15", child.lastCheckedAt)
+        assertEquals("temporary error", math.error)
+        assertFalse(fixture.notifications.updates.last().completion)
+    }
+
+    @Test
+    fun mismatchedRegularReportPreservesLastValidCountAndCheckedTime() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 3, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.clock.checkedAtValue = "마지막 확인 10:16"
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.Success(SubjectReport("다른 아이", "수학", 5, 0)),
+        )
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val child = fixture.engine.snapshot().children.getValue("철수")
+        val math = child.subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, math.status)
+        assertEquals(3, math.activityCount)
+        assertEquals("마지막 확인 10:15", math.checkedAt)
+        assertEquals("마지막 확인 10:15", child.lastCheckedAt)
+        assertEquals("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다.", math.error)
+        assertFalse(fixture.notifications.updates.last().completion)
+    }
+
+    @Test
+    fun anInitialPairFailureConsumesTheCommonCadenceBeforeItsFirstRetry() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("initial temporary error")),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").status)
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+    }
+
+    @Test
+    fun unregisteringAnotherChildDuringAnInFlightRegularPairPreventsItsQueuedPairRequest() {
+        val firstReportStarted = CountDownLatch(1)
+        val releaseFirstReport = CountDownLatch(1)
+        val gateEnabled = AtomicBoolean(false)
+        val gateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+            reportGate = { subscription ->
+                if (gateEnabled.get() && subscription.childName == "철수" && subscription.subjectName == "수학" &&
+                    gateUsed.compareAndSet(false, true)
+                ) {
+                    firstReportStarted.countDown()
+                    check(releaseFirstReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.engine.registerChild("account-A", "영희")
+        fixture.commands.drain()
+        fixture.drainAll()
+        gateEnabled.set(true)
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+
+        val firstReportWorker = fixture.startWorkerUntil(firstReportStarted)
+        fixture.engine.unregisterChild("account-A", "영희")
+        fixture.commands.drain()
+        releaseFirstReport.countDown()
+        firstReportWorker.join(5_000)
+        assertFalse("The in-flight report should finish after the unregister", firstReportWorker.isAlive)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        assertEquals(setOf("철수"), fixture.engine.snapshot().registeredChildren)
+    }
+
+    @Test
+    fun switchingForegroundDuringAnInFlightPairPreventsTheOldSubjectFromReleasingAnotherChild() {
+        val firstReportStarted = CountDownLatch(1)
+        val releaseFirstReport = CountDownLatch(1)
+        val gateEnabled = AtomicBoolean(false)
+        val gateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+            reportGate = { subscription ->
+                if (gateEnabled.get() && subscription.childName == "철수" && subscription.subjectName == "수학" &&
+                    gateUsed.compareAndSet(false, true)
+                ) {
+                    firstReportStarted.countDown()
+                    check(releaseFirstReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.engine.registerChild("account-A", "영희")
+        fixture.commands.drain()
+        fixture.drainAll()
+        gateEnabled.set(true)
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+
+        val firstReportWorker = fixture.startWorkerUntil(firstReportStarted)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        releaseFirstReport.countDown()
+        firstReportWorker.join(5_000)
+        assertFalse("The in-flight report should finish after the foreground switch", firstReportWorker.isAlive)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+    }
+
+    @Test
     fun registrationSetsSilentPerSubjectBaselinesAndKeepsPartialFailureUnknown() {
         val fixture = Fixture(
             reports = mapOf(
@@ -313,6 +853,8 @@ class LearningMonitorEngineTest {
         val commands = ManualQueue()
         val workers = ManualQueue()
         val ui = ManualQueue()
+        val clock = FakeClock()
+        val timers = ManualTimerFactory(clock)
         val repository = FakeRepository(reports, catalogFailure, signedInAccount, reportGate)
         val notifications = FakeNotifications()
         val store = FakeMonitorStore(storedChildren)
@@ -320,10 +862,8 @@ class LearningMonitorEngineTest {
             commandQueue = commands,
             workerQueue = workers,
             callbackQueue = ui,
-            clock = object : MonitorClock {
-                override fun today(): LocalDate = LocalDate.of(2026, 10, 10)
-                override fun checkedAt(): String = "마지막 확인 10:15"
-            },
+            clock = clock,
+            timerFactory = timers,
             store = store,
             repository = repository,
             targetProvider = MonitorTargetProvider { child, subject ->
@@ -389,6 +929,41 @@ class LearningMonitorEngineTest {
         }
     }
 
+    private class FakeClock : MonitorClock {
+        private var nowMillis = 0L
+        override fun today(): LocalDate = LocalDate.of(2026, 10, 10)
+        var checkedAtValue = "마지막 확인 10:15"
+        override fun checkedAt(): String = checkedAtValue
+        override fun monotonicMillis(): Long = nowMillis
+        fun advanceBy(millis: Long) { nowMillis += millis }
+    }
+
+    private class ManualTimerFactory(private val clock: FakeClock) : MonitorTimerFactory {
+        private data class PendingTimer(
+            val dueAtMillis: Long,
+            val callback: () -> Unit,
+            var cancelled: Boolean = false,
+        )
+
+        private val timers = mutableListOf<PendingTimer>()
+        val scheduledDelays = mutableListOf<Long>()
+
+        override fun schedule(delayMillis: Long, callback: () -> Unit): MonitorTimer {
+            scheduledDelays += delayMillis
+            val pending = PendingTimer(clock.monotonicMillis() + delayMillis, callback)
+            timers += pending
+            return MonitorTimer { pending.cancelled = true }
+        }
+
+        fun runDue() {
+            while (true) {
+                val next = timers.firstOrNull { !it.cancelled && it.dueAtMillis <= clock.monotonicMillis() } ?: return
+                timers.remove(next)
+                next.callback()
+            }
+        }
+    }
+
     private class FakeRepository(
         private val reports: Map<String, LearningRepositoryResult<SubjectReport>>,
         private val catalogFailure: Exception?,
@@ -398,23 +973,40 @@ class LearningMonitorEngineTest {
         val reportedSubjects = mutableListOf<String>()
         val reportedPairs = mutableListOf<Pair<String, String>>()
         val requestedDates = mutableListOf<LocalDate>()
+        var signInCalls = 0
+        private val catalogResults = mutableListOf<LearningRepositoryResult<LearningCatalog>>()
+        private val reportResults = mutableMapOf<Pair<String, String>, MutableList<LearningRepositoryResult<SubjectReport>>>()
 
-        override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> =
-            LearningRepositoryResult.Success(LearningSession(signedInAccount, "token"))
+        fun clearReports() {
+            reportedSubjects.clear()
+            reportedPairs.clear()
+            requestedDates.clear()
+        }
 
-        override fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> =
-            if (catalogFailure == null) LearningRepositoryResult.Success(
-                LearningCatalog(
-                    childOrder = listOf("철수", "영희"),
-                    subscriptions = listOf("한글", "수학", "영어").map {
-                        ChildSubjectSubscription("철수", it, "철수-$it")
-                    } + listOf("한글", "수학", "영어").map {
-                        ChildSubjectSubscription("영희", it, "영희-$it")
-                    },
-                ),
-            ) else LearningRepositoryResult.TemporaryFailure(
+        fun enqueueCatalogResult(result: LearningRepositoryResult<LearningCatalog>) {
+            catalogResults += result
+        }
+
+        fun enqueueReportResult(
+            childName: String,
+            subjectName: String,
+            result: LearningRepositoryResult<SubjectReport>,
+        ) {
+            reportResults.getOrPut(childName to subjectName, ::mutableListOf).add(result)
+        }
+
+        override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> {
+            signInCalls += 1
+            return LearningRepositoryResult.Success(LearningSession(signedInAccount, "token"))
+        }
+
+        override fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> {
+            if (catalogResults.isNotEmpty()) return catalogResults.removeAt(0)
+            return if (catalogFailure == null) LearningRepositoryResult.Success(defaultCatalog())
+            else LearningRepositoryResult.TemporaryFailure(
                 catalogFailure.let { LearningRepositoryException(it.message.orEmpty(), it) },
             )
+        }
 
         override fun loadSubjectReport(
             session: LearningSession,
@@ -425,17 +1017,38 @@ class LearningMonitorEngineTest {
             reportedPairs += subscription.childName to subscription.subjectName
             requestedDates += date
             reportGate(subscription)
-            return reports[subscription.subjectName]
+            val queued = reportResults[subscription.childName to subscription.subjectName]
+            val nextQueued = queued?.takeIf { it.isNotEmpty() }?.removeAt(0)
+            return nextQueued ?: reports[subscription.subjectName]
                 ?: LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("report unavailable"))
         }
+
+        private fun defaultCatalog() = LearningCatalog(
+            childOrder = listOf("철수", "영희"),
+            subscriptions = listOf("한글", "수학", "영어").map {
+                ChildSubjectSubscription("철수", it, "철수-$it")
+            } + listOf("한글", "수학", "영어").map {
+                ChildSubjectSubscription("영희", it, "영희-$it")
+            },
+        )
     }
 
     private class FakeNotifications : ChildNotificationSink {
-        data class Update(val accountId: String, val child: MonitorChildSnapshot, val completion: Boolean)
+        data class Update(
+            val accountId: String,
+            val child: MonitorChildSnapshot,
+            val completion: Boolean,
+            val completionSubjectName: String?,
+        )
         val updates = mutableListOf<Update>()
         val cancellations = mutableListOf<Pair<String, String>>()
-        override fun showStatus(accountId: String, child: MonitorChildSnapshot, completion: Boolean) {
-            updates += Update(accountId, child, completion)
+        override fun showStatus(
+            accountId: String,
+            child: MonitorChildSnapshot,
+            completion: Boolean,
+            completionSubjectName: String?,
+        ) {
+            updates += Update(accountId, child, completion, completionSubjectName)
         }
         override fun cancel(accountId: String, childName: String) { cancellations += accountId to childName }
     }

@@ -26,14 +26,14 @@ class AndroidChildNotificationSink(
         }
     }
 
-    override fun showStatus(accountId: String, child: MonitorChildSnapshot, completion: Boolean) {
+    override fun showStatus(
+        accountId: String,
+        child: MonitorChildSnapshot,
+        completion: Boolean,
+        completionSubjectName: String?,
+    ) {
         val body = MonitorNotificationText.body(child)
-        val title = if (completion) {
-            val latest = child.subjects.values.firstOrNull { it.status == MonitorSubjectStatus.COMPLETE }?.name
-            if (latest == null) "${child.childName} 학습 상태" else "${child.childName} · $latest 완료"
-        } else {
-            "${child.childName} 학습 상태"
-        }
+        val title = MonitorNotificationText.title(child, completionSubjectName)
         val notification: Notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher)
             .setContentTitle(title)
@@ -43,6 +43,7 @@ class AndroidChildNotificationSink(
             .setOngoing(true)
             .setOnlyAlertOnce(!completion)
             .setSilent(!completion)
+            .setDefaults(if (completion) Notification.DEFAULT_SOUND else 0)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         try {

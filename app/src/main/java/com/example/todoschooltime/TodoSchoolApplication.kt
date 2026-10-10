@@ -3,6 +3,7 @@ package com.example.todoschooltime
 import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import java.util.concurrent.Executors
 
 class TodoSchoolApplication : Application() {
@@ -21,6 +22,9 @@ class TodoSchoolApplication : Application() {
         val workerExecutor = Executors.newCachedThreadPool { runnable ->
             Thread(runnable, "learning-monitor-io").apply { isDaemon = true }
         }
+        val timerExecutor = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "learning-monitor-timer").apply { isDaemon = true }
+        }
         val mainHandler = Handler(Looper.getMainLooper())
         val monitorPreferences = getSharedPreferences(MONITOR_PREFERENCES, MODE_PRIVATE)
         val notificationIdPreferences = getSharedPreferences(NOTIFICATION_ID_PREFERENCES, MODE_PRIVATE)
@@ -33,7 +37,9 @@ class TodoSchoolApplication : Application() {
             clock = object : MonitorClock {
                 override fun today() = DateHelper.today()
                 override fun checkedAt() = DateHelper.formatCheckedAt(DateHelper.nowZoned())
+                override fun monotonicMillis() = SystemClock.elapsedRealtime()
             },
+            timerFactory = ScheduledMonitorTimerFactory(timerExecutor),
             store = SharedPreferencesMonitorStore(monitorPreferences),
             repository = LearningReportRepository(),
             targetProvider = MonitorTargetProvider { childName, subjectName ->
