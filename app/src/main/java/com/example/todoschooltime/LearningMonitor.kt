@@ -105,6 +105,7 @@ interface MonitorClock {
     fun today(): LocalDate
     fun checkedAt(): String
     fun monotonicMillis(): Long = System.nanoTime() / 1_000_000L
+    fun millisUntilNextSeoulMidnight(): Long = DateHelper.millisUntilNextSeoulMidnight()
 }
 
 fun interface MonitorTimer {
@@ -156,6 +157,7 @@ interface LearningMonitor {
     fun registerChild(accountId: String, childName: String)
     fun unregisterChild(accountId: String, childName: String)
     fun setIntervalMinutes(accountId: String, minutes: BigInteger)
+    fun setTargetCounts(accountId: String, childName: String, targets: Map<String, Int>)
     fun reauthenticate(accountId: String, email: String, password: String)
 }
 
@@ -178,6 +180,7 @@ class LearningMonitorEngine internal constructor(
     private val targetProvider: MonitorTargetProvider,
     private val notificationSink: ChildNotificationSink,
     private val executionStatusProbe: MonitorExecutionStatusProbe? = null,
+    private val dateTimerFactory: MonitorTimerFactory = timerFactory,
 ) : LearningMonitor {
     private data class Credentials(val email: String, val password: String)
 
@@ -187,6 +190,9 @@ class LearningMonitorEngine internal constructor(
         var baselineStarted: Boolean = false,
         var latestCompletionSubjectName: String? = null,
         var baselineBoundarySequence: Long = 0L,
+        var targetRevision: Long = 0L,
+        val validatedSubjects: MutableSet<String> = mutableSetOf(),
+        val commandedTargets: MutableMap<String, Int> = snapshot.subjects.mapValues { it.value.targetCount }.toMutableMap(),
     )
 
     private class AccountState(
@@ -207,8 +213,11 @@ class LearningMonitorEngine internal constructor(
         val accountId: String,
         val childName: String,
         val generation: Long,
+        val targetRevision: Long,
         val accountEpoch: Long,
         val authEpoch: Long,
+        val dateRevision: Long,
+        val reportDate: LocalDate,
         val baselineBoundarySequence: Long,
         val availableCredentials: Credentials,
     ) {
@@ -222,6 +231,7 @@ class LearningMonitorEngine internal constructor(
     private data class RegularPair(
         val subscription: ChildSubjectSubscription,
         val registrationGeneration: Long,
+        val targetRevision: Long,
         val targetCount: Int,
     )
 
@@ -233,6 +243,8 @@ class LearningMonitorEngine internal constructor(
         val foregroundSubject: String,
         val credentials: Credentials,
         val registrationGenerations: Map<String, Long>,
+        val dateRevision: Long,
+        val reportDate: LocalDate,
     ) {
         var session: LearningSession? = null
         var pairs: List<RegularPair> = emptyList()
@@ -262,6 +274,10 @@ class LearningMonitorEngine internal constructor(
     private var cadenceTimer: MonitorTimer? = null
     private var cadenceTimerGeneration: Long = 0L
     private var scheduledTimerCycleStart: Long? = null
+    private var monitoringDate: LocalDate = clock.today()
+    private var monitoringDateRevision: Long = 0L
+    private var dateTimer: MonitorTimer? = null
+    private var dateTimerGeneration: Long = 0L
     @Volatile
     private var runtimeEligibilityRevision: Long = 0L
 
@@ -397,9 +413,92 @@ class LearningMonitorEngine internal constructor(
         }
     }
 
+    override fun setTargetCounts(accountId: String, childName: String, targets: Map<String, Int>) {
+        require(accountId.isNotBlank())
+        require(childName.isNotBlank())
+        require(targets.values.all { it >= 0 }) { "목표 개수는 0 이상이어야 합니다." }
+        val requestedTargets = targets.toMap()
+        commandQueue.enqueue {
+            if (accountId != activeAccountId) return@enqueue
+            refreshMonitoringDate()
+            var changedAnyTarget = false
+            var restartBaseline = false
+            val state = accounts[accountId]
+            if (state == null) return@enqueue
+            run {
+                val child = state.registrations[childName] ?: return@enqueue
+                val subjects = LinkedHashMap<String, MonitorSubjectSnapshot>()
+                var changedThisChild = false
+                child.snapshot.subjects.forEach { (subjectName, previous) ->
+                    val target = requestedTargets[subjectName]
+                        ?: targetProvider.targetCount(childName, subjectName).coerceAtLeast(0)
+                    val previousCommandedTarget = child.commandedTargets[subjectName] ?: previous.targetCount
+                    if (target == previousCommandedTarget && target == previous.targetCount) {
+                        subjects[subjectName] = previous
+                    } else {
+                        changedThisChild = true
+                        child.commandedTargets[subjectName] = target
+                        subjects[subjectName] = when {
+                            target == 0 -> previous.copy(
+                                status = MonitorSubjectStatus.COMPLETE,
+                                targetCount = 0,
+                            )
+                            previous.activityCount != null && subjectName in child.validatedSubjects -> previous.copy(
+                                status = if (previous.activityCount >= target) {
+                                    MonitorSubjectStatus.COMPLETE
+                                } else {
+                                    MonitorSubjectStatus.BELOW_TARGET
+                                },
+                                targetCount = target,
+                            )
+                            else -> previous.copy(
+                                status = MonitorSubjectStatus.CONFIRMATION_PENDING,
+                                targetCount = target,
+                            )
+                        }
+                    }
+                }
+                if (!changedThisChild) return@run
+
+                changedAnyTarget = true
+                child.targetRevision += 1L
+                val baseline = baselineRuns.remove(BaselineKey(accountId, childName))
+                if (baseline != null) {
+                    baseline.invalidated = true
+                    child.baselineStarted = false
+                    restartBaseline = true
+                }
+                child.snapshot = child.snapshot.copy(
+                    subjects = subjects,
+                    error = aggregateChildError(subjects, state.metadataError),
+                )
+                showStatus(accountId, child)
+                if (accountId == activeAccountId) publish()
+            }
+
+            if (changedAnyTarget) {
+                syncDateEvaluationTimer()
+                if (restartBaseline) startUnattemptedBaselines()
+                maybeStartRegularCycle()
+            }
+        }
+    }
+
+    /** Rechecks the Seoul monitoring date from Activity resume and runtime date-change signals. */
+    internal fun reevaluateMonitoringDate() {
+        commandQueue.enqueue {
+            val changed = refreshMonitoringDate()
+            if (!changed) {
+                rescheduleDateEvaluationTimer()
+                maybeStartRegularCycle()
+            }
+        }
+    }
+
     /** AccessibilityService attach/detach is an execution lease, never engine ownership. */
     internal fun attachServiceLease() {
         commandQueue.enqueue {
+            if (!refreshMonitoringDate()) rescheduleDateEvaluationTimer()
             if (!serviceLeaseAttached) {
                 serviceLeaseAttached = true
                 foregroundPackageName = null
@@ -522,6 +621,7 @@ class LearningMonitorEngine internal constructor(
                 child.generation = generation
                 child.baselineStarted = false
                 child.baselineBoundarySequence = lastCommittedDispatchSequence
+                child.validatedSubjects.clear()
             }
         }
         cancelUnreleasedBaselines()
@@ -559,6 +659,7 @@ class LearningMonitorEngine internal constructor(
             child.baselineBoundarySequence = boundarySequence
             child.baselineStarted = false
             child.latestCompletionSubjectName = null
+            child.validatedSubjects.clear()
             val subjects = LinkedHashMap<String, MonitorSubjectSnapshot>()
             child.snapshot.subjects.forEach { (subjectName, previous) ->
                 val target = targetProvider.targetCount(childName, subjectName).coerceAtLeast(0)
@@ -608,6 +709,7 @@ class LearningMonitorEngine internal constructor(
     }
 
     private fun startInitialBaseline(accountId: String, childName: String) {
+        if (refreshMonitoringDate()) return
         if (activeAccountId != accountId || !executionReady(accountId) || activeRegularRun != null) return
         val availableCredentials = credentials[accountId] ?: return
         val state = accounts[accountId] ?: return
@@ -621,8 +723,11 @@ class LearningMonitorEngine internal constructor(
             accountId = accountId,
             childName = childName,
             generation = child.generation,
+            targetRevision = child.targetRevision,
             accountEpoch = accountEpoch,
             authEpoch = state.authEpoch,
+            dateRevision = monitoringDateRevision,
+            reportDate = monitoringDate,
             baselineBoundarySequence = child.baselineBoundarySequence,
             availableCredentials = availableCredentials,
         )
@@ -703,6 +808,7 @@ class LearningMonitorEngine internal constructor(
         while (run.nextSubscriptionIndex < run.subscriptions.size) {
             val subscription = run.subscriptions[run.nextSubscriptionIndex++]
             val target = targetProvider.targetCount(run.childName, subscription.subjectName).coerceAtLeast(0)
+            val targetRevision = child.targetRevision
             val existing = child.snapshot.subjects[subscription.subjectName]
             if (target == 0 || (existing != null && existing.targetCount == target &&
                     existing.status != MonitorSubjectStatus.CONFIRMATION_PENDING)) {
@@ -712,7 +818,7 @@ class LearningMonitorEngine internal constructor(
             releaseBaselineIo(
                 run,
                 subjectPair = true,
-                operation = { repository.loadSubjectReport(session, subscription, clock.today()) },
+                operation = { repository.loadSubjectReport(session, subscription, run.reportDate) },
                 onSuccess = { result ->
                     val validated = when (result) {
                         is LearningRepositoryResult.Success -> if (
@@ -723,13 +829,14 @@ class LearningMonitorEngine internal constructor(
                         is LearningRepositoryResult.TemporaryFailure -> result
                         is LearningRepositoryResult.AuthenticationDenied -> result
                     }
-                    applyBaselinePair(run, subscription, target, validated)
+                    applyBaselinePair(run, subscription, targetRevision, target, validated)
                     loadNextBaselinePair(run)
                 },
                 onFailure = { exception ->
                     applyBaselinePair(
                         run,
                         subscription,
+                        targetRevision,
                         target,
                         LearningRepositoryResult.TemporaryFailure(
                             LearningRepositoryException(exception.message ?: "학습 결과를 확인하지 못했습니다.", exception),
@@ -746,15 +853,19 @@ class LearningMonitorEngine internal constructor(
     private fun applyBaselinePair(
         run: BaselineRun,
         subscription: ChildSubjectSubscription,
+        targetRevision: Long,
         target: Int,
         result: LearningRepositoryResult<SubjectReport>,
     ) {
         if (!baselineCanContinue(run)) return
+        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return
+        if (child.targetRevision != targetRevision ||
+            targetProvider.targetCount(run.childName, subscription.subjectName).coerceAtLeast(0) != target
+        ) return
         if (result is LearningRepositoryResult.AuthenticationDenied) {
             pauseForAuthenticationDenied(run.accountId)
             return
         }
-        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return
         if (child.baselineBoundarySequence != run.baselineBoundarySequence ||
             run.lastDispatchSequence <= run.baselineBoundarySequence
         ) return
@@ -762,6 +873,7 @@ class LearningMonitorEngine internal constructor(
         val checkedAt = if (result is LearningRepositoryResult.Success) clock.checkedAt() else child.snapshot.lastCheckedAt
         val subject = when (result) {
             is LearningRepositoryResult.Success -> {
+                child.validatedSubjects += subscription.subjectName
                 val report = result.value
                 MonitorSubjectSnapshot(
                     name = subscription.subjectName,
@@ -805,6 +917,7 @@ class LearningMonitorEngine internal constructor(
         onFailure: (Exception) -> Unit,
         subjectPair: Boolean = false,
     ) {
+        if (refreshMonitoringDate()) return
         if (!baselineCanContinue(run)) return
         if (subjectPair) run.lastDispatchSequence = nextDispatchSequence()
         val permissionRevision = runtimePermissionRevision
@@ -840,6 +953,7 @@ class LearningMonitorEngine internal constructor(
     }
 
     private fun maybeStartRegularCycle() {
+        if (refreshMonitoringDate()) return
         if (activeRegularRun != null) {
             cancelCadenceTimer()
             return
@@ -886,6 +1000,8 @@ class LearningMonitorEngine internal constructor(
             foregroundSubject = subjectName,
             credentials = availableCredentials,
             registrationGenerations = state.registrations.mapValues { it.value.generation },
+            dateRevision = monitoringDateRevision,
+            reportDate = monitoringDate,
         )
         lastCycleStartedAtMillis = run.startedAtMillis
         activeRegularRun = run
@@ -930,6 +1046,95 @@ class LearningMonitorEngine internal constructor(
         cadenceTimer?.cancel()
         cadenceTimer = null
         scheduledTimerCycleStart = null
+    }
+
+    private fun refreshMonitoringDate(): Boolean {
+        val today = clock.today()
+        if (today == monitoringDate) {
+            syncDateEvaluationTimer()
+            return false
+        }
+
+        monitoringDate = today
+        monitoringDateRevision += 1L
+        cancelUnreleasedBaselines()
+        activeRegularRun?.invalidated = true
+        activeRegularRun = null
+        cancelCadenceTimer()
+        accounts.forEach { (accountId, state) ->
+            state.metadataRetryNeeded = true
+            state.metadataError = null
+            state.registrations.forEach { (childName, child) ->
+                child.baselineStarted = false
+                child.baselineBoundarySequence = lastCommittedDispatchSequence
+                child.latestCompletionSubjectName = null
+                child.validatedSubjects.clear()
+                val subjectNames = state.catalog?.subscriptions
+                    ?.filter { it.childName == childName }
+                    ?.map { it.subjectName }
+                    ?.distinct()
+                    ?: child.snapshot.subjects.keys.toList()
+                val subjects = LinkedHashMap<String, MonitorSubjectSnapshot>()
+                subjectNames.forEach { subjectName ->
+                    val target = targetProvider.targetCount(childName, subjectName).coerceAtLeast(0)
+                    subjects[subjectName] = MonitorSubjectSnapshot(
+                        name = subjectName,
+                        status = if (target == 0) MonitorSubjectStatus.COMPLETE
+                        else MonitorSubjectStatus.CONFIRMATION_PENDING,
+                        targetCount = target,
+                    )
+                }
+                child.snapshot = MonitorChildSnapshot(
+                    childName = childName,
+                    subjects = subjects,
+                    error = pauseError(state),
+                )
+                if (accountId == activeAccountId && notificationsEnabled) showStatus(accountId, child)
+            }
+        }
+        publish()
+        rescheduleDateEvaluationTimer()
+        startUnattemptedBaselines()
+        return true
+    }
+
+    private fun pauseError(state: AccountState): String? = buildList {
+        if (state.authenticationRequired) add("다시 로그인 필요")
+        if (!accessibilityEnabled) add("접근성 권한 필요")
+        if (!notificationsEnabled) add("알림 권한 필요")
+    }.distinct().joinToString(" · ").ifBlank { null }
+
+    private fun syncDateEvaluationTimer() {
+        val hasRegistrations = accounts.values.any { it.registrations.isNotEmpty() }
+        if (!hasRegistrations) {
+            cancelDateEvaluationTimer()
+            return
+        }
+        if (dateTimer != null) return
+
+        dateTimerGeneration += 1L
+        val generation = dateTimerGeneration
+        val delayMillis = clock.millisUntilNextSeoulMidnight().coerceAtLeast(1L)
+        dateTimer = dateTimerFactory.schedule(delayMillis) {
+            commandQueue.enqueue {
+                if (generation != dateTimerGeneration) return@enqueue
+                dateTimer = null
+                refreshMonitoringDate()
+                syncDateEvaluationTimer()
+                maybeStartRegularCycle()
+            }
+        }
+    }
+
+    private fun rescheduleDateEvaluationTimer() {
+        cancelDateEvaluationTimer()
+        syncDateEvaluationTimer()
+    }
+
+    private fun cancelDateEvaluationTimer() {
+        dateTimerGeneration += 1L
+        dateTimer?.cancel()
+        dateTimer = null
     }
 
     private fun loadRegularSession(run: RegularRun) {
@@ -1013,7 +1218,7 @@ class LearningMonitorEngine internal constructor(
                 ) {
                     null
                 } else {
-                    RegularPair(subscription, generation, target)
+                    RegularPair(subscription, generation, child.targetRevision, target)
                 }
             }
             .toList()
@@ -1028,6 +1233,7 @@ class LearningMonitorEngine internal constructor(
             val state = accounts[run.accountId] ?: return finishRegularRun(run)
             val child = state.registrations[pair.subscription.childName] ?: continue
             if (child.generation != pair.registrationGeneration) continue
+            if (child.targetRevision != pair.targetRevision) continue
             val currentTarget = targetProvider.targetCount(pair.subscription.childName, pair.subscription.subjectName)
                 .coerceAtLeast(0)
             val currentSubject = child.snapshot.subjects[pair.subscription.subjectName]
@@ -1042,7 +1248,7 @@ class LearningMonitorEngine internal constructor(
             releaseRegularIo(
                 run,
                 subjectPair = true,
-                operation = { repository.loadSubjectReport(session, pair.subscription, clock.today()) },
+                operation = { repository.loadSubjectReport(session, pair.subscription, run.reportDate) },
                 onSuccess = { result ->
                     applyRegularPair(run, pair, result)
                     loadNextRegularPair(run)
@@ -1072,6 +1278,7 @@ class LearningMonitorEngine internal constructor(
         if (run.lastDispatchSequence == 0L) return
         val child = accounts[run.accountId]?.registrations?.get(pair.subscription.childName) ?: return
         if (child.generation != pair.registrationGeneration) return
+        if (child.targetRevision != pair.targetRevision) return
         if (targetProvider.targetCount(pair.subscription.childName, pair.subscription.subjectName).coerceAtLeast(0) !=
             pair.targetCount
         ) return
@@ -1099,6 +1306,7 @@ class LearningMonitorEngine internal constructor(
         var completion = false
         val updatedSubject = when (validated) {
             is LearningRepositoryResult.Success -> {
+                child.validatedSubjects += pair.subscription.subjectName
                 val report = validated.value
                 val status = if (report.activityCount >= pair.targetCount) {
                     MonitorSubjectStatus.COMPLETE
@@ -1162,6 +1370,7 @@ class LearningMonitorEngine internal constructor(
         onFailure: (Exception) -> Unit,
         subjectPair: Boolean = false,
     ) {
+        if (refreshMonitoringDate()) return
         if (!regularCanRelease(run)) return finishRegularRun(run)
         if (subjectPair) run.lastDispatchSequence = nextDispatchSequence()
         val eligibilityRevision = runtimeEligibilityRevision
@@ -1205,7 +1414,8 @@ class LearningMonitorEngine internal constructor(
     private fun regularCanApply(run: RegularRun): Boolean =
         activeRegularRun === run && !run.invalidated && run.accountEpoch == accountEpoch &&
             run.accountId == activeAccountId &&
-            accounts[run.accountId]?.authEpoch == run.authEpoch && executionReady(run.accountId)
+            accounts[run.accountId]?.authEpoch == run.authEpoch && executionReady(run.accountId) &&
+            run.dateRevision == monitoringDateRevision && run.reportDate == monitoringDate
 
     private fun regularCanRelease(run: RegularRun): Boolean =
         regularCanApply(run) && screenOn && foregroundSubjectName() == run.foregroundSubject
@@ -1246,13 +1456,17 @@ class LearningMonitorEngine internal constructor(
                         error = previous?.error,
                     )
                     previous?.targetCount == target -> previous
-                    previous?.activityCount != null -> previous.copy(
+                    previous?.activityCount != null && subscription.subjectName in child.validatedSubjects -> previous.copy(
                         targetCount = target,
                         status = if (previous.activityCount >= target) {
                             MonitorSubjectStatus.COMPLETE
                         } else {
                             MonitorSubjectStatus.BELOW_TARGET
                         },
+                    )
+                    previous != null -> previous.copy(
+                        targetCount = target,
+                        status = MonitorSubjectStatus.CONFIRMATION_PENDING,
                     )
                     else -> pendingSubject(childName, subscription.subjectName).copy(error = previous?.error)
                 }
@@ -1297,9 +1511,11 @@ class LearningMonitorEngine internal constructor(
         if (baselineRuns[BaselineKey(run.accountId, run.childName)] !== run) return false
         if (run.accountEpoch != accountEpoch || run.accountId != activeAccountId || !executionReady(run.accountId)) return false
         val state = accounts[run.accountId] ?: return false
-        if (state.authEpoch != run.authEpoch) return false
+        if (state.authEpoch != run.authEpoch || run.dateRevision != monitoringDateRevision ||
+            run.reportDate != monitoringDate
+        ) return false
         val child = state.registrations[run.childName] ?: return false
-        return child.generation == run.generation && child.baselineStarted
+        return child.generation == run.generation && child.targetRevision == run.targetRevision && child.baselineStarted
     }
 
     private fun cancelUnreleasedBaselines() {
@@ -1333,6 +1549,7 @@ class LearningMonitorEngine internal constructor(
         ))
         currentSnapshot = next
         listeners.toList().forEach { slot -> deliver(slot, next) }
+        syncDateEvaluationTimer()
     }
 
     private fun startUnattemptedBaselines(accountId: String? = activeAccountId) {

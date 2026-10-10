@@ -375,6 +375,250 @@ class LearningMonitorEngineTest {
     }
 
     @Test
+    fun changingATargetReclassifiesKnownCountsSilentlyAndOnlyLaterObservedCrossingAlerts() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.notifications.updates.clear()
+        fixture.repository.clearReports()
+
+        fixture.setTarget("수학", 0)
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 0))
+        fixture.commands.drain()
+
+        val lowered = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.COMPLETE, lowered.status)
+        assertEquals(3, lowered.activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(120_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+
+        fixture.setTarget("수학", 4)
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.Success(SubjectReport("철수", "수학", 4, 0)),
+        )
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 4))
+        fixture.commands.drain()
+        val raised = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, raised.status)
+        assertEquals(3, raised.activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        assertEquals(MonitorSubjectStatus.COMPLETE,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").status)
+        assertEquals("수학", fixture.notifications.updates.single { it.completion }.completionSubjectName)
+    }
+
+    @Test
+    fun aFirstPositiveGoalAfterZeroUsesAnUnknownFirstSuccessAsSilentBaseline() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 5, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+            targets = mapOf("수학" to 0),
+        )
+        fixture.startAndRegister("철수")
+
+        val zeroGoal = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.COMPLETE, zeroGoal.status)
+        assertNull(zeroGoal.activityCount)
+        assertTrue(fixture.repository.reportedPairs.none { it.second == "수학" })
+
+        fixture.repository.clearReports()
+        fixture.notifications.updates.clear()
+        fixture.setTarget("수학", 5)
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.Success(SubjectReport("철수", "수학", 5, 0)),
+        )
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 5))
+        fixture.commands.drain()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val firstPositiveSuccess = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.COMPLETE, firstPositiveSuccess.status)
+        assertEquals(5, firstPositiveSuccess.activityCount)
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun targetRevisionInvalidatesAnInFlightUnauthorizedResultAcrossAnAbaChange() {
+        val reportEntered = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val shouldBlockMath = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+            reportGate = { subscription ->
+                if (subscription.subjectName == "수학" && shouldBlockMath.get()) {
+                    reportEntered.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS)) { "The test did not release the old report" }
+                }
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        shouldBlockMath.set(true)
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("old unauthorized")),
+        )
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        val oldReportWorker = fixture.startWorkerUntil(reportEntered)
+
+        fixture.setTarget("수학", 4)
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 4))
+        fixture.commands.drain()
+        fixture.setTarget("수학", 5)
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 5))
+        fixture.commands.drain()
+
+        releaseReport.countDown()
+        oldReportWorker.join(5_000)
+        assertFalse("The old report worker should finish after its response is released", oldReportWorker.isAlive)
+        fixture.commands.drain()
+
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").status)
+        assertEquals(3, fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun aSeoulDateChangeClearsYesterdayAndDropsItsLateUnauthorizedBaselineResult() {
+        val reportEntered = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+            reportGate = { subscription ->
+                if (subscription.subjectName == "수학") {
+                    reportEntered.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS)) { "The test did not release the yesterday report" }
+                }
+            },
+        )
+        fixture.startRuntimeAndRegister("철수")
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("yesterday unauthorized")),
+        )
+        val oldReportWorker = fixture.startWorkerUntil(reportEntered)
+
+        fixture.clock.todayValue = LocalDate.of(2026, 10, 11)
+        fixture.engine.reevaluateMonitoringDate()
+        fixture.commands.drain()
+        val awaitingToday = fixture.engine.snapshot().children.getValue("철수")
+        assertNull(awaitingToday.lastCheckedAt)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING,
+            awaitingToday.subjects.getValue("한글").status)
+        assertNull(awaitingToday.subjects.getValue("한글").activityCount)
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+
+        releaseReport.countDown()
+        oldReportWorker.join(5_000)
+        assertFalse("The yesterday report worker should finish when released", oldReportWorker.isAlive)
+        fixture.commands.drain()
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertNull(fixture.engine.snapshot().children.getValue("철수").lastCheckedAt)
+
+        fixture.drainAll()
+        assertTrue(fixture.repository.requestedDates.contains(LocalDate.of(2026, 10, 10)))
+        assertTrue(fixture.repository.requestedDates.contains(LocalDate.of(2026, 10, 11)))
+        assertTrue(fixture.repository.requestedDates.filter { it != LocalDate.of(2026, 10, 10) }
+            .all { it == LocalDate.of(2026, 10, 11) })
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun nextSeoulDateEvaluationRemainsScheduledWhenEverySubjectIsLocallyComplete() {
+        val fixture = Fixture(
+            reports = emptyMap(),
+            targets = mapOf("한글" to 0, "수학" to 0, "영어" to 0),
+        )
+        fixture.clock.dateChangeDelayMillis = 1_000L
+        fixture.startAndRegister("철수")
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertTrue(fixture.dateTimers.scheduledDelays.isNotEmpty())
+
+        fixture.clock.advanceBy(1_000L)
+        fixture.clock.todayValue = LocalDate.of(2026, 10, 11)
+        fixture.dateTimers.runDue()
+        fixture.commands.drain()
+
+        assertTrue(fixture.engine.snapshot().children.getValue("철수").subjects.values.all {
+            it.status == MonitorSubjectStatus.COMPLETE && it.activityCount == null
+        })
+        assertTrue(fixture.dateTimers.scheduledDelays.size >= 2)
+    }
+
+    @Test
+    fun sameDayResumeAndServiceReattachRecalculateTheSeoulMidnightDelay() {
+        val fixture = Fixture(
+            reports = emptyMap(),
+            targets = mapOf("한글" to 0, "수학" to 0, "영어" to 0),
+        )
+        fixture.clock.dateChangeDelayMillis = 60_000L
+        fixture.startAndRegister("철수")
+        val initialSchedules = fixture.dateTimers.scheduledDelays.size
+
+        fixture.clock.dateChangeDelayMillis = 15_000L
+        fixture.engine.reevaluateMonitoringDate()
+        fixture.commands.drain()
+        assertEquals(initialSchedules + 1, fixture.dateTimers.scheduledDelays.size)
+        assertEquals(15_000L, fixture.dateTimers.scheduledDelays.last())
+
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        assertEquals(initialSchedules + 2, fixture.dateTimers.scheduledDelays.size)
+        assertEquals(15_000L, fixture.dateTimers.scheduledDelays.last())
+    }
+
+    @Test
     fun regularReportFailurePreservesLastCountAndCheckedTimeWithoutCompletingThePair() {
         val fixture = Fixture(
             reports = mapOf(
@@ -506,6 +750,11 @@ class LearningMonitorEngineTest {
         fixture.drainAll()
         gateEnabled.set(true)
         fixture.repository.clearReports()
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+        )
         fixture.engine.screenOnChanged(true)
         fixture.engine.foregroundPackageChanged("com.enuma.todomath")
         fixture.commands.drain()
@@ -527,6 +776,7 @@ class LearningMonitorEngineTest {
 
         assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
         assertEquals(setOf("철수"), fixture.engine.snapshot().registeredChildren)
+        assertEquals(3, fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").activityCount)
     }
 
     @Test
@@ -812,6 +1062,123 @@ class LearningMonitorEngineTest {
 
         assertFalse(fixture.engine.snapshot().monitoringPaused)
         assertEquals(20, fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun goalChangeDuringPermissionRecoveryKeepsRetainedCountPendingAndQueriesFreshBaseline() {
+        val recoveryReportEntered = CountDownLatch(1)
+        val releaseRecoveryReport = CountDownLatch(1)
+        val blockRecoveryMath = AtomicBoolean(false)
+        val recoveryGateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+            reportGate = { subscription ->
+                if (subscription.subjectName == "수학" && blockRecoveryMath.get() &&
+                    recoveryGateUsed.compareAndSet(false, true)
+                ) {
+                    recoveryReportEntered.countDown()
+                    check(releaseRecoveryReport.await(5, TimeUnit.SECONDS)) {
+                        "The recovery report was not released"
+                    }
+                }
+            },
+        )
+        fixture.startAndRegister("철수")
+        val oldKnownCount = fixture.engine.snapshot().children.getValue("철수")
+            .subjects.getValue("수학").activityCount
+        assertEquals(3, oldKnownCount)
+
+        blockRecoveryMath.set(true)
+        fixture.executionStatus.set(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.commands.drain()
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.commands.drain()
+        val oldRecoveryWorker = fixture.startWorkerUntil(recoveryReportEntered)
+
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(
+                LearningAuthenticationDeniedException("stale recovery unauthorized"),
+            ),
+        )
+        fixture.setTarget("수학", 2)
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 2))
+        fixture.commands.drain()
+
+        val duringRecovery = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING, duringRecovery.status)
+        assertEquals(oldKnownCount, duringRecovery.activityCount)
+
+        releaseRecoveryReport.countDown()
+        oldRecoveryWorker.join(5_000)
+        assertFalse("The stale recovery worker should finish after release", oldRecoveryWorker.isAlive)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val recoveredMath = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.COMPLETE, recoveredMath.status)
+        assertEquals(3, recoveredMath.activityCount)
+        assertEquals(3, fixture.repository.reportedSubjects.count { it == "수학" })
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun goalCommandAfterCatalogReconciliationStillInvalidatesThePreviousRecoveryTarget() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.executionStatus.set(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.commands.drain()
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.commands.drain()
+
+        fixture.workers.takeNext().invoke() // recovery sign-in, whose response queues catalog
+        fixture.commands.drain()
+        fixture.setTarget("수학", 2)
+        fixture.workers.takeNext().invoke() // catalog response is queued before the goal command
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(
+                LearningAuthenticationDeniedException("stale pre-command recovery unauthorized"),
+            ),
+        )
+        fixture.engine.setTargetCounts("account-A", "철수", mapOf("수학" to 2))
+        fixture.commands.drain()
+
+        val pendingAfterGoalChange = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING, pendingAfterGoalChange.status)
+        assertEquals(3, pendingAfterGoalChange.activityCount)
+        fixture.workers.takeNext().invoke() // old recovery report worker must be invalidated before repository access
+        fixture.commands.drain()
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertTrue(fixture.repository.reportedSubjects.isEmpty())
+
+        fixture.repository.clearQueuedReportResult("철수", "수학")
+        fixture.drainAll()
+
+        val confirmed = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학")
+        assertEquals(MonitorSubjectStatus.COMPLETE, confirmed.status)
+        assertEquals(3, confirmed.activityCount)
+        assertEquals(1, fixture.repository.reportedPairs.count { it == ("철수" to "수학") })
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
         assertTrue(fixture.notifications.updates.none { it.completion })
     }
 
@@ -1264,11 +1631,13 @@ class LearningMonitorEngineTest {
         storedChildren: Set<String> = emptySet(),
         reportGate: (ChildSubjectSubscription) -> Unit = {},
     ) {
+        private val configuredTargets = targets.toMutableMap()
         val commands = ManualQueue()
         val workers = ManualQueue()
         val ui = ManualQueue()
         val clock = FakeClock()
         val timers = ManualTimerFactory(clock)
+        val dateTimers = ManualTimerFactory(clock)
         val repository = FakeRepository(reports, catalogFailure, signedInAccount, reportGate)
         val notifications = FakeNotifications()
         val store = FakeMonitorStore(storedChildren)
@@ -1282,14 +1651,15 @@ class LearningMonitorEngineTest {
             store = store,
             repository = repository,
             targetProvider = MonitorTargetProvider { child, subject ->
-                if (subject == "한글" && child == "철수" && targets[subject] == null) {
+                if (subject == "한글" && child == "철수" && configuredTargets[subject] == null) {
                     TargetDefaults.defaultCount(subject)
                 } else {
-                    targets[subject] ?: TargetDefaults.defaultCount(subject)
+                    configuredTargets[subject] ?: TargetDefaults.defaultCount(subject)
                 }
             },
             notificationSink = notifications,
             executionStatusProbe = MonitorExecutionStatusProbe { executionStatus.inspect() },
+            dateTimerFactory = dateTimers,
         )
 
         fun startAndRegister(child: String) {
@@ -1312,6 +1682,10 @@ class LearningMonitorEngineTest {
             engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
             engine.attachServiceLease()
             commands.drain()
+        }
+
+        fun setTarget(subjectName: String, targetCount: Int) {
+            configuredTargets[subjectName] = targetCount
         }
 
         fun startWorkerUntil(signal: CountDownLatch): Thread {
@@ -1358,10 +1732,13 @@ class LearningMonitorEngineTest {
 
     private class FakeClock : MonitorClock {
         private var nowMillis = 0L
-        override fun today(): LocalDate = LocalDate.of(2026, 10, 10)
+        var todayValue: LocalDate = LocalDate.of(2026, 10, 10)
+        var dateChangeDelayMillis: Long = 86_400_000L
+        override fun today(): LocalDate = todayValue
         var checkedAtValue = "마지막 확인 10:15"
         override fun checkedAt(): String = checkedAtValue
         override fun monotonicMillis(): Long = nowMillis
+        override fun millisUntilNextSeoulMidnight(): Long = dateChangeDelayMillis
         fun advanceBy(millis: Long) { nowMillis += millis }
     }
 
@@ -1420,6 +1797,10 @@ class LearningMonitorEngineTest {
             result: LearningRepositoryResult<SubjectReport>,
         ) {
             reportResults.getOrPut(childName to subjectName, ::mutableListOf).add(result)
+        }
+
+        fun clearQueuedReportResult(childName: String, subjectName: String) {
+            reportResults.remove(childName to subjectName)
         }
 
         override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> {

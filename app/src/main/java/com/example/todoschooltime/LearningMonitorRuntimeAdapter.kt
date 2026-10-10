@@ -22,6 +22,7 @@ internal data class MonitorExecutionStatus(
 internal interface LearningMonitorScreenUseCases {
     fun refreshExecutionConditions(): MonitorExecutionStatus
     fun inspectExecutionStatus(): MonitorExecutionStatus
+    fun reevaluateMonitoringDate()
     fun credentialsAccepted(accountId: String, email: String, password: String)
     fun credentialsReauthenticated(accountId: String, email: String, password: String)
 }
@@ -42,6 +43,10 @@ internal class LearningMonitorRuntimeAdapter(
     }
 
     override fun inspectExecutionStatus(): MonitorExecutionStatus = MonitorExecutionStatusInspector.inspect(appContext)
+
+    override fun reevaluateMonitoringDate() {
+        engine.reevaluateMonitoringDate()
+    }
 
     override fun credentialsAccepted(accountId: String, email: String, password: String) {
         credentialStore.saveAccountId(accountId)
@@ -87,6 +92,9 @@ internal class LearningMonitorRuntimeAdapter(
                 when (intent?.action) {
                     Intent.ACTION_SCREEN_ON -> engine.screenOnChanged(true)
                     Intent.ACTION_SCREEN_OFF -> engine.screenOnChanged(false)
+                    Intent.ACTION_DATE_CHANGED,
+                    Intent.ACTION_TIME_CHANGED,
+                    Intent.ACTION_TIMEZONE_CHANGED -> engine.reevaluateMonitoringDate()
                 }
             }
         }
@@ -94,6 +102,9 @@ internal class LearningMonitorRuntimeAdapter(
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_DATE_CHANGED)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             appContext.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)

@@ -75,6 +75,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        learningMonitorScreenUseCases.reevaluateMonitoringDate()
         updateDateNavUi()
         monitorSubscription?.close()
         monitorSubscription = learningMonitor.observe { snapshot ->
@@ -702,6 +703,7 @@ class MainActivity : Activity() {
     }
 
     private fun showTargetCountDialog(child: ChildLearningInfo) {
+        val dialogAccountId = currentResult?.accountId?.takeIf(String::isNotBlank)
         val savedCounts = targetCountStore.getTargetCounts(child.name)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -789,6 +791,9 @@ class MainActivity : Activity() {
             }
 
             targetCountStore.saveTargetCounts(child.name, newTargets)
+            dialogAccountId?.let { accountId ->
+                learningMonitor.setTargetCounts(accountId, child.name, newTargets)
+            }
             currentResult?.let { renderChildren(it) }
             dialog.dismiss()
         }
