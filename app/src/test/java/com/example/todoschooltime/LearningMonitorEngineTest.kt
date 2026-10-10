@@ -611,6 +611,7 @@ class LearningMonitorEngineTest {
         val fixture = Fixture(reports = emptyMap())
         fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
         fixture.engine.registerChild("account-A", "철수")
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
         fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
         fixture.commands.drain()
 
@@ -620,6 +621,391 @@ class LearningMonitorEngineTest {
         assertEquals(1, fixture.workers.size())
         fixture.drainAll()
         assertEquals("account-A", fixture.engine.snapshot().accountId)
+    }
+
+    @Test
+    fun authenticationDeniedDuringInitialBaselineStopsRemainingPairsAndPreservesCommittedStatus() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 2, 0)),
+            ),
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("unauthorized")),
+        )
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val snapshot = fixture.engine.snapshot()
+        val child = snapshot.children.getValue("철수")
+        assertEquals(setOf("철수"), snapshot.registeredChildren)
+        assertEquals(listOf("한글", "수학"), fixture.repository.reportedSubjects)
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, child.subjects.getValue("한글").status)
+        assertEquals(3, child.subjects.getValue("한글").activityCount)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING, child.subjects.getValue("수학").status)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING, child.subjects.getValue("영어").status)
+        assertTrue(snapshot.authenticationRequired)
+        assertTrue(snapshot.monitoringPaused)
+        assertTrue(child.error.orEmpty().contains("다시 로그인 필요"))
+        assertTrue(fixture.notifications.updates.last().child.error.orEmpty().contains("다시 로그인 필요"))
+        assertTrue(MonitorNotificationText.summary(fixture.notifications.updates.last().child).contains("다시 로그인 필요"))
+        assertFalse(fixture.notifications.updates.last().completion)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun savedCredentialsDoNotResumeAuthenticationPauseButHumanReauthenticationResetsSilently() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("unauthorized")),
+        )
+        fixture.commands.drain()
+        fixture.drainAll()
+        fixture.repository.clearReports()
+
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertTrue(fixture.engine.snapshot().authenticationRequired)
+        assertTrue(fixture.repository.reportedSubjects.isEmpty())
+
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "한글",
+            LearningRepositoryResult.Success(SubjectReport("철수", "한글", 20, 0)),
+        )
+        fixture.engine.reauthenticate("account-A", "mail@example.test", "new-secret")
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val snapshot = fixture.engine.snapshot()
+        assertFalse(snapshot.authenticationRequired)
+        assertFalse(snapshot.monitoringPaused)
+        assertEquals(setOf("철수"), snapshot.registeredChildren)
+        assertEquals(20, snapshot.children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun regularAuthenticationDeniedPausesMonitoringAndPreservesRegisteredChildStatus() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        val before = fixture.engine.snapshot().children.getValue("철수")
+        fixture.repository.clearReports()
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("unauthorized")),
+        )
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val snapshot = fixture.engine.snapshot()
+        val child = snapshot.children.getValue("철수")
+        assertTrue(snapshot.authenticationRequired)
+        assertTrue(snapshot.monitoringPaused)
+        assertEquals(setOf("철수"), snapshot.registeredChildren)
+        assertEquals(listOf("수학"), fixture.repository.reportedSubjects)
+        assertEquals(before.subjects.getValue("한글"), child.subjects.getValue("한글"))
+        assertEquals(before.subjects.getValue("수학").activityCount, child.subjects.getValue("수학").activityCount)
+        assertEquals(before.subjects.getValue("영어"), child.subjects.getValue("영어"))
+        assertTrue(MonitorNotificationText.summary(fixture.notifications.updates.last().child).contains("다시 로그인 필요"))
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun permissionPausePreservesStatusRepeatedProbesDoNotRestartAndRecoveryBaselineIsSilent() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        val requestsBeforePause = fixture.repository.reportedSubjects.size
+        val hangulBeforePause = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글")
+        fixture.executionStatus.set(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.commands.drain()
+
+        val paused = fixture.engine.snapshot()
+        assertTrue(paused.monitoringPaused)
+        assertFalse(paused.accessibilityEnabled)
+        assertTrue(paused.notificationsEnabled)
+        assertEquals(setOf("철수"), paused.registeredChildren)
+        assertEquals(hangulBeforePause.status, paused.children.getValue("철수").subjects.getValue("한글").status)
+        assertEquals(hangulBeforePause.activityCount, paused.children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.notifications.updates.last().child.error.orEmpty().contains("접근성 권한 필요"))
+
+        repeat(3) {
+            fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+            fixture.commands.drain()
+        }
+        assertEquals(requestsBeforePause, fixture.repository.reportedSubjects.size)
+
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "한글",
+            LearningRepositoryResult.Success(SubjectReport("철수", "한글", 20, 0)),
+        )
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertFalse(fixture.engine.snapshot().monitoringPaused)
+        assertEquals(20, fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun workerPermissionProbeBlocksQueuedRequestWhenPermissionWasRevoked() {
+        val fixture = Fixture(reports = emptyMap())
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.attachServiceLease()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.commands.drain()
+        assertEquals(1, fixture.workers.size())
+
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = false)
+        fixture.workers.drain()
+        fixture.commands.drain()
+
+        assertEquals(0, fixture.repository.signInCalls)
+        assertTrue(fixture.engine.snapshot().monitoringPaused)
+        assertFalse(fixture.engine.snapshot().notificationsEnabled)
+        assertEquals(setOf("철수"), fixture.engine.snapshot().registeredChildren)
+    }
+
+    @Test
+    fun lateBaselineSuccessFailureAndAuthenticationDenialCannotChangeRecoveredState() {
+        val staleResults = listOf<LearningRepositoryResult<SubjectReport>>(
+            LearningRepositoryResult.Success(SubjectReport("철수", "수학", 100, 0)),
+            LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("late failure")),
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("late unauthorized")),
+        )
+        staleResults.forEach { staleResult ->
+            val reportStarted = CountDownLatch(1)
+            val releaseReport = CountDownLatch(1)
+            val reportGateUsed = AtomicBoolean(false)
+            val fixture = Fixture(
+                reports = mapOf(
+                    "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                    "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                    "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+                ),
+                reportGate = { subscription ->
+                    if (subscription.subjectName == "수학" && reportGateUsed.compareAndSet(false, true)) {
+                        reportStarted.countDown()
+                        check(releaseReport.await(5, TimeUnit.SECONDS))
+                    }
+                },
+            )
+            fixture.prepareRuntime()
+            fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+            fixture.engine.registerChild("account-A", "철수")
+            fixture.commands.drain()
+
+            fixture.workers.takeNext().invoke() // sign-in
+            fixture.commands.drain()
+            fixture.workers.takeNext().invoke() // catalog
+            fixture.commands.drain()
+            fixture.workers.takeNext().invoke() // commit Hangul, queue Math
+            fixture.commands.drain()
+            val oldReportWorker = fixture.startWorkerUntil(reportStarted)
+
+            fixture.executionStatus.set(accessibilityEnabled = false, notificationsEnabled = true)
+            fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+            fixture.commands.drain()
+            repeat(3) {
+                fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+                fixture.commands.drain()
+            }
+            fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+            fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+            fixture.commands.drain()
+            fixture.drainAll()
+            val recovered = fixture.engine.snapshot()
+            val notificationsAfterRecovery = fixture.notifications.updates.size
+
+            fixture.repository.enqueueReportResult("철수", "수학", staleResult)
+            releaseReport.countDown()
+            oldReportWorker.join(5_000)
+            assertFalse("A stale report should return after recovery", oldReportWorker.isAlive)
+            fixture.commands.drain()
+
+            val afterStaleResult = fixture.engine.snapshot()
+            assertEquals(recovered.children, afterStaleResult.children)
+            assertEquals(recovered.authenticationRequired, afterStaleResult.authenticationRequired)
+            assertEquals(recovered.registeredChildren, afterStaleResult.registeredChildren)
+            assertEquals(notificationsAfterRecovery, fixture.notifications.updates.size)
+            assertTrue(fixture.notifications.updates.none { it.completion })
+        }
+    }
+
+    @Test
+    fun lateAuthenticationDenialFromOldBaselineCannotRevokeHumanReauthentication() {
+        val reportStarted = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val reportGateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 2, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 1, 0)),
+            ),
+            reportGate = { subscription ->
+                if (subscription.subjectName == "수학" && reportGateUsed.compareAndSet(false, true)) {
+                    reportStarted.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.commands.drain()
+        fixture.workers.takeNext().invoke() // initial sign-in
+        fixture.commands.drain()
+        fixture.workers.takeNext().invoke() // initial catalog
+        fixture.commands.drain()
+        fixture.workers.takeNext().invoke() // commit Hangul, queue Math
+        fixture.commands.drain()
+        val oldReportWorker = fixture.startWorkerUntil(reportStarted)
+
+        fixture.engine.reauthenticate("account-A", "mail@example.test", "new-secret")
+        fixture.commands.drain()
+        fixture.drainAll()
+        val recovered = fixture.engine.snapshot()
+        val notificationsAfterRecovery = fixture.notifications.updates.size
+
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "수학",
+            LearningRepositoryResult.AuthenticationDenied(LearningAuthenticationDeniedException("late unauthorized")),
+        )
+        releaseReport.countDown()
+        oldReportWorker.join(5_000)
+        assertFalse("The old report should return after reauthentication", oldReportWorker.isAlive)
+        fixture.commands.drain()
+
+        assertFalse(fixture.engine.snapshot().authenticationRequired)
+        assertFalse(fixture.engine.snapshot().monitoringPaused)
+        assertEquals(recovered.children, fixture.engine.snapshot().children)
+        assertEquals(notificationsAfterRecovery, fixture.notifications.updates.size)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
+    fun enabledButDetachedServiceWaitsForConnectionWithoutResettingItsBaseline() {
+        val fixture = Fixture(
+            reports = mapOf("한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 3, 0))),
+        )
+        fixture.startAndRegister("철수")
+        val beforeDetach = fixture.engine.snapshot().children.getValue("철수")
+        fixture.repository.clearReports()
+
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        val disconnected = fixture.engine.snapshot()
+        assertTrue(disconnected.accessibilityEnabled)
+        assertTrue(disconnected.notificationsEnabled)
+        assertFalse(disconnected.serviceLeaseAttached)
+        assertTrue(disconnected.connectionWaiting)
+        assertFalse(disconnected.monitoringPaused)
+        assertEquals(beforeDetach, disconnected.children.getValue("철수"))
+
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertTrue(fixture.repository.reportedSubjects.isEmpty())
+        assertEquals(beforeDetach, fixture.engine.snapshot().children.getValue("철수"))
+    }
+
+    @Test
+    fun permissionRevokedBeforeDetachResetsAllChildrenAndRecoveryIsSilent() {
+        val fixture = Fixture(reports = emptyMap())
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.engine.registerChild("account-A", "영희")
+        listOf("철수", "영희").forEach { child ->
+            listOf("한글", "수학", "영어").forEach { subject ->
+                fixture.repository.enqueueReportResult(
+                    child,
+                    subject,
+                    LearningRepositoryResult.Success(SubjectReport(child, subject, 2, 0)),
+                )
+            }
+        }
+        fixture.commands.drain()
+        fixture.drainAll()
+        fixture.repository.clearReports()
+
+        fixture.executionStatus.set(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = false, notificationsEnabled = true)
+        fixture.commands.drain()
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        assertTrue(fixture.engine.snapshot().monitoringPaused)
+        assertEquals(setOf("철수", "영희"), fixture.engine.snapshot().registeredChildren)
+
+        listOf("철수", "영희").forEach { child ->
+            listOf("한글", "수학", "영어").forEach { subject ->
+                fixture.repository.enqueueReportResult(
+                    child,
+                    subject,
+                    LearningRepositoryResult.Success(SubjectReport(child, subject, 20, 0)),
+                )
+            }
+        }
+        fixture.executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
+        fixture.commands.drain()
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        val recovered = fixture.engine.snapshot()
+        assertFalse(recovered.monitoringPaused)
+        assertEquals(setOf("철수", "영희"), recovered.registeredChildren)
+        assertTrue(recovered.children.values.all { child ->
+            child.subjects.values.all { it.activityCount == 20 && it.status == MonitorSubjectStatus.COMPLETE }
+        })
+        assertTrue(fixture.notifications.updates.none { it.completion })
+        assertEquals(6, fixture.repository.reportedPairs.size)
+        assertTrue(fixture.repository.reportedPairs.groupingBy { it }.eachCount().values.all { it == 1 })
     }
 
     @Test
@@ -858,6 +1244,7 @@ class LearningMonitorEngineTest {
         val repository = FakeRepository(reports, catalogFailure, signedInAccount, reportGate)
         val notifications = FakeNotifications()
         val store = FakeMonitorStore(storedChildren)
+        val executionStatus = FakeExecutionStatus()
         val engine = LearningMonitorEngine(
             commandQueue = commands,
             workerQueue = workers,
@@ -874,6 +1261,7 @@ class LearningMonitorEngineTest {
                 }
             },
             notificationSink = notifications,
+            executionStatusProbe = MonitorExecutionStatusProbe { executionStatus.inspect() },
         )
 
         fun startAndRegister(child: String) {
@@ -892,6 +1280,7 @@ class LearningMonitorEngineTest {
         }
 
         fun prepareRuntime() {
+            executionStatus.set(accessibilityEnabled = true, notificationsEnabled = true)
             engine.executionConditionsChanged(accessibilityEnabled = true, notificationsEnabled = true)
             engine.attachServiceLease()
             commands.drain()
@@ -916,6 +1305,16 @@ class LearningMonitorEngineTest {
                 commands.drain()
             }
         }
+    }
+
+    private class FakeExecutionStatus {
+        @Volatile private var value = MonitorExecutionStatus(accessibilityEnabled = false, notificationsEnabled = false)
+
+        fun set(accessibilityEnabled: Boolean, notificationsEnabled: Boolean) {
+            value = MonitorExecutionStatus(accessibilityEnabled, notificationsEnabled)
+        }
+
+        fun inspect(): MonitorExecutionStatus = value
     }
 
     private class ManualQueue : MonitorTaskQueue {

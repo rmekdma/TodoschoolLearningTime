@@ -49,6 +49,9 @@ class TodoSchoolApplication : Application() {
                 this,
                 SharedPreferencesNotificationIdAllocator(notificationIdPreferences),
             ),
+            executionStatusProbe = MonitorExecutionStatusProbe {
+                MonitorExecutionStatusInspector.inspect(this@TodoSchoolApplication)
+            },
         )
         learningMonitor = engine
         val monitorRuntime = LearningMonitorRuntimeAdapter(this, engine)

@@ -260,7 +260,13 @@ class MainActivity : Activity() {
             isClickable = true
             isFocusable = true
             setPadding(dp(12), 0, dp(12), 0)
-            setOnClickListener { showMonitorSetupDialog() }
+            setOnClickListener {
+                if (monitorSnapshot.authenticationRequired) {
+                    askCredentials("로그인이 만료되어 아이별 감시를 일시 중지했습니다. 다시 로그인해주세요.")
+                } else {
+                    showMonitorSetupDialog()
+                }
+            }
         }
         buttons.addView(intervalButton)
         buttons.addView(monitorSettingsButton)
@@ -278,13 +284,20 @@ class MainActivity : Activity() {
         if (!::intervalButton.isInitialized) return
         intervalButton.text = "감시 간격 ${monitorSnapshot.intervalMinutes}분"
         val executionStatus = learningMonitorScreenUseCases.refreshExecutionConditions()
-        val accessibilityText = if (!executionStatus.accessibilityEnabled) "접근성 설정 필요" else if (monitorSnapshot.serviceLeaseAttached) {
-            "접근성 연결됨"
-        } else {
-            "접근성 연결 대기"
+        monitorSettingsButton.text = if (monitorSnapshot.authenticationRequired) "다시 로그인" else "감시 설정"
+        val accessibilityText = when {
+            !executionStatus.accessibilityEnabled -> "접근성 설정 필요"
+            monitorSnapshot.serviceLeaseAttached -> "접근성 연결됨"
+            else -> "접근성 연결 대기"
         }
         val notificationText = if (executionStatus.notificationsEnabled) "알림 사용 가능" else "알림 권한 필요"
-        monitorStatusView.text = "$accessibilityText · $notificationText"
+        val stateText = when {
+            monitorSnapshot.authenticationRequired -> "다시 로그인 필요"
+            monitorSnapshot.monitoringPaused -> "감시 일시 중지"
+            monitorSnapshot.connectionWaiting -> "연결 대기 중"
+            else -> null
+        }
+        monitorStatusView.text = listOfNotNull(accessibilityText, notificationText, stateText).joinToString(" · ")
     }
 
     private fun showMonitorSetupDialog() {
@@ -296,6 +309,13 @@ class MainActivity : Activity() {
             append(if (executionStatus.accessibilityEnabled && monitorSnapshot.serviceLeaseAttached) " · 연결됨" else if (executionStatus.accessibilityEnabled) " · 연결 대기" else "")
             append("\n알림: ")
             append(if (executionStatus.notificationsEnabled) "사용 가능" else "설정 필요")
+            if (monitorSnapshot.authenticationRequired) {
+                append("\n감시 상태: 로그인 다시 필요")
+            } else if (monitorSnapshot.monitoringPaused) {
+                append("\n감시 상태: 권한을 허용하면 자동으로 다시 시작합니다.")
+            } else if (monitorSnapshot.connectionWaiting) {
+                append("\n감시 상태: 접근성 서비스 연결 대기 중")
+            }
         }
         AlertDialog.Builder(this)
             .setTitle("감시 설정")
@@ -457,7 +477,7 @@ class MainActivity : Activity() {
                 } else {
                     val credentials = Credentials(email, password)
                     CredentialStore(this).save(credentials)
-                    loadLearningTime(credentials, learningDate)
+                    loadLearningTime(credentials, learningDate, humanReauthentication = true)
                 }
             }
             .setNegativeButton("취소") { _, _ ->
@@ -466,7 +486,11 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun loadLearningTime(credentials: Credentials, targetDate: LocalDate) {
+    private fun loadLearningTime(
+        credentials: Credentials,
+        targetDate: LocalDate,
+        humanReauthentication: Boolean = false,
+    ) {
         val requestId = requestTracker.nextRequestId()
 
         checkedAtView.text = "확인 중..."
@@ -487,7 +511,19 @@ class MainActivity : Activity() {
                     }
                     currentResult = result
                     if (result.accountId.isNotBlank()) {
-                        learningMonitorScreenUseCases.credentialsAccepted(result.accountId, credentials.email, credentials.password)
+                        if (humanReauthentication) {
+                            learningMonitorScreenUseCases.credentialsReauthenticated(
+                                result.accountId,
+                                credentials.email,
+                                credentials.password,
+                            )
+                        } else {
+                            learningMonitorScreenUseCases.credentialsAccepted(
+                                result.accountId,
+                                credentials.email,
+                                credentials.password,
+                            )
+                        }
                     }
                     setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE
