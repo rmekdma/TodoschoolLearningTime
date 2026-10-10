@@ -742,16 +742,7 @@ class LearningMonitorEngine internal constructor(
                 if (run.activePairWork === work) run.activePairWork = null
                 if (baselineCanContinue(run)) {
                     consumer.terminal = ConsumerTerminal.FINISHED
-                    val validated = when (result) {
-                        is LearningRepositoryResult.Success -> if (
-                            result.value.childName == consumer.subscription.childName &&
-                                result.value.subjectName == consumer.subscription.subjectName
-                        ) result else LearningRepositoryResult.TemporaryFailure(
-                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
-                        )
-                        is LearningRepositoryResult.TemporaryFailure -> result
-                        is LearningRepositoryResult.AuthenticationDenied -> result
-                    }
+                    val validated = validateReportForSubscription(consumer.subscription, result)
                     applyBaselinePair(run, consumer.subscription, consumer.targetRevision, consumer.targetCount, validated)
                     loadNextBaselinePair(run)
                 } else {
@@ -767,16 +758,7 @@ class LearningMonitorEngine internal constructor(
                 if (run.activePairWork === work) run.activePairWork = null
                 if (regularCanApply(run)) {
                     consumer.terminal = ConsumerTerminal.FINISHED
-                    val pairResult = when (result) {
-                        is LearningRepositoryResult.Success -> if (
-                            result.value.childName == consumer.pair.subscription.childName &&
-                                result.value.subjectName == consumer.pair.subscription.subjectName
-                        ) result else LearningRepositoryResult.TemporaryFailure(
-                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
-                        )
-                        is LearningRepositoryResult.TemporaryFailure -> result
-                        is LearningRepositoryResult.AuthenticationDenied -> result
-                    }
+                    val pairResult = validateReportForSubscription(consumer.pair.subscription, result)
                     applyRegularPair(run, consumer.pair, pairResult)
                     loadNextRegularPair(run)
                 } else {
@@ -786,6 +768,20 @@ class LearningMonitorEngine internal constructor(
             }
         }
         cancelPairWorkIfUnconsumed(work)
+    }
+
+    private fun validateReportForSubscription(
+        subscription: ChildSubjectSubscription,
+        result: LearningRepositoryResult<SubjectReport>,
+    ): LearningRepositoryResult<SubjectReport> = when (result) {
+        is LearningRepositoryResult.Success -> if (
+            result.value.childName == subscription.childName &&
+            result.value.subjectName == subscription.subjectName
+        ) result else LearningRepositoryResult.TemporaryFailure(
+            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
+        )
+        is LearningRepositoryResult.TemporaryFailure -> result
+        is LearningRepositoryResult.AuthenticationDenied -> result
     }
 
     private fun hasActiveMonitorConsumer(work: ReportPairWork): Boolean =
