@@ -63,7 +63,7 @@ object MonitorNotificationText {
                 "${subject.name} $state"
             }
         }
-        if (subjectLines.isEmpty()) add("구독 과목 확인 대기") else addAll(subjectLines)
+        if (subjectLines.isEmpty()) add("구독 중인 과목이 없습니다.") else addAll(subjectLines)
         child.lastCheckedAt?.let(::add)
         child.error?.let { add("오류: $it") }
     }.joinToString("\n")
@@ -78,7 +78,7 @@ object MonitorNotificationText {
                 "✔ ${subject.name} ${subject.activityCount}/${subject.targetCount}"
             }
         }
-    }.ifBlank { "구독 과목 확인 대기" }
+    }.ifBlank { "구독 중인 과목이 없습니다." }
 }
 
 fun interface MonitorTaskQueue {
