@@ -31,10 +31,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-import org.json.JSONArray
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
 import java.security.KeyStore
 import java.time.LocalDate
 import javax.crypto.Cipher
@@ -357,7 +354,9 @@ class MainActivity : Activity() {
 
         Thread {
             try {
-                val result = TodoSchoolClient().load(credentials.email, credentials.password, targetDate)
+                val result = LearningReportRepository()
+                    .load(credentials.email, credentials.password, targetDate)
+                    .getOrThrow()
                 runOnUiThread {
                     if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
                         return@runOnUiThread
@@ -382,7 +381,7 @@ class MainActivity : Activity() {
                     errorView.visibility = View.VISIBLE
                     errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
 
-                    if (e is AuthenticationException) {
+                    if (e is LearningAuthenticationDeniedException) {
                         CredentialStore(this).clear()
                         askCredentials("로그인에 실패했습니다. 이메일과 비밀번호를 다시 입력하세요.")
                     }
@@ -607,150 +606,6 @@ private data class Credentials(
     val email: String,
     val password: String,
 )
-
-private class TodoSchoolClient {
-    private data class Subject(
-        val name: String,
-        val usersPath: String,
-        val reportPath: String,
-    )
-
-    private val subjects = listOf(
-        Subject("한글", "/v3/todohangeul/user", "/v3/todoschool/report/daily/hangeul"),
-        Subject("수학", "/v3/math/user", "/v3/todoschool/report/daily/math"),
-        Subject("영어", "/v3/english/user", "/v3/todoschool/report/daily/english"),
-    )
-
-    fun load(email: String, password: String, date: LocalDate = DateHelper.today()): LearningResult {
-        val login = signIn(email, password)
-        val token = login.optString("authToken").ifBlank { login.optString("sessionId") }
-        if (token.isBlank()) throw AuthenticationException("로그인 토큰을 받지 못했습니다.")
-
-        val accountId = login.opt("accountId")
-            ?: throw IllegalStateException("accountId를 받지 못했습니다.")
-        val yyyymmdd = DateHelper.toYyyyMmDd(date)
-        val checkedAt = DateHelper.formatCheckedAt(DateHelper.nowZoned())
-
-        val totals = LinkedHashMap<String, Long>()
-        val subjectsByChild = LinkedHashMap<String, MutableList<SubjectProgress>>()
-        val childOrder = mutableListOf<String>()
-
-        subjects.forEach { subject ->
-            val users = post(
-                path = subject.usersPath,
-                body = JSONObject().put("user", JSONObject().put("accountId", accountId)),
-                token = token,
-            ) as? JSONArray ?: throw IllegalStateException("${subject.name}: 아이 목록 형식이 예상과 다릅니다.")
-
-            for (i in 0 until users.length()) {
-                val user = users.getJSONObject(i)
-                val userName = user.optString("name").trim()
-                if (userName.isBlank()) continue
-
-                if (!TodoSchoolDataParser.isSubscribed(user)) {
-                    continue
-                }
-
-                val userId = user.optString("userId").ifBlank { user.opt("userId")?.toString().orEmpty() }
-
-                if (userName !in childOrder) {
-                    childOrder.add(userName)
-                }
-
-                val report = post(
-                    path = subject.reportPath,
-                    body = JSONObject()
-                        .put("userId", userId)
-                        .put("yyyymmdd", yyyymmdd)
-                        .put("languageCode", "ko"),
-                    token = token,
-                ) as? JSONObject
-
-                val seconds = ReportParser.extractLearningSeconds(report)
-                val progress = TodoSchoolDataParser.parseSubjectProgress(subject.name, user, report)
-
-                totals[userName] = (totals[userName] ?: 0L) + seconds
-                if (progress != null) {
-                    subjectsByChild.getOrPut(userName) { mutableListOf() }.add(progress)
-                }
-            }
-        }
-
-        val names = childOrder.distinct()
-        if (names.isEmpty()) throw IllegalStateException("아이 정보를 찾지 못했습니다.")
-
-        val children = names.map { name ->
-            val minutes = ceil((totals[name] ?: 0L) / 60.0).toInt()
-            val subjectList = subjectsByChild[name] ?: emptyList()
-            ChildLearningInfo(name = name, minutes = minutes, subjects = subjectList)
-        }
-
-        return LearningResult(checkedAt, children)
-    }
-
-    private fun signIn(email: String, password: String): JSONObject {
-        val body = JSONObject()
-            .put("accountType", "personal")
-            .put("getSessionId", true)
-            .put("product", "todoschool")
-            .put("packageName", "com.enuma.todoschool")
-            .put("fromWeb", true)
-            .put("countryCode", "ko")
-            .put("email", email)
-            .put("password", password)
-
-        try {
-            return post("/v3/account/signin", body, null) as? JSONObject
-                ?: throw AuthenticationException("로그인 응답 형식이 예상과 다릅니다.")
-        } catch (e: HttpException) {
-            if (e.statusCode == 401 || e.statusCode == 403) {
-                throw AuthenticationException("이메일 또는 비밀번호가 맞지 않습니다.")
-            }
-            throw e
-        }
-    }
-
-    private fun post(path: String, body: JSONObject, token: String?): Any? {
-        val connection = (URL(API_BASE + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15_000
-            readTimeout = 15_000
-            doOutput = true
-            setRequestProperty("Accept", "application/json, text/plain, */*")
-            setRequestProperty("Content-Type", "application/json")
-            if (token != null) setRequestProperty("Authorization", "Bearer $token")
-        }
-
-        try {
-            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-
-            if (code !in 200..299) throw HttpException(code, "$path: HTTP $code")
-
-            val json = JSONObject(responseText)
-            if (!json.optBoolean("result", false)) {
-                if (path == "/v3/account/signin") throw AuthenticationException("로그인에 실패했습니다.")
-                return null
-            }
-            return json.opt("data")
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    companion object {
-        private const val API_BASE = "https://api.todomath.com"
-    }
-}
-
-private class HttpException(
-    val statusCode: Int,
-    message: String,
-) : Exception(message)
-
-private class AuthenticationException(message: String) : Exception(message)
 
 private class CredentialStore(private val activity: Activity) {
     private val prefs = activity.getSharedPreferences(PREFS_NAME, Activity.MODE_PRIVATE)
