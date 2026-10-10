@@ -63,7 +63,7 @@ internal interface LearningHttpTransport {
 
 class LearningReportRepository internal constructor(
     private val transport: LearningHttpTransport,
-) {
+) : MonitorRepository {
     constructor() : this(UrlConnectionLearningHttpTransport())
 
     private data class SubjectEndpoint(
@@ -101,10 +101,10 @@ class LearningReportRepository internal constructor(
                 val minutes = ceil((totals[name] ?: 0L) / 60.0).toInt()
                 ChildLearningInfo(name, minutes, subjectsByChild[name] ?: emptyList())
             }
-            LearningResult(checkedAt, children)
+            LearningResult(checkedAt, children, session.accountId.toString())
         }
 
-    fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> = capture {
+    override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> = capture {
         val body = JSONObject()
             .put("accountType", "personal")
             .put("getSessionId", true)
@@ -127,7 +127,7 @@ class LearningReportRepository internal constructor(
         LearningSession(accountId, token)
     }
 
-    fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> = capture {
+    override fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> = capture {
         val subscriptions = mutableListOf<ChildSubjectSubscription>()
         val childOrder = linkedSetOf<String>()
 
@@ -156,7 +156,7 @@ class LearningReportRepository internal constructor(
         LearningCatalog(childOrder.toList(), subscriptions.toList())
     }
 
-    fun loadSubjectReport(
+    override fun loadSubjectReport(
         session: LearningSession,
         subscription: ChildSubjectSubscription,
         date: LocalDate,

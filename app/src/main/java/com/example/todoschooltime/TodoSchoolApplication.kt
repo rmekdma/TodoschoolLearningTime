@@ -1,0 +1,53 @@
+package com.example.todoschooltime
+
+import android.app.Application
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.Executors
+
+class TodoSchoolApplication : Application() {
+    lateinit var learningMonitor: LearningMonitor
+        private set
+    internal lateinit var learningMonitorRuntime: LearningMonitorEngine
+        private set
+
+    override fun onCreate() {
+        super.onCreate()
+        val commandExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "learning-monitor-serial").apply { isDaemon = true }
+        }
+        val workerExecutor = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "learning-monitor-io").apply { isDaemon = true }
+        }
+        val mainHandler = Handler(Looper.getMainLooper())
+        val monitorPreferences = getSharedPreferences(MONITOR_PREFERENCES, MODE_PRIVATE)
+        val notificationIdPreferences = getSharedPreferences(NOTIFICATION_ID_PREFERENCES, MODE_PRIVATE)
+        val targetCountStore = TargetCountStore(this)
+
+        val engine = LearningMonitorEngine(
+            commandQueue = MonitorTaskQueue { task -> commandExecutor.execute { task() } },
+            workerQueue = MonitorTaskQueue { task -> workerExecutor.execute { task() } },
+            callbackQueue = MonitorTaskQueue { task -> mainHandler.post { task() } },
+            clock = object : MonitorClock {
+                override fun today() = DateHelper.today()
+                override fun checkedAt() = DateHelper.formatCheckedAt(DateHelper.nowZoned())
+            },
+            store = SharedPreferencesMonitorStore(monitorPreferences),
+            repository = LearningReportRepository(),
+            targetProvider = MonitorTargetProvider { childName, subjectName ->
+                targetCountStore.getTargetCount(childName, subjectName)
+            },
+            notificationSink = AndroidChildNotificationSink(
+                this,
+                SharedPreferencesNotificationIdAllocator(notificationIdPreferences),
+            ),
+        )
+        learningMonitor = engine
+        learningMonitorRuntime = engine
+    }
+
+    private companion object {
+        const val MONITOR_PREFERENCES = "learning_monitor"
+        const val NOTIFICATION_ID_PREFERENCES = "learning_monitor_notification_ids"
+    }
+}

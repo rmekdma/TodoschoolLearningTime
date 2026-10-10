@@ -3,12 +3,12 @@ package com.example.todoschooltime
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.DatePickerDialog
+import android.content.ComponentName
 import android.content.DialogInterface
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.text.InputFilter
 import android.text.InputType
 import android.text.SpannableStringBuilder
@@ -21,6 +21,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.provider.Settings
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -30,14 +31,9 @@ import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-import org.json.JSONObject
-import java.security.KeyStore
 import java.time.LocalDate
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -45,7 +41,11 @@ class MainActivity : Activity() {
     private var learningDate: LocalDate = DateHelper.today()
     private val requestTracker = AsyncRequestTracker()
     private val targetCountStore by lazy { TargetCountStore(this) }
+    private val learningMonitor by lazy { (application as TodoSchoolApplication).learningMonitor }
+    private val learningMonitorRuntime by lazy { (application as TodoSchoolApplication).learningMonitorRuntime }
     private var currentResult: LearningResult? = null
+    private var monitorSnapshot: LearningMonitorSnapshot = LearningMonitorSnapshot()
+    private var monitorSubscription: MonitorSubscription? = null
 
     private lateinit var rootLayout: LinearLayout
     private lateinit var topNavLayout: LinearLayout
@@ -53,6 +53,9 @@ class MainActivity : Activity() {
     private lateinit var datePickerButton: TextView
     private lateinit var nextDateButton: TextView
     private lateinit var checkedAtView: TextView
+    private lateinit var intervalButton: TextView
+    private lateinit var monitorStatusView: TextView
+    private lateinit var monitorSettingsButton: TextView
     private lateinit var swipeRefreshLayout: SwipeRefreshLayout
     private lateinit var childrenContainer: LinearLayout
     private lateinit var errorView: TextView
@@ -75,6 +78,20 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         updateDateNavUi()
+        monitorSubscription?.close()
+        monitorSubscription = learningMonitor.observe { snapshot ->
+            if (isFinishing || isDestroyed || snapshot.revision < monitorSnapshot.revision) return@observe
+            monitorSnapshot = snapshot
+            updateMonitorControls()
+            currentResult?.let(::renderChildren)
+        }
+        updateMonitorControls()
+    }
+
+    override fun onPause() {
+        monitorSubscription?.close()
+        monitorSubscription = null
+        super.onPause()
     }
 
     private fun setupSystemBars() {
@@ -211,9 +228,131 @@ class MainActivity : Activity() {
 
         rootLayout.addView(topNavLayout)
         rootLayout.addView(checkedAtView)
+        buildMonitorControls()
         rootLayout.addView(swipeRefreshLayout)
 
         setContentView(rootLayout)
+    }
+
+    private fun buildMonitorControls() {
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), dp(8))
+        }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        intervalButton = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.rgb(30, 30, 30))
+            minimumHeight = dp(44)
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(8), 0, dp(16), 0)
+            setOnClickListener { showMonitorIntervalDialog() }
+        }
+        monitorSettingsButton = TextView(this).apply {
+            text = "감시 설정"
+            textSize = 14f
+            setTextColor(Color.rgb(30, 30, 30))
+            minimumHeight = dp(44)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener { showMonitorSetupDialog() }
+        }
+        buttons.addView(intervalButton)
+        buttons.addView(monitorSettingsButton)
+        monitorStatusView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(110, 110, 110))
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        controls.addView(buttons)
+        controls.addView(monitorStatusView)
+        rootLayout.addView(controls)
+    }
+
+    private fun updateMonitorControls() {
+        if (!::intervalButton.isInitialized) return
+        intervalButton.text = "감시 간격 ${monitorSnapshot.intervalMinutes}분"
+        val accessibilityEnabled = isMonitorAccessibilityEnabled()
+        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        learningMonitorRuntime.executionConditionsChanged(accessibilityEnabled, notificationsEnabled)
+        val accessibilityText = if (!accessibilityEnabled) "접근성 설정 필요" else if (monitorSnapshot.serviceLeaseAttached) {
+            "접근성 연결됨"
+        } else {
+            "접근성 연결 대기"
+        }
+        val notificationText = if (notificationsEnabled) "알림 사용 가능" else "알림 권한 필요"
+        monitorStatusView.text = "$accessibilityText · $notificationText"
+    }
+
+    private fun isMonitorAccessibilityEnabled(): Boolean {
+        val enabled = Settings.Secure.getInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
+        if (!enabled) return false
+        val componentName = ComponentName(this, MonitorAccessibilityService::class.java).flattenToString()
+        return Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            .orEmpty()
+            .split(':')
+            .any { it.equals(componentName, ignoreCase = true) }
+    }
+
+    private fun showMonitorSetupDialog() {
+        val accessibilityEnabled = isMonitorAccessibilityEnabled()
+        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        val message = buildString {
+            append("아이별 감시를 계속 실행하려면 접근성 서비스와 알림을 허용하세요.\n\n")
+            append("접근성: ")
+            append(if (accessibilityEnabled) "설정됨" else "설정 필요")
+            append(if (accessibilityEnabled && monitorSnapshot.serviceLeaseAttached) " · 연결됨" else if (accessibilityEnabled) " · 연결 대기" else "")
+            append("\n알림: ")
+            append(if (notificationsEnabled) "사용 가능" else "설정 필요")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("감시 설정")
+            .setMessage(message)
+            .setPositiveButton("접근성 설정") { _, _ ->
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            .setNeutralButton("앱 알림 설정") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                })
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    private fun showMonitorIntervalDialog() {
+        val accountId = currentResult?.accountId.orEmpty()
+        if (accountId.isBlank()) {
+            Toast.makeText(this, "로그인 후 감시 간격을 설정할 수 있습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(monitorSnapshot.intervalMinutes.toString())
+            setSelection(text.length)
+            setPadding(dp(24), dp(12), dp(24), dp(8))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("공통 감시 간격 (분)")
+            .setMessage("1 이상의 정수를 입력하세요.")
+            .setView(input)
+            .setPositiveButton("저장") { _, _ ->
+                val minutes = MonitorIntervalParser.parse(input.text.toString())
+                if (minutes == null) {
+                    Toast.makeText(this, "1 이상의 정수를 입력해주세요.", Toast.LENGTH_SHORT).show()
+                } else {
+                    learningMonitor.setIntervalMinutes(accountId, minutes)
+                }
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     private fun updateDateNavUi() {
@@ -362,6 +501,10 @@ class MainActivity : Activity() {
                         return@runOnUiThread
                     }
                     currentResult = result
+                    if (result.accountId.isNotBlank()) {
+                        CredentialStore(this).saveAccountId(result.accountId)
+                        learningMonitorRuntime.credentialsAvailable(result.accountId, credentials.email, credentials.password)
+                    }
                     setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE
                     swipeRefreshLayout.isRefreshing = false
@@ -403,7 +546,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            // 1행: 아이 이름 + ⚙️ 설정 버튼
+            // 1행: 아이 이름 + 아이별 감시 + 목표 설정
             val headerLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -420,11 +563,35 @@ class MainActivity : Activity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                maxWidth = dp(240)
+                maxWidth = dp(190)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 )
+            }
+
+            val registered = currentResult?.accountId == monitorSnapshot.accountId &&
+                child.name in monitorSnapshot.registeredChildren
+            val monitoringButton = TextView(this).apply {
+                text = if (registered) "🔔" else "🔕"
+                textSize = 16f
+                contentDescription = if (registered) "${child.name} 감시 해제" else "${child.name} 감시 등록"
+                if (outValue.resourceId != 0) setBackgroundResource(outValue.resourceId)
+                gravity = Gravity.CENTER
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    val accountId = currentResult?.accountId.orEmpty()
+                    if (accountId.isBlank()) {
+                        Toast.makeText(this@MainActivity, "로그인 후 감시를 등록할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                    } else if (registered) {
+                        learningMonitor.unregisterChild(accountId, child.name)
+                    } else {
+                        learningMonitor.registerChild(accountId, child.name)
+                    }
+                }
             }
 
             val settingsButton = TextView(this).apply {
@@ -451,6 +618,7 @@ class MainActivity : Activity() {
             }
 
             headerLayout.addView(nameView)
+            headerLayout.addView(monitoringButton)
             headerLayout.addView(settingsButton)
 
             // 2행: ${minutes}분
@@ -599,81 +767,5 @@ class MainActivity : Activity() {
             currentResult?.let { renderChildren(it) }
             dialog.dismiss()
         }
-    }
-}
-
-private data class Credentials(
-    val email: String,
-    val password: String,
-)
-
-private class CredentialStore(private val activity: Activity) {
-    private val prefs = activity.getSharedPreferences(PREFS_NAME, Activity.MODE_PRIVATE)
-
-    fun save(credentials: Credentials) {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val json = JSONObject().apply {
-            put("email", credentials.email)
-            put("password", credentials.password)
-        }.toString()
-        val encrypted = cipher.doFinal(json.toByteArray(Charsets.UTF_8))
-        prefs.edit()
-            .putString(KEY_IV, android.util.Base64.encodeToString(cipher.iv, android.util.Base64.NO_WRAP))
-            .putString(KEY_CIPHERTEXT, android.util.Base64.encodeToString(encrypted, android.util.Base64.NO_WRAP))
-            .apply()
-    }
-
-    fun load(): Credentials? {
-        val ivText = prefs.getString(KEY_IV, null) ?: return null
-        val encryptedText = prefs.getString(KEY_CIPHERTEXT, null) ?: return null
-
-        return try {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            val iv = android.util.Base64.decode(ivText, android.util.Base64.NO_WRAP)
-            val encrypted = android.util.Base64.decode(encryptedText, android.util.Base64.NO_WRAP)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
-            val jsonString = String(cipher.doFinal(encrypted), Charsets.UTF_8)
-            val json = JSONObject(jsonString)
-            val email = json.optString("email")
-            val password = json.optString("password")
-            if (email.isNotBlank() && password.isNotBlank()) {
-                Credentials(email, password)
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            clear()
-            null
-        }
-    }
-
-    fun clear() {
-        prefs.edit().clear().apply()
-    }
-
-    private fun getOrCreateKey(): SecretKey {
-        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-
-        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        keyGenerator.init(
-            KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build(),
-        )
-        return keyGenerator.generateKey()
-    }
-
-    companion object {
-        private const val PREFS_NAME = "credentials"
-        private const val KEY_ALIAS = "todoschool_learning_time_credentials"
-        private const val KEY_IV = "credentials_iv"
-        private const val KEY_CIPHERTEXT = "credentials_ciphertext"
-        private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }

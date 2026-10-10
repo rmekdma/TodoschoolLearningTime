@@ -14,6 +14,7 @@ data class ChildLearningInfo(
 data class LearningResult(
     val checkedAt: String,
     val children: List<ChildLearningInfo>,
+    val accountId: String = "",
 )
 
 object TargetDefaults {

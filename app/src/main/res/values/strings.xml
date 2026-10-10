@@ -1,0 +1,4 @@
+<resources>
+    <string name="monitor_accessibility_service_name">토도 학습 감시</string>
+    <string name="monitor_accessibility_service_description">과목 앱이 전면에 있는지 확인해 오늘 학습 상태 감시를 실행합니다.</string>
+</resources>
