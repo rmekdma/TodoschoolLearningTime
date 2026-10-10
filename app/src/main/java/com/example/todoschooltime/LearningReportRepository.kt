@@ -116,9 +116,9 @@ class LearningReportRepository internal constructor(
             .put("password", password)
 
         val login = postData("/v3/account/signin", body, null, isSignIn = true) as? JSONObject
-            ?: throw LearningAuthenticationDeniedException("로그인 응답 형식이 예상과 다릅니다.")
+            ?: throw LearningRepositoryException("로그인 응답 형식이 예상과 다릅니다.")
         val token = login.optString("authToken").ifBlank { login.optString("sessionId") }
-        if (token.isBlank()) throw LearningAuthenticationDeniedException("로그인 토큰을 받지 못했습니다.")
+        if (token.isBlank()) throw LearningRepositoryException("로그인 응답에 유효한 토큰이 없습니다.")
 
         val accountId = login.opt("accountId")
         if (accountId == null || accountId == JSONObject.NULL) {
@@ -199,7 +199,9 @@ class LearningReportRepository internal constructor(
         } catch (exception: Exception) {
             throw LearningRepositoryException("$path: JSON 응답 형식이 예상과 다릅니다.", exception)
         }
-        if (!envelope.optBoolean("result", false)) {
+        val result = envelope.opt("result") as? Boolean
+            ?: throw LearningRepositoryException("$path: API result 표식 형식이 예상과 다릅니다.")
+        if (!result) {
             if (isSignIn) throw LearningAuthenticationDeniedException("로그인에 실패했습니다.")
             throw LearningRepositoryException("$path: API 요청이 실패했습니다.")
         }
