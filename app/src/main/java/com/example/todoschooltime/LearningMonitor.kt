@@ -57,7 +57,11 @@ object MonitorNotificationText {
                     "완료 ${subject.activityCount}/${subject.targetCount}"
                 }
             }
-            "${subject.name} $state"
+            if (subject.status == MonitorSubjectStatus.COMPLETE) {
+                "✔ ${subject.name} $state"
+            } else {
+                "${subject.name} $state"
+            }
         }
         if (subjectLines.isEmpty()) add("구독 과목 확인 대기") else addAll(subjectLines)
         child.lastCheckedAt?.let(::add)
@@ -69,9 +73,9 @@ object MonitorNotificationText {
             MonitorSubjectStatus.CONFIRMATION_PENDING -> "${subject.name} 확인 대기"
             MonitorSubjectStatus.BELOW_TARGET -> "${subject.name} ${subject.activityCount ?: "?"}/${subject.targetCount}"
             MonitorSubjectStatus.COMPLETE -> if (subject.activityCount == null) {
-                "${subject.name} 완료"
+                "✔ ${subject.name} 완료"
             } else {
-                "${subject.name} ${subject.activityCount}/${subject.targetCount}"
+                "✔ ${subject.name} ${subject.activityCount}/${subject.targetCount}"
             }
         }
     }.ifBlank { "구독 과목 확인 대기" }
@@ -150,23 +154,21 @@ class LearningMonitorEngine(
         var intervalMinutes: java.math.BigInteger,
         val registrations: LinkedHashMap<String, MutableChild> = linkedMapOf(),
         val generations: MutableMap<String, Long> = mutableMapOf(),
-        var loaded: Boolean = false,
     )
 
-    private data class PairOutcome(
-        val subjectName: String,
-        val targetCount: Int,
-        val result: LearningRepositoryResult<SubjectReport>?,
-    )
+    private data class BaselineKey(val accountId: String, val childName: String)
 
-    private data class BaselineResult(
+    private class BaselineRun(
         val accountId: String,
         val childName: String,
         val generation: Long,
         val accountEpoch: Long,
-        val outcomes: List<PairOutcome> = emptyList(),
-        val metadataFailure: String? = null,
-    )
+        val availableCredentials: Credentials,
+    ) {
+        var session: LearningSession? = null
+        var subscriptions: List<ChildSubjectSubscription> = emptyList()
+        var nextSubscriptionIndex: Int = 0
+    }
 
     private class ListenerSlot(val listener: (LearningMonitorSnapshot) -> Unit) {
         val active = AtomicBoolean(true)
@@ -174,6 +176,7 @@ class LearningMonitorEngine(
 
     private val accounts = mutableMapOf<String, AccountState>()
     private val credentials = mutableMapOf<String, Credentials>()
+    private val baselineRuns = mutableMapOf<BaselineKey, BaselineRun>()
     private val listeners = mutableListOf<ListenerSlot>()
     private var activeAccountId: String? = null
     private var accountEpoch: Long = 0
@@ -210,6 +213,7 @@ class LearningMonitorEngine(
         commandQueue.enqueue {
             val switchingAccounts = activeAccountId != accountId
             if (switchingAccounts) {
+                cancelUnreleasedBaselines()
                 accountEpoch += 1
                 activeAccountId = accountId
             }
@@ -245,6 +249,7 @@ class LearningMonitorEngine(
         commandQueue.enqueue {
             val state = accountState(accountId)
             val old = state.registrations.remove(childName)
+            baselineRuns.remove(BaselineKey(accountId, childName))
             state.generations[childName] = (state.generations[childName] ?: old?.generation ?: 0L) + 1L
             store.saveRegisteredChildren(accountId, state.registrations.keys)
             notificationSink.cancel(accountId, childName)
@@ -281,6 +286,7 @@ class LearningMonitorEngine(
             val wasReady = executionReady()
             this.accessibilityEnabled = accessibilityEnabled
             this.notificationsEnabled = notificationsEnabled
+            if (wasReady && !executionReady()) cancelUnreleasedBaselines()
             if (!wasReady && executionReady()) startUnattemptedBaselines()
         }
     }
@@ -289,6 +295,7 @@ class LearningMonitorEngine(
         commandQueue.enqueue {
             if (serviceLeaseAttached) {
                 serviceLeaseAttached = false
+                cancelUnreleasedBaselines()
                 publish()
             }
         }
@@ -301,7 +308,6 @@ class LearningMonitorEngine(
 
     private fun accountState(accountId: String): AccountState = accounts.getOrPut(accountId) {
         AccountState(intervalMinutes = store.intervalMinutes(accountId)).also { state ->
-            state.loaded = true
             store.registeredChildren(accountId).forEach { childName ->
                 val child = resetChild(state, childName)
                 state.registrations[childName] = child
@@ -336,152 +342,206 @@ class LearningMonitorEngine(
         val child = state.registrations[childName] ?: return
         if (child.baselineStarted) return
         child.baselineStarted = true
-        val epoch = accountEpoch
-        val generation = child.generation
-        workerQueue.enqueue {
-            val result = try {
-                loadBaseline(accountId, childName, generation, epoch, availableCredentials)
-            } catch (exception: Exception) {
-                baselineFailure(accountId, childName, generation, epoch, exception.message)
-            }
-            commandQueue.enqueue { applyBaseline(result) }
-        }
+        val run = BaselineRun(accountId, childName, child.generation, accountEpoch, availableCredentials)
+        baselineRuns[BaselineKey(accountId, childName)] = run
+        loadBaselineSession(run)
     }
 
-    private fun loadBaseline(
-        accountId: String,
-        childName: String,
-        generation: Long,
-        epoch: Long,
-        availableCredentials: Credentials,
-    ): BaselineResult {
-        val session = when (val signIn = repository.signIn(availableCredentials.email, availableCredentials.password)) {
-            is LearningRepositoryResult.Success -> signIn.value
-            is LearningRepositoryResult.TemporaryFailure -> return baselineFailure(accountId, childName, generation, epoch, signIn.error.message)
-            is LearningRepositoryResult.AuthenticationDenied -> return baselineFailure(accountId, childName, generation, epoch, signIn.error.message)
-        }
-        if (session.accountId.toString() != accountId) {
-            return baselineFailure(
-                accountId,
-                childName,
-                generation,
-                epoch,
-                "인증 계정이 감시 계정과 일치하지 않습니다.",
-            )
-        }
-        val catalog = when (val loaded = repository.loadCatalog(session)) {
-            is LearningRepositoryResult.Success -> loaded.value
-            is LearningRepositoryResult.TemporaryFailure -> return baselineFailure(accountId, childName, generation, epoch, loaded.error.message)
-            is LearningRepositoryResult.AuthenticationDenied -> return baselineFailure(accountId, childName, generation, epoch, loaded.error.message)
-        }
-        val subscriptions = catalog.subscriptions.filter { it.childName == childName }
-        val outcomes = subscriptions.map { subscription ->
-            val target = targetProvider.targetCount(childName, subscription.subjectName).coerceAtLeast(0)
-            PairOutcome(
-                subjectName = subscription.subjectName,
-                targetCount = target,
-                result = if (target == 0) {
-                    null
-                } else {
-                    when (val report = repository.loadSubjectReport(session, subscription, clock.today())) {
-                        is LearningRepositoryResult.Success -> if (
-                            report.value.childName == childName && report.value.subjectName == subscription.subjectName
-                        ) {
-                            report
-                        } else {
-                            LearningRepositoryResult.TemporaryFailure(
-                                LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
-                            )
-                        }
-                        is LearningRepositoryResult.TemporaryFailure -> report
-                        is LearningRepositoryResult.AuthenticationDenied -> report
+    private fun loadBaselineSession(run: BaselineRun) = releaseBaselineIo(
+        run,
+        operation = {
+            repository.signIn(run.availableCredentials.email, run.availableCredentials.password)
+        },
+        onSuccess = { result ->
+            when (result) {
+                is LearningRepositoryResult.Success -> {
+                    if (result.value.accountId.toString() != run.accountId) {
+                        finishBaselineFailure(run, "인증 계정이 감시 계정과 일치하지 않습니다.")
+                    } else {
+                        run.session = result.value
+                        loadBaselineCatalog(run)
                     }
-                },
-            )
-        }
-        return BaselineResult(accountId, childName, generation, epoch, outcomes)
-    }
-
-    private fun baselineFailure(
-        accountId: String,
-        childName: String,
-        generation: Long,
-        epoch: Long,
-        message: String?,
-    ) = BaselineResult(
-        accountId = accountId,
-        childName = childName,
-        generation = generation,
-        accountEpoch = epoch,
-        metadataFailure = message ?: "학습 정보를 확인하지 못했습니다.",
+                }
+                is LearningRepositoryResult.TemporaryFailure -> finishBaselineFailure(run, result.error.message)
+                is LearningRepositoryResult.AuthenticationDenied -> finishBaselineFailure(run, result.error.message)
+            }
+        },
+        onFailure = { finishBaselineFailure(run, it.message) },
     )
 
-    private fun applyBaseline(result: BaselineResult) {
-        if (result.accountEpoch != accountEpoch || result.accountId != activeAccountId) return
-        val state = accounts[result.accountId] ?: return
-        val child = state.registrations[result.childName] ?: return
-        if (child.generation != result.generation) return
-
-        val oldCheckedAt = child.snapshot.lastCheckedAt
-        if (result.metadataFailure != null) {
-            val pending = supportedSubjects().associateWith { name ->
-                pendingSubject(result.childName, name)
-            }
-            child.snapshot = MonitorChildSnapshot(
-                childName = result.childName,
-                subjects = pending,
-                lastCheckedAt = oldCheckedAt,
-                error = result.metadataFailure,
-            )
-        } else {
-            val checkedAt = if (result.outcomes.any { it.result is LearningRepositoryResult.Success }) clock.checkedAt() else oldCheckedAt
-            val subjects = result.outcomes.associate { outcome ->
-                val subject = when (val report = outcome.result) {
-                    null -> MonitorSubjectSnapshot(
-                        name = outcome.subjectName,
-                        status = MonitorSubjectStatus.COMPLETE,
-                        targetCount = 0,
-                    )
+    private fun loadBaselineCatalog(run: BaselineRun) {
+        val session = run.session ?: return finishBaselineFailure(run, "로그인 상태를 확인하지 못했습니다.")
+        releaseBaselineIo(
+            run,
+            operation = { repository.loadCatalog(session) },
+            onSuccess = { result ->
+                when (result) {
                     is LearningRepositoryResult.Success -> {
-                        val reportValue = report.value
-                        val status = if (reportValue.activityCount >= outcome.targetCount) {
-                            MonitorSubjectStatus.COMPLETE
-                        } else {
-                            MonitorSubjectStatus.BELOW_TARGET
+                        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return@releaseBaselineIo
+                        val subscriptions = result.value.subscriptions.filter { it.childName == run.childName }
+                        val previousSubjects = child.snapshot.subjects
+                        val subjects = subscriptions.associate { subscription ->
+                            val target = targetProvider.targetCount(run.childName, subscription.subjectName).coerceAtLeast(0)
+                            val previous = previousSubjects[subscription.subjectName]
+                            val current = if (target == 0) {
+                                MonitorSubjectSnapshot(subscription.subjectName, MonitorSubjectStatus.COMPLETE, 0)
+                            } else {
+                                previous?.takeIf {
+                                    it.targetCount == target && it.status != MonitorSubjectStatus.CONFIRMATION_PENDING
+                                } ?: pendingSubject(run.childName, subscription.subjectName)
+                            }
+                            subscription.subjectName to current
                         }
-                        MonitorSubjectSnapshot(
-                            name = outcome.subjectName,
-                            status = status,
-                            targetCount = outcome.targetCount,
-                            activityCount = reportValue.activityCount,
-                            checkedAt = clock.checkedAt(),
+                        child.snapshot = child.snapshot.copy(
+                            subjects = subjects,
+                            error = subjects.values.mapNotNull { it.error }.distinct().takeIf { it.isNotEmpty() }?.joinToString(" · "),
                         )
+                        run.subscriptions = subscriptions
+                        run.nextSubscriptionIndex = 0
+                        notificationSink.showStatus(run.accountId, immutableChild(child.snapshot), completion = false)
+                        publish()
+                        loadNextBaselinePair(run)
                     }
-                    is LearningRepositoryResult.TemporaryFailure -> MonitorSubjectSnapshot(
-                        name = outcome.subjectName,
-                        status = MonitorSubjectStatus.CONFIRMATION_PENDING,
-                        targetCount = outcome.targetCount,
-                        error = report.error.message,
-                    )
-                    is LearningRepositoryResult.AuthenticationDenied -> MonitorSubjectSnapshot(
-                        name = outcome.subjectName,
-                        status = MonitorSubjectStatus.CONFIRMATION_PENDING,
-                        targetCount = outcome.targetCount,
-                        error = report.error.message,
-                    )
+                    is LearningRepositoryResult.TemporaryFailure -> finishBaselineFailure(run, result.error.message)
+                    is LearningRepositoryResult.AuthenticationDenied -> finishBaselineFailure(run, result.error.message)
                 }
-                outcome.subjectName to subject
+            },
+            onFailure = { finishBaselineFailure(run, it.message) },
+        )
+    }
+
+    private fun loadNextBaselinePair(run: BaselineRun) {
+        if (!baselineCanContinue(run)) return
+        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return
+        while (run.nextSubscriptionIndex < run.subscriptions.size) {
+            val subscription = run.subscriptions[run.nextSubscriptionIndex++]
+            val target = targetProvider.targetCount(run.childName, subscription.subjectName).coerceAtLeast(0)
+            val existing = child.snapshot.subjects[subscription.subjectName]
+            if (target == 0 || (existing != null && existing.targetCount == target &&
+                    existing.status != MonitorSubjectStatus.CONFIRMATION_PENDING)) {
+                continue
             }
-            val errors = subjects.values.mapNotNull { it.error }.distinct()
-            child.snapshot = MonitorChildSnapshot(
-                childName = result.childName,
-                subjects = subjects,
-                lastCheckedAt = checkedAt,
-                error = errors.takeIf { it.isNotEmpty() }?.joinToString(" · "),
+            val session = run.session ?: return finishBaselineFailure(run, "로그인 상태를 확인하지 못했습니다.")
+            releaseBaselineIo(
+                run,
+                operation = { repository.loadSubjectReport(session, subscription, clock.today()) },
+                onSuccess = { result ->
+                    val validated = when (result) {
+                        is LearningRepositoryResult.Success -> if (
+                            result.value.childName == run.childName && result.value.subjectName == subscription.subjectName
+                        ) result else LearningRepositoryResult.TemporaryFailure(
+                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
+                        )
+                        is LearningRepositoryResult.TemporaryFailure -> result
+                        is LearningRepositoryResult.AuthenticationDenied -> result
+                    }
+                    applyBaselinePair(run, subscription, target, validated)
+                    loadNextBaselinePair(run)
+                },
+                onFailure = { exception ->
+                    applyBaselinePair(
+                        run,
+                        subscription,
+                        target,
+                        LearningRepositoryResult.TemporaryFailure(
+                            LearningRepositoryException(exception.message ?: "학습 결과를 확인하지 못했습니다.", exception),
+                        ),
+                    )
+                    loadNextBaselinePair(run)
+                },
+            )
+            return
+        }
+        baselineRuns.remove(BaselineKey(run.accountId, run.childName), run)
+    }
+
+    private fun applyBaselinePair(
+        run: BaselineRun,
+        subscription: ChildSubjectSubscription,
+        target: Int,
+        result: LearningRepositoryResult<SubjectReport>,
+    ) {
+        if (!baselineCanContinue(run)) return
+        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return
+        val checkedAt = if (result is LearningRepositoryResult.Success) clock.checkedAt() else child.snapshot.lastCheckedAt
+        val subject = when (result) {
+            is LearningRepositoryResult.Success -> {
+                val report = result.value
+                MonitorSubjectSnapshot(
+                    name = subscription.subjectName,
+                    status = if (report.activityCount >= target) MonitorSubjectStatus.COMPLETE else MonitorSubjectStatus.BELOW_TARGET,
+                    targetCount = target,
+                    activityCount = report.activityCount,
+                    checkedAt = clock.checkedAt(),
+                )
+            }
+            is LearningRepositoryResult.TemporaryFailure -> MonitorSubjectSnapshot(
+                name = subscription.subjectName,
+                status = MonitorSubjectStatus.CONFIRMATION_PENDING,
+                targetCount = target,
+                error = result.error.message,
+            )
+            is LearningRepositoryResult.AuthenticationDenied -> MonitorSubjectSnapshot(
+                name = subscription.subjectName,
+                status = MonitorSubjectStatus.CONFIRMATION_PENDING,
+                targetCount = target,
+                error = result.error.message,
             )
         }
-        notificationSink.showStatus(result.accountId, immutableChild(child.snapshot), completion = false)
+        val subjects = LinkedHashMap(child.snapshot.subjects).apply { put(subscription.subjectName, subject) }
+        child.snapshot = child.snapshot.copy(
+            subjects = subjects,
+            lastCheckedAt = checkedAt,
+            error = subjects.values.mapNotNull { it.error }.distinct().takeIf { it.isNotEmpty() }?.joinToString(" · "),
+        )
+        notificationSink.showStatus(run.accountId, immutableChild(child.snapshot), completion = false)
         publish()
+    }
+
+    private fun finishBaselineFailure(run: BaselineRun, message: String?) {
+        if (!baselineCanContinue(run)) return
+        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return
+        child.snapshot = child.snapshot.copy(error = message ?: "학습 정보를 확인하지 못했습니다.")
+        notificationSink.showStatus(run.accountId, immutableChild(child.snapshot), completion = false)
+        publish()
+        baselineRuns.remove(BaselineKey(run.accountId, run.childName), run)
+    }
+
+    private fun <T> releaseBaselineIo(
+        run: BaselineRun,
+        operation: () -> T,
+        onSuccess: (T) -> Unit,
+        onFailure: (Exception) -> Unit,
+    ) {
+        if (!baselineCanContinue(run)) return
+        workerQueue.enqueue {
+            val outcome = try {
+                Result.success(operation())
+            } catch (exception: Exception) {
+                Result.failure(exception)
+            }
+            commandQueue.enqueue response@{
+                if (!baselineCanContinue(run)) return@response
+                outcome.fold(onSuccess) { error -> onFailure(error as? Exception ?: RuntimeException(error)) }
+            }
+        }
+    }
+
+    private fun baselineCanContinue(run: BaselineRun): Boolean {
+        if (baselineRuns[BaselineKey(run.accountId, run.childName)] !== run) return false
+        if (run.accountEpoch != accountEpoch || run.accountId != activeAccountId || !executionReady()) return false
+        val child = accounts[run.accountId]?.registrations?.get(run.childName) ?: return false
+        return child.generation == run.generation && child.baselineStarted
+    }
+
+    private fun cancelUnreleasedBaselines() {
+        val activeRuns = baselineRuns.values.toList()
+        baselineRuns.clear()
+        activeRuns.forEach { run ->
+            accounts[run.accountId]?.registrations?.get(run.childName)
+                ?.takeIf { it.generation == run.generation }
+                ?.baselineStarted = false
+        }
     }
 
     private fun publish() {

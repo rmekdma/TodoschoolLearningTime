@@ -3,7 +3,6 @@ package com.example.todoschooltime
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.DatePickerDialog
-import android.content.ComponentName
 import android.content.DialogInterface
 import android.content.Intent
 import android.graphics.Color
@@ -31,7 +30,6 @@ import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import java.time.LocalDate
 import kotlin.math.ceil
@@ -42,7 +40,7 @@ class MainActivity : Activity() {
     private val requestTracker = AsyncRequestTracker()
     private val targetCountStore by lazy { TargetCountStore(this) }
     private val learningMonitor by lazy { (application as TodoSchoolApplication).learningMonitor }
-    private val learningMonitorRuntime by lazy { (application as TodoSchoolApplication).learningMonitorRuntime }
+    private val learningMonitorScreenUseCases by lazy { (application as TodoSchoolApplication).learningMonitorScreenUseCases }
     private var currentResult: LearningResult? = null
     private var monitorSnapshot: LearningMonitorSnapshot = LearningMonitorSnapshot()
     private var monitorSubscription: MonitorSubscription? = null
@@ -279,38 +277,25 @@ class MainActivity : Activity() {
     private fun updateMonitorControls() {
         if (!::intervalButton.isInitialized) return
         intervalButton.text = "감시 간격 ${monitorSnapshot.intervalMinutes}분"
-        val accessibilityEnabled = isMonitorAccessibilityEnabled()
-        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
-        learningMonitorRuntime.executionConditionsChanged(accessibilityEnabled, notificationsEnabled)
-        val accessibilityText = if (!accessibilityEnabled) "접근성 설정 필요" else if (monitorSnapshot.serviceLeaseAttached) {
+        val executionStatus = learningMonitorScreenUseCases.refreshExecutionConditions()
+        val accessibilityText = if (!executionStatus.accessibilityEnabled) "접근성 설정 필요" else if (monitorSnapshot.serviceLeaseAttached) {
             "접근성 연결됨"
         } else {
             "접근성 연결 대기"
         }
-        val notificationText = if (notificationsEnabled) "알림 사용 가능" else "알림 권한 필요"
+        val notificationText = if (executionStatus.notificationsEnabled) "알림 사용 가능" else "알림 권한 필요"
         monitorStatusView.text = "$accessibilityText · $notificationText"
     }
 
-    private fun isMonitorAccessibilityEnabled(): Boolean {
-        val enabled = Settings.Secure.getInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
-        if (!enabled) return false
-        val componentName = ComponentName(this, MonitorAccessibilityService::class.java).flattenToString()
-        return Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-            .orEmpty()
-            .split(':')
-            .any { it.equals(componentName, ignoreCase = true) }
-    }
-
     private fun showMonitorSetupDialog() {
-        val accessibilityEnabled = isMonitorAccessibilityEnabled()
-        val notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        val executionStatus = learningMonitorScreenUseCases.inspectExecutionStatus()
         val message = buildString {
             append("아이별 감시를 계속 실행하려면 접근성 서비스와 알림을 허용하세요.\n\n")
             append("접근성: ")
-            append(if (accessibilityEnabled) "설정됨" else "설정 필요")
-            append(if (accessibilityEnabled && monitorSnapshot.serviceLeaseAttached) " · 연결됨" else if (accessibilityEnabled) " · 연결 대기" else "")
+            append(if (executionStatus.accessibilityEnabled) "설정됨" else "설정 필요")
+            append(if (executionStatus.accessibilityEnabled && monitorSnapshot.serviceLeaseAttached) " · 연결됨" else if (executionStatus.accessibilityEnabled) " · 연결 대기" else "")
             append("\n알림: ")
-            append(if (notificationsEnabled) "사용 가능" else "설정 필요")
+            append(if (executionStatus.notificationsEnabled) "사용 가능" else "설정 필요")
         }
         AlertDialog.Builder(this)
             .setTitle("감시 설정")
@@ -502,8 +487,7 @@ class MainActivity : Activity() {
                     }
                     currentResult = result
                     if (result.accountId.isNotBlank()) {
-                        CredentialStore(this).saveAccountId(result.accountId)
-                        learningMonitorRuntime.credentialsAvailable(result.accountId, credentials.email, credentials.password)
+                        learningMonitorScreenUseCases.credentialsAccepted(result.accountId, credentials.email, credentials.password)
                     }
                     setNavButtonsEnabled(true)
                     progressBar.visibility = View.GONE

@@ -2,6 +2,9 @@ package com.example.todoschooltime
 
 import java.time.LocalDate
 import java.math.BigInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -75,8 +78,7 @@ class LearningMonitorEngineTest {
         fixture.engine.attachServiceLease()
         fixture.commands.drain()
         assertEquals(1, fixture.workers.size())
-        fixture.workers.drain()
-        fixture.commands.drain()
+        fixture.drainAll()
         assertEquals("account-A", fixture.engine.snapshot().accountId)
     }
 
@@ -95,8 +97,7 @@ class LearningMonitorEngineTest {
         assertNull(fixture.engine.snapshot().accountId)
         fixture.commands.drain()
         assertEquals(1, fixture.workers.size())
-        fixture.workers.drain()
-        fixture.commands.drain()
+        fixture.drainAll()
 
         val restored = fixture.engine.snapshot()
         assertEquals(setOf("철수"), restored.registeredChildren)
@@ -136,8 +137,7 @@ class LearningMonitorEngineTest {
         fixture.commands.drain()
         fixture.engine.unregisterChild("account-A", "철수")
         fixture.commands.drain()
-        fixture.workers.drain()
-        fixture.commands.drain()
+        fixture.drainAll()
 
         val snapshot = fixture.engine.snapshot()
         assertEquals(setOf("영희"), snapshot.registeredChildren)
@@ -145,6 +145,126 @@ class LearningMonitorEngineTest {
         assertEquals(MonitorSubjectStatus.BELOW_TARGET,
             snapshot.children.getValue("영희").subjects.getValue("한글").status)
         assertEquals(listOf("account-A" to "철수"), fixture.notifications.cancellations)
+    }
+
+    @Test
+    fun unregisteringDuringTheFirstReportStopsRemainingReportsButKeepsOtherChildRunning() {
+        val firstReportStarted = CountDownLatch(1)
+        val releaseFirstReport = CountDownLatch(1)
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith {
+                LearningRepositoryResult.Success(SubjectReport("철수", it, 8, 0))
+            },
+            reportGate = { subscription ->
+                if (subscription.childName == "철수" && subscription.subjectName == "한글") {
+                    firstReportStarted.countDown()
+                    check(releaseFirstReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.prepareRuntime()
+        fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+        fixture.engine.registerChild("account-A", "철수")
+        fixture.engine.registerChild("account-A", "영희")
+        fixture.commands.drain()
+
+        val firstReportWorker = fixture.startWorkerUntil(firstReportStarted)
+        fixture.engine.unregisterChild("account-A", "철수")
+        fixture.commands.drain()
+        releaseFirstReport.countDown()
+        firstReportWorker.join(5_000)
+        assertFalse("The in-flight report should finish after best-effort release", firstReportWorker.isAlive)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("한글"), fixture.repository.reportedPairs
+            .filter { it.first == "철수" }
+            .map { it.second })
+        assertEquals(listOf("한글", "수학", "영어"), fixture.repository.reportedPairs
+            .filter { it.first == "영희" }
+            .map { it.second })
+        assertEquals(setOf("영희"), fixture.engine.snapshot().registeredChildren)
+    }
+
+    @Test
+    fun detachingLeaseDropsTheCurrentPairKeepsCommittedBaselineAndReattachRequestsOnlyPendingPairs() {
+        val secondReportStarted = CountDownLatch(1)
+        val releaseSecondReport = CountDownLatch(1)
+        val gateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 8, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 7, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 9, 0)),
+            ),
+            reportGate = { subscription ->
+                if (subscription.childName == "철수" && subscription.subjectName == "수학" &&
+                    gateUsed.compareAndSet(false, true)) {
+                    secondReportStarted.countDown()
+                    check(releaseSecondReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.startRuntimeAndRegister("철수")
+        val secondReportWorker = fixture.startWorkerUntil(secondReportStarted)
+
+        val beforeDetach = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글")
+        assertEquals(MonitorSubjectStatus.COMPLETE, beforeDetach.status)
+        assertEquals(8, beforeDetach.activityCount)
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        releaseSecondReport.countDown()
+        secondReportWorker.join(5_000)
+        assertFalse("The in-flight report should finish after lease detach", secondReportWorker.isAlive)
+        fixture.commands.drain()
+
+        assertEquals(listOf("한글", "수학"), fixture.repository.reportedPairs.map { it.second })
+        assertEquals(MonitorSubjectStatus.COMPLETE,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글").status)
+        assertEquals(MonitorSubjectStatus.CONFIRMATION_PENDING,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("수학").status)
+        assertFalse(fixture.engine.snapshot().serviceLeaseAttached)
+
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(1, fixture.repository.reportedPairs.count { it.second == "한글" })
+        assertEquals(2, fixture.repository.reportedPairs.count { it.second == "수학" })
+        assertEquals(1, fixture.repository.reportedPairs.count { it.second == "영어" })
+        assertEquals(MonitorSubjectStatus.COMPLETE,
+            fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글").status)
+    }
+
+    @Test
+    fun switchingAccountsDuringAReportDropsItAndStopsTheOldAccountRun() {
+        val reportStarted = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith {
+                LearningRepositoryResult.Success(SubjectReport("철수", it, 8, 0))
+            },
+            reportGate = { subscription ->
+                if (subscription.childName == "철수" && subscription.subjectName == "한글") {
+                    reportStarted.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.startRuntimeAndRegister("철수")
+        val reportWorker = fixture.startWorkerUntil(reportStarted)
+
+        fixture.engine.credentialsAvailable("account-B", "other@example.test", "other-secret")
+        fixture.commands.drain()
+        releaseReport.countDown()
+        reportWorker.join(5_000)
+        assertFalse("The in-flight report should finish after the account switch", reportWorker.isAlive)
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("한글"), fixture.repository.reportedPairs.map { it.second })
+        assertEquals("account-B", fixture.engine.snapshot().accountId)
+        assertTrue(fixture.engine.snapshot().registeredChildren.isEmpty())
     }
 
     @Test
@@ -168,8 +288,7 @@ class LearningMonitorEngineTest {
         fixture.engine.credentialsAvailable("account-A", "mail@example.test", "secret")
         fixture.engine.registerChild("account-A", "철수")
         fixture.commands.drain()
-        fixture.workers.drain()
-        fixture.commands.drain()
+        fixture.drainAll()
         fixture.ui.drain()
         assertTrue(revisions.zipWithNext().all { (older, newer) -> newer > older })
 
@@ -189,11 +308,12 @@ class LearningMonitorEngineTest {
         catalogFailure: Exception? = null,
         signedInAccount: String = "account-A",
         storedChildren: Set<String> = emptySet(),
+        reportGate: (ChildSubjectSubscription) -> Unit = {},
     ) {
         val commands = ManualQueue()
         val workers = ManualQueue()
         val ui = ManualQueue()
-        val repository = FakeRepository(reports, catalogFailure, signedInAccount)
+        val repository = FakeRepository(reports, catalogFailure, signedInAccount, reportGate)
         val notifications = FakeNotifications()
         val store = FakeMonitorStore(storedChildren)
         val engine = LearningMonitorEngine(
@@ -221,7 +341,13 @@ class LearningMonitorEngineTest {
             engine.credentialsAvailable("account-A", "mail@example.test", "secret")
             engine.registerChild("account-A", child)
             commands.drain()
-            workers.drain()
+            drainAll()
+        }
+
+        fun startRuntimeAndRegister(child: String) {
+            prepareRuntime()
+            engine.credentialsAvailable("account-A", "mail@example.test", "secret")
+            engine.registerChild("account-A", child)
             commands.drain()
         }
 
@@ -230,6 +356,26 @@ class LearningMonitorEngineTest {
             engine.attachServiceLease()
             commands.drain()
         }
+
+        fun startWorkerUntil(signal: CountDownLatch): Thread {
+            while (!workers.isEmpty()) {
+                val thread = Thread(workers.takeNext(), "monitor-test-worker")
+                thread.start()
+                if (signal.await(100, TimeUnit.MILLISECONDS)) return thread
+                thread.join(5_000)
+                check(!thread.isAlive) { "A worker did not reach a controllable checkpoint" }
+                commands.drain()
+            }
+            throw AssertionError("No worker reached the requested checkpoint")
+        }
+
+        fun drainAll() {
+            while (!commands.isEmpty() || !workers.isEmpty()) {
+                commands.drain()
+                workers.drain()
+                commands.drain()
+            }
+        }
     }
 
     private class ManualQueue : MonitorTaskQueue {
@@ -237,6 +383,7 @@ class LearningMonitorEngineTest {
         override fun enqueue(task: () -> Unit) { tasks.addLast(task) }
         fun size(): Int = tasks.size
         fun isEmpty(): Boolean = tasks.isEmpty()
+        fun takeNext(): () -> Unit = tasks.removeFirst()
         fun drain() {
             while (tasks.isNotEmpty()) tasks.removeFirst().invoke()
         }
@@ -246,8 +393,10 @@ class LearningMonitorEngineTest {
         private val reports: Map<String, LearningRepositoryResult<SubjectReport>>,
         private val catalogFailure: Exception?,
         private val signedInAccount: String,
+        private val reportGate: (ChildSubjectSubscription) -> Unit,
     ) : MonitorRepository {
         val reportedSubjects = mutableListOf<String>()
+        val reportedPairs = mutableListOf<Pair<String, String>>()
         val requestedDates = mutableListOf<LocalDate>()
 
         override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> =
@@ -273,7 +422,9 @@ class LearningMonitorEngineTest {
             date: LocalDate,
         ): LearningRepositoryResult<SubjectReport> {
             reportedSubjects += subscription.subjectName
+            reportedPairs += subscription.childName to subscription.subjectName
             requestedDates += date
+            reportGate(subscription)
             return reports[subscription.subjectName]
                 ?: LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("report unavailable"))
         }

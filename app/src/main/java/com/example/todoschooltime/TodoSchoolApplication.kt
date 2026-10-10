@@ -8,7 +8,9 @@ import java.util.concurrent.Executors
 class TodoSchoolApplication : Application() {
     lateinit var learningMonitor: LearningMonitor
         private set
-    internal lateinit var learningMonitorRuntime: LearningMonitorEngine
+    internal lateinit var learningMonitorRuntime: LearningMonitorRuntimeAdapter
+        private set
+    internal lateinit var learningMonitorScreenUseCases: LearningMonitorScreenUseCases
         private set
 
     override fun onCreate() {
@@ -43,7 +45,9 @@ class TodoSchoolApplication : Application() {
             ),
         )
         learningMonitor = engine
-        learningMonitorRuntime = engine
+        val monitorRuntime = LearningMonitorRuntimeAdapter(this, engine)
+        learningMonitorRuntime = monitorRuntime
+        learningMonitorScreenUseCases = monitorRuntime
     }
 
     private companion object {
