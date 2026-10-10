@@ -1957,7 +1957,7 @@ class LearningMonitorEngine internal constructor(
     private fun applyRegularPair(
         run: RegularRun,
         pair: RegularPair,
-        result: LearningRepositoryResult<SubjectReport>,
+        validatedResult: LearningRepositoryResult<SubjectReport>,
     ) {
         if (!regularCanApply(run)) return
         if (run.lastDispatchSequence == 0L) return
@@ -1970,29 +1970,19 @@ class LearningMonitorEngine internal constructor(
 
         val previous = child.snapshot.subjects[pair.subscription.subjectName]
             ?: pendingSubject(pair.subscription.childName, pair.subscription.subjectName)
-        val validated = when (result) {
-            is LearningRepositoryResult.Success -> if (
-                result.value.childName == pair.subscription.childName &&
-                result.value.subjectName == pair.subscription.subjectName
-            ) result else LearningRepositoryResult.TemporaryFailure(
-                LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
-            )
-            is LearningRepositoryResult.TemporaryFailure -> result
-            is LearningRepositoryResult.AuthenticationDenied -> result
-        }
-        if (validated is LearningRepositoryResult.AuthenticationDenied) {
+        if (validatedResult is LearningRepositoryResult.AuthenticationDenied) {
             pauseForAuthenticationDenied(run.accountId)
             return
         }
-        val checkedAt = when (validated) {
+        val checkedAt = when (validatedResult) {
             is LearningRepositoryResult.Success -> clock.checkedAt()
             else -> child.snapshot.lastCheckedAt
         }
         var completion = false
-        val updatedSubject = when (validated) {
+        val updatedSubject = when (validatedResult) {
             is LearningRepositoryResult.Success -> {
                 child.validatedSubjects += pair.subscription.subjectName
-                val report = validated.value
+                val report = validatedResult.value
                 val status = if (report.activityCount >= pair.targetCount) {
                     MonitorSubjectStatus.COMPLETE
                 } else {
@@ -2009,8 +1999,8 @@ class LearningMonitorEngine internal constructor(
                     checkedAt = checkedAt,
                 )
             }
-            is LearningRepositoryResult.TemporaryFailure -> previous.copy(error = validated.error.message)
-            is LearningRepositoryResult.AuthenticationDenied -> previous.copy(error = validated.error.message)
+            is LearningRepositoryResult.TemporaryFailure -> previous.copy(error = validatedResult.error.message)
+            is LearningRepositoryResult.AuthenticationDenied -> previous.copy(error = validatedResult.error.message)
         }
         val subjects = LinkedHashMap(child.snapshot.subjects).apply {
             put(pair.subscription.subjectName, updatedSubject)
