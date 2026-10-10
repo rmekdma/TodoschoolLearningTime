@@ -88,6 +88,26 @@ class LearningReportRepositoryTest {
     }
 
     @Test
+    fun malformedSignInSuccessResponsesAreTemporaryFailures() {
+        val malformedResponses = listOf(
+            success(JSONArray()),
+            success(JSONObject()),
+            success(JSONObject().put("authToken", "  ").put("accountId", "account-7")),
+            jsonResponse(JSONObject().put("data", loginData("account-7")).toString()),
+            jsonResponse(JSONObject().put("result", "false").put("data", loginData("account-7")).toString()),
+            jsonResponse(JSONObject().put("result", 0).put("data", loginData("account-7")).toString()),
+        )
+
+        malformedResponses.forEach { response ->
+            val outcome = LearningReportRepository(
+                FixtureTransport(fixture("/v3/account/signin", response)),
+            ).signIn("p@example.com", "pw")
+
+            assertTrue("Expected malformed success to remain temporary, got $outcome", outcome is LearningRepositoryResult.TemporaryFailure)
+        }
+    }
+
+    @Test
     fun reportApiAndFormatFailuresNeverBecomeZeroActivitySuccess() {
         val failedApiResponse = jsonResponse(JSONObject().put("result", false).put("message", "temporary error").toString())
         val malformedResponse = jsonResponse("not json")
@@ -124,10 +144,14 @@ class LearningReportRepositoryTest {
         val unavailable = LearningReportRepository(
             FixtureTransport(fixture("/v3/account/signin", LearningHttpResponse(503, "unavailable"))),
         ).signIn("p@example.com", "pw")
+        val rejectedApiResponse = LearningReportRepository(
+            FixtureTransport(fixture("/v3/account/signin", jsonResponse(JSONObject().put("result", false).toString()))),
+        ).signIn("p@example.com", "wrong")
         val reportDenied = loadPairWithReportResponse(LearningHttpResponse(403, "forbidden"))
 
         assertTrue(denied is LearningRepositoryResult.AuthenticationDenied)
         assertTrue(unavailable is LearningRepositoryResult.TemporaryFailure)
+        assertTrue(rejectedApiResponse is LearningRepositoryResult.AuthenticationDenied)
         assertTrue(reportDenied is LearningRepositoryResult.AuthenticationDenied)
     }
 
