@@ -22,8 +22,6 @@ public final class MainActivity extends Activity {
     private static final String CHANNEL_ID = "bundled-tone-diagnostic-v1";
     private static final int NOTIFICATION_ID = 9100;
     private static final int PERMISSION_REQUEST_CODE = 100;
-    private static final String EXTRA_ACTION = "action";
-    private static final String ACTION_POST = "post_bundled_tone";
 
     private TextView statusView;
     private Button postButton;
@@ -33,10 +31,6 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(createContent());
         refreshPermissionState();
-
-        if (ACTION_POST.equals(getIntent().getStringExtra(EXTRA_ACTION))) {
-            postOneTest();
-        }
     }
 
     private LinearLayout createContent() {
