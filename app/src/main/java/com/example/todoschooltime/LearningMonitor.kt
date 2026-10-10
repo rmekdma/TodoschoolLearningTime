@@ -939,6 +939,8 @@ class LearningMonitorEngine internal constructor(
                 afterRequest?.let {
                     applyExecutionConditions(it.accessibilityEnabled, it.notificationsEnabled)
                 }
+                val dateChanged = refreshMonitoringDate()
+                if (dateChanged) return@response
                 if (!baselineCanContinue(run)) return@response
                 if (runtimePermissionRevision != permissionRevision) return@response
                 outcome.fold(onSuccess) { error -> onFailure(error as? Exception ?: RuntimeException(error)) }
@@ -1105,8 +1107,9 @@ class LearningMonitorEngine internal constructor(
     }.distinct().joinToString(" · ").ifBlank { null }
 
     private fun syncDateEvaluationTimer() {
-        val hasRegistrations = accounts.values.any { it.registrations.isNotEmpty() }
-        if (!hasRegistrations) {
+        val hasActiveRegistrations = serviceLeaseAttached &&
+            activeAccountId?.let(accounts::get)?.registrations?.isNotEmpty() == true
+        if (!hasActiveRegistrations) {
             cancelDateEvaluationTimer()
             return
         }
@@ -1397,6 +1400,8 @@ class LearningMonitorEngine internal constructor(
                 afterRequest?.let {
                     applyExecutionConditions(it.accessibilityEnabled, it.notificationsEnabled)
                 }
+                val dateChanged = refreshMonitoringDate()
+                if (dateChanged) return@response
                 if (activeRegularRun !== run) return@response
                 if (!regularCanApply(run) || runtimePermissionRevision != permissionRevision || outcome == null) {
                     return@response finishRegularRun(run)

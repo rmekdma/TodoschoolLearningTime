@@ -619,6 +619,57 @@ class LearningMonitorEngineTest {
     }
 
     @Test
+    fun dateEvaluationTimerFollowsAttachedActiveAccountLeaseAndRebaselinesAfterDetachedDateChange() {
+        val fixture = Fixture(
+            reports = mapOf(
+                "한글" to LearningRepositoryResult.Success(SubjectReport("철수", "한글", 2, 0)),
+                "수학" to LearningRepositoryResult.Success(SubjectReport("철수", "수학", 3, 0)),
+                "영어" to LearningRepositoryResult.Success(SubjectReport("철수", "영어", 4, 0)),
+            ),
+        )
+        fixture.startAndRegister("철수")
+        assertEquals(1, fixture.dateTimers.activeCount())
+        fixture.repository.clearReports()
+
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        assertEquals(0, fixture.dateTimers.activeCount())
+
+        fixture.clock.todayValue = LocalDate.of(2026, 10, 11)
+        fixture.engine.reevaluateMonitoringDate()
+        fixture.commands.drain()
+        val awaitingNewDate = fixture.engine.snapshot().children.getValue("철수")
+        assertTrue(awaitingNewDate.subjects.values.all {
+            it.status == MonitorSubjectStatus.CONFIRMATION_PENDING && it.activityCount == null
+        })
+        assertTrue(fixture.repository.reportedPairs.isEmpty())
+        assertEquals(0, fixture.dateTimers.activeCount())
+
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        fixture.drainAll()
+        assertEquals(1, fixture.dateTimers.activeCount())
+        assertTrue(fixture.repository.requestedDates.isNotEmpty())
+        assertTrue(fixture.repository.requestedDates.all { it == LocalDate.of(2026, 10, 11) })
+        assertEquals(2, fixture.engine.snapshot().children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+
+        fixture.engine.credentialsAvailable("account-B", "other@example.test", "other-secret")
+        fixture.commands.drain()
+        assertEquals(0, fixture.dateTimers.activeCount())
+    }
+
+    @Test
+    fun baselineResponsesThatReturnAfterSeoulMidnightAreDroppedBeforeTheirOutcomeIsApplied() {
+        staleDateOutcomes().forEach(::assertLateBaselineResponseDropped)
+    }
+
+    @Test
+    fun regularResponsesThatReturnAfterSeoulMidnightAreDroppedBeforeTheirOutcomeIsApplied() {
+        staleDateOutcomes().forEach(::assertLateRegularResponseDropped)
+    }
+
+    @Test
     fun regularReportFailurePreservesLastCountAndCheckedTimeWithoutCompletingThePair() {
         val fixture = Fixture(
             reports = mapOf(
@@ -1623,6 +1674,110 @@ class LearningMonitorEngineTest {
         assertTrue(closedCalls.isEmpty())
     }
 
+    private fun staleDateOutcomes(): List<LearningRepositoryResult<SubjectReport>> = listOf(
+        LearningRepositoryResult.Success(SubjectReport("철수", "한글", 99, 0)),
+        LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("yesterday report failure")),
+        LearningRepositoryResult.AuthenticationDenied(
+            LearningAuthenticationDeniedException("yesterday report unauthorized"),
+        ),
+    )
+
+    private fun assertLateBaselineResponseDropped(result: LearningRepositoryResult<SubjectReport>) {
+        val reportStarted = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val gateUsed = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+            reportGate = { subscription ->
+                if (subscription.subjectName == "한글" && gateUsed.compareAndSet(false, true)) {
+                    reportStarted.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.startRuntimeAndRegister("철수")
+        fixture.repository.enqueueReportResult("철수", "한글", result)
+        val oldWorker = fixture.startWorkerUntil(reportStarted)
+
+        fixture.clock.todayValue = LocalDate.of(2026, 10, 11)
+        releaseReport.countDown()
+        oldWorker.join(5_000)
+        assertFalse("The previous-date baseline worker should finish when released", oldWorker.isAlive)
+        fixture.commands.drain()
+
+        val awaitingToday = fixture.engine.snapshot()
+        assertFalse(awaitingToday.authenticationRequired)
+        assertTrue(awaitingToday.children.getValue("철수").subjects.values.all {
+            it.status == MonitorSubjectStatus.CONFIRMATION_PENDING && it.activityCount == null && it.error == null
+        })
+        assertTrue(fixture.notifications.updates.none { update ->
+            update.child.subjects.values.any { it.activityCount == 99 || it.error == "yesterday report failure" }
+        })
+
+        fixture.drainAll()
+        val today = fixture.engine.snapshot()
+        assertFalse(today.authenticationRequired)
+        assertEquals(2, today.children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.repository.requestedDates.contains(LocalDate.of(2026, 10, 10)))
+        assertTrue(fixture.repository.requestedDates.any { it == LocalDate.of(2026, 10, 11) })
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    private fun assertLateRegularResponseDropped(result: LearningRepositoryResult<SubjectReport>) {
+        val reportStarted = CountDownLatch(1)
+        val releaseReport = CountDownLatch(1)
+        val gateNextReport = AtomicBoolean(false)
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+            reportGate = { subscription ->
+                if (subscription.subjectName == "한글" && gateNextReport.compareAndSet(true, false)) {
+                    reportStarted.countDown()
+                    check(releaseReport.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.repository.enqueueReportResult("철수", "한글", result)
+        gateNextReport.set(true)
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todohangeul")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        val oldWorker = fixture.startWorkerUntil(reportStarted)
+
+        fixture.clock.todayValue = LocalDate.of(2026, 10, 11)
+        releaseReport.countDown()
+        oldWorker.join(5_000)
+        assertFalse("The previous-date regular worker should finish when released", oldWorker.isAlive)
+        fixture.commands.drain()
+
+        val awaitingToday = fixture.engine.snapshot()
+        assertFalse(awaitingToday.authenticationRequired)
+        assertTrue(awaitingToday.children.getValue("철수").subjects.values.all {
+            it.status == MonitorSubjectStatus.CONFIRMATION_PENDING && it.activityCount == null && it.error == null
+        })
+        assertTrue(fixture.notifications.updates.none { update ->
+            update.completion || update.child.subjects.values.any {
+                it.activityCount == 99 || it.error == "yesterday report failure"
+            }
+        })
+
+        fixture.drainAll()
+        val today = fixture.engine.snapshot()
+        assertFalse(today.authenticationRequired)
+        assertEquals(2, today.children.getValue("철수").subjects.getValue("한글").activityCount)
+        assertTrue(fixture.repository.requestedDates.contains(LocalDate.of(2026, 10, 10)))
+        assertTrue(fixture.repository.requestedDates.any { it == LocalDate.of(2026, 10, 11) })
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
     private class Fixture(
         reports: Map<String, LearningRepositoryResult<SubjectReport>>,
         targets: Map<String, Int> = emptyMap(),
@@ -1758,6 +1913,8 @@ class LearningMonitorEngineTest {
             timers += pending
             return MonitorTimer { pending.cancelled = true }
         }
+
+        fun activeCount(): Int = timers.count { !it.cancelled }
 
         fun runDue() {
             while (true) {
