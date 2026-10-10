@@ -295,6 +295,8 @@ class MainActivity : Activity() {
             monitorSnapshot.authenticationRequired -> "다시 로그인 필요"
             monitorSnapshot.monitoringPaused -> "감시 일시 중지"
             monitorSnapshot.connectionWaiting -> "연결 대기 중"
+            monitorSnapshot.foregroundObservationPending && monitorSnapshot.serviceLeaseAttached &&
+                executionStatus.accessibilityEnabled && executionStatus.notificationsEnabled -> "전면 앱 확인 대기"
             else -> null
         }
         monitorStatusView.text = listOfNotNull(accessibilityText, notificationText, stateText).joinToString(" · ")
@@ -315,6 +317,9 @@ class MainActivity : Activity() {
                 append("\n감시 상태: 권한을 허용하면 자동으로 다시 시작합니다.")
             } else if (monitorSnapshot.connectionWaiting) {
                 append("\n감시 상태: 접근성 서비스 연결 대기 중")
+            } else if (monitorSnapshot.foregroundObservationPending && monitorSnapshot.serviceLeaseAttached &&
+                executionStatus.accessibilityEnabled && executionStatus.notificationsEnabled) {
+                append("\n감시 상태: 전면 앱 확인 대기")
             }
         }
         AlertDialog.Builder(this)

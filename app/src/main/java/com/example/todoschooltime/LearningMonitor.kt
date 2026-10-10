@@ -47,6 +47,7 @@ data class LearningMonitorSnapshot(
     val authenticationRequired: Boolean = false,
     val monitoringPaused: Boolean = false,
     val connectionWaiting: Boolean = false,
+    val foregroundObservationPending: Boolean = false,
     val revision: Long = 0,
 )
 
@@ -254,6 +255,7 @@ class LearningMonitorEngine internal constructor(
     private var accessibilityEnabled: Boolean = false
     private var notificationsEnabled: Boolean = false
     private var foregroundPackageName: String? = null
+    private var foregroundObservationPending: Boolean = false
     private var screenOn: Boolean = false
     private var lastCycleStartedAtMillis: Long? = null
     private var activeRegularRun: RegularRun? = null
@@ -401,6 +403,7 @@ class LearningMonitorEngine internal constructor(
             if (!serviceLeaseAttached) {
                 serviceLeaseAttached = true
                 foregroundPackageName = null
+                foregroundObservationPending = true
                 screenOn = false
                 runtimeEligibilityRevision += 1L
                 publish()
@@ -455,6 +458,7 @@ class LearningMonitorEngine internal constructor(
             if (serviceLeaseAttached) {
                 serviceLeaseAttached = false
                 foregroundPackageName = null
+                foregroundObservationPending = false
                 screenOn = false
                 runtimeEligibilityRevision += 1L
                 cancelUnreleasedBaselines()
@@ -473,10 +477,13 @@ class LearningMonitorEngine internal constructor(
                 foregroundPackageName = null
                 return@enqueue
             }
-            if (foregroundPackageName != packageName) {
+            val wasObservationPending = foregroundObservationPending
+            if (wasObservationPending || foregroundPackageName != packageName) {
                 foregroundPackageName = packageName
+                foregroundObservationPending = false
                 runtimeEligibilityRevision += 1L
                 maybeStartRegularCycle()
+                if (wasObservationPending) publish()
             }
         }
     }
@@ -1321,6 +1328,7 @@ class LearningMonitorEngine internal constructor(
             monitoringPaused = !permissionsAvailable() || state?.authenticationRequired == true,
             connectionWaiting = accessibilityEnabled && notificationsEnabled && !serviceLeaseAttached &&
                 state?.authenticationRequired != true,
+            foregroundObservationPending = serviceLeaseAttached && this.foregroundObservationPending,
             revision = currentSnapshot.revision + 1L,
         ))
         currentSnapshot = next

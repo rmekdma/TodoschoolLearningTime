@@ -234,6 +234,34 @@ class LearningMonitorEngineTest {
     }
 
     @Test
+    fun foregroundObservationWaitsForFreshWindowEventAndResetsOnReattach() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+
+        assertTrue(fixture.engine.snapshot().foregroundObservationPending)
+
+        // A null package is still a fresh window observation; null alone cannot represent this state.
+        fixture.engine.foregroundPackageChanged(null)
+        fixture.commands.drain()
+        assertFalse(fixture.engine.snapshot().foregroundObservationPending)
+
+        fixture.engine.detachServiceLease()
+        fixture.commands.drain()
+        assertFalse(fixture.engine.snapshot().foregroundObservationPending)
+        fixture.engine.attachServiceLease()
+        fixture.commands.drain()
+        assertTrue(fixture.engine.snapshot().foregroundObservationPending)
+
+        fixture.engine.foregroundPackageChanged("com.example.launcher")
+        fixture.commands.drain()
+        assertFalse(fixture.engine.snapshot().foregroundObservationPending)
+    }
+
+    @Test
     fun initialMetadataFailureConsumesCadenceAndRetriesOnlyTheCurrentForegroundSubject() {
         val fixture = Fixture(
             reports = listOf("한글", "수학", "영어").associateWith { subject ->
