@@ -29,6 +29,7 @@ class TodoSchoolApplication : Application() {
         val monitorPreferences = getSharedPreferences(MONITOR_PREFERENCES, MODE_PRIVATE)
         val notificationIdPreferences = getSharedPreferences(NOTIFICATION_ID_PREFERENCES, MODE_PRIVATE)
         val targetCountStore = TargetCountStore(this)
+        val learningReportRepository = LearningReportRepository()
 
         val engine = LearningMonitorEngine(
             commandQueue = MonitorTaskQueue { task -> commandExecutor.execute { task() } },
@@ -41,7 +42,7 @@ class TodoSchoolApplication : Application() {
             },
             timerFactory = ScheduledMonitorTimerFactory(timerExecutor),
             store = SharedPreferencesMonitorStore(monitorPreferences),
-            repository = LearningReportRepository(),
+            repository = learningReportRepository,
             targetProvider = MonitorTargetProvider { childName, subjectName ->
                 targetCountStore.getTargetCount(childName, subjectName)
             },

@@ -4,7 +4,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
+import java.io.IOException
 import java.time.LocalDate
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.ceil
 
 sealed class LearningRepositoryResult<out T> {
@@ -59,11 +61,48 @@ internal data class LearningHttpResponse(
 
 internal interface LearningHttpTransport {
     fun post(path: String, body: JSONObject, token: String?): LearningHttpResponse
+
+    fun post(
+        path: String,
+        body: JSONObject,
+        token: String?,
+        cancellation: LearningRequestCancellation,
+    ): LearningHttpResponse {
+        cancellation.throwIfCancelled()
+        val response = post(path, body, token)
+        cancellation.throwIfCancelled()
+        return response
+    }
+}
+
+/** Cancellation is best effort: the active connection is disconnected, but the HTTP stack may still finish it. */
+class LearningRequestCancellation internal constructor() {
+    private val cancelled = AtomicBoolean(false)
+    @Volatile private var activeConnection: HttpURLConnection? = null
+
+    fun cancel() {
+        if (cancelled.compareAndSet(false, true)) activeConnection?.disconnect()
+    }
+
+    fun isCancelled(): Boolean = cancelled.get()
+
+    fun throwIfCancelled() {
+        if (isCancelled()) throw IOException("Learning request cancelled")
+    }
+
+    internal fun attach(connection: HttpURLConnection) {
+        activeConnection = connection
+        if (isCancelled()) connection.disconnect()
+    }
+
+    internal fun detach(connection: HttpURLConnection) {
+        if (activeConnection === connection) activeConnection = null
+    }
 }
 
 class LearningReportRepository internal constructor(
     private val transport: LearningHttpTransport,
-) : MonitorRepository {
+) : MonitorRepository, CancellableMonitorRepository {
     constructor() : this(UrlConnectionLearningHttpTransport())
 
     private data class SubjectEndpoint(
@@ -104,7 +143,20 @@ class LearningReportRepository internal constructor(
             LearningResult(checkedAt, children, session.accountId.toString())
         }
 
-    override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> = capture {
+    override fun signIn(email: String, password: String): LearningRepositoryResult<LearningSession> =
+        signInInternal(email, password, null)
+
+    override fun signInCancellable(
+        email: String,
+        password: String,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningSession> = signInInternal(email, password, cancellation)
+
+    private fun signInInternal(
+        email: String,
+        password: String,
+        cancellation: LearningRequestCancellation?,
+    ): LearningRepositoryResult<LearningSession> = capture {
         val body = JSONObject()
             .put("accountType", "personal")
             .put("getSessionId", true)
@@ -115,7 +167,7 @@ class LearningReportRepository internal constructor(
             .put("email", email)
             .put("password", password)
 
-        val login = postData("/v3/account/signin", body, null, isSignIn = true) as? JSONObject
+        val login = postData("/v3/account/signin", body, null, isSignIn = true, cancellation = cancellation) as? JSONObject
             ?: throw LearningRepositoryException("로그인 응답 형식이 예상과 다릅니다.")
         val token = login.optString("authToken").ifBlank { login.optString("sessionId") }
         if (token.isBlank()) throw LearningRepositoryException("로그인 응답에 유효한 토큰이 없습니다.")
@@ -127,7 +179,18 @@ class LearningReportRepository internal constructor(
         LearningSession(accountId, token)
     }
 
-    override fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> = capture {
+    override fun loadCatalog(session: LearningSession): LearningRepositoryResult<LearningCatalog> =
+        loadCatalogInternal(session, null)
+
+    override fun loadCatalogCancellable(
+        session: LearningSession,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningCatalog> = loadCatalogInternal(session, cancellation)
+
+    private fun loadCatalogInternal(
+        session: LearningSession,
+        cancellation: LearningRequestCancellation?,
+    ): LearningRepositoryResult<LearningCatalog> = capture {
         val subscriptions = mutableListOf<ChildSubjectSubscription>()
         val childOrder = linkedSetOf<String>()
 
@@ -136,6 +199,7 @@ class LearningReportRepository internal constructor(
                 path = subject.usersPath,
                 body = JSONObject().put("user", JSONObject().put("accountId", session.accountId)),
                 token = session.authToken,
+                cancellation = cancellation,
             ) as? JSONArray ?: throw LearningRepositoryException("${subject.name}: 아이 목록 형식이 예상과 다릅니다.")
 
             for (index in 0 until users.length()) {
@@ -160,6 +224,21 @@ class LearningReportRepository internal constructor(
         session: LearningSession,
         subscription: ChildSubjectSubscription,
         date: LocalDate,
+    ): LearningRepositoryResult<SubjectReport> = loadSubjectReportInternal(session, subscription, date, null)
+
+    override fun loadSubjectReportCancellable(
+        session: LearningSession,
+        subscription: ChildSubjectSubscription,
+        date: LocalDate,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<SubjectReport> =
+        loadSubjectReportInternal(session, subscription, date, cancellation)
+
+    private fun loadSubjectReportInternal(
+        session: LearningSession,
+        subscription: ChildSubjectSubscription,
+        date: LocalDate,
+        cancellation: LearningRequestCancellation?,
     ): LearningRepositoryResult<SubjectReport> = capture {
         val subject = subjects.firstOrNull { it.name == subscription.subjectName }
             ?: throw LearningRepositoryException("지원하지 않는 과목입니다: ${subscription.subjectName}")
@@ -170,6 +249,7 @@ class LearningReportRepository internal constructor(
                 .put("yyyymmdd", DateHelper.toYyyyMmDd(date))
                 .put("languageCode", "ko"),
             token = session.authToken,
+            cancellation = cancellation,
         ) as? JSONObject ?: throw LearningRepositoryException("${subject.name}: 학습 보고서 형식이 예상과 다릅니다.")
 
         val contentsHistory = report.optJSONObject("contentsHistory")
@@ -185,8 +265,15 @@ class LearningReportRepository internal constructor(
         )
     }
 
-    private fun postData(path: String, body: JSONObject, token: String?, isSignIn: Boolean = false): Any? {
-        val response = transport.post(path, body, token)
+    private fun postData(
+        path: String,
+        body: JSONObject,
+        token: String?,
+        isSignIn: Boolean = false,
+        cancellation: LearningRequestCancellation? = null,
+    ): Any? {
+        val response = if (cancellation == null) transport.post(path, body, token)
+        else transport.post(path, body, token, cancellation)
         if (response.statusCode !in 200..299) {
             if (response.statusCode == 401 || response.statusCode == 403) {
                 throw LearningAuthenticationDeniedException("$path: HTTP ${response.statusCode}")
@@ -227,6 +314,16 @@ class LearningReportRepository internal constructor(
 
 private class UrlConnectionLearningHttpTransport : LearningHttpTransport {
     override fun post(path: String, body: JSONObject, token: String?): LearningHttpResponse {
+        return post(path, body, token, LearningRequestCancellation())
+    }
+
+    override fun post(
+        path: String,
+        body: JSONObject,
+        token: String?,
+        cancellation: LearningRequestCancellation,
+    ): LearningHttpResponse {
+        cancellation.throwIfCancelled()
         val connection = (URL(API_BASE + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
@@ -236,14 +333,18 @@ private class UrlConnectionLearningHttpTransport : LearningHttpTransport {
             setRequestProperty("Content-Type", "application/json")
             if (token != null) setRequestProperty("Authorization", "Bearer $token")
         }
+        cancellation.attach(connection)
 
         try {
+            cancellation.throwIfCancelled()
             connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
             val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
             val responseBody = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            cancellation.throwIfCancelled()
             return LearningHttpResponse(statusCode, responseBody)
         } finally {
+            cancellation.detach(connection)
             connection.disconnect()
         }
     }

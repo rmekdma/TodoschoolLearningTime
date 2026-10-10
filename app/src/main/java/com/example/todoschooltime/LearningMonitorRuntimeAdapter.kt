@@ -23,6 +23,12 @@ internal interface LearningMonitorScreenUseCases {
     fun refreshExecutionConditions(): MonitorExecutionStatus
     fun inspectExecutionStatus(): MonitorExecutionStatus
     fun reevaluateMonitoringDate()
+    fun loadScreenReport(
+        email: String,
+        password: String,
+        date: java.time.LocalDate,
+        listener: (LearningReportRequestOutcome) -> Unit,
+    ): LearningReportRequestHandle
     fun credentialsAccepted(accountId: String, email: String, password: String)
     fun credentialsReauthenticated(accountId: String, email: String, password: String)
 }
@@ -47,6 +53,19 @@ internal class LearningMonitorRuntimeAdapter(
     override fun reevaluateMonitoringDate() {
         engine.reevaluateMonitoringDate()
     }
+
+    override fun loadScreenReport(
+        email: String,
+        password: String,
+        date: java.time.LocalDate,
+        listener: (LearningReportRequestOutcome) -> Unit,
+    ): LearningReportRequestHandle = engine.loadScreenReport(
+        email = email,
+        password = password,
+        date = date,
+        accountIdHint = credentialStore.loadAccountId(),
+        listener = listener,
+    )
 
     override fun credentialsAccepted(accountId: String, email: String, password: String) {
         credentialStore.saveAccountId(accountId)

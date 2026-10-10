@@ -5,6 +5,7 @@ import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.LinkedHashSet
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.math.BigInteger
 
 object MonitorIntervalParser {
@@ -130,6 +131,37 @@ interface MonitorRepository {
     ): LearningRepositoryResult<SubjectReport>
 }
 
+internal interface CancellableMonitorRepository {
+    fun signInCancellable(
+        email: String,
+        password: String,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningSession>
+
+    fun loadCatalogCancellable(
+        session: LearningSession,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningCatalog>
+
+    fun loadSubjectReportCancellable(
+        session: LearningSession,
+        subscription: ChildSubjectSubscription,
+        date: LocalDate,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<SubjectReport>
+}
+
+internal sealed interface LearningReportRequestOutcome {
+    data class Finished(val result: LearningRepositoryResult<LearningResult>) : LearningReportRequestOutcome
+    data object Superseded : LearningReportRequestOutcome
+    data object Invalidated : LearningReportRequestOutcome
+    data object Cancelled : LearningReportRequestOutcome
+}
+
+internal fun interface LearningReportRequestHandle {
+    fun cancel()
+}
+
 interface ChildNotificationSink {
     fun showStatus(
         accountId: String,
@@ -225,6 +257,8 @@ class LearningMonitorEngine internal constructor(
         var subscriptions: List<ChildSubjectSubscription> = emptyList()
         var nextSubscriptionIndex: Int = 0
         var lastDispatchSequence: Long = baselineBoundarySequence
+        var activePairConsumer: BaselinePairConsumer? = null
+        var activePairWork: ReportPairWork? = null
         @Volatile var invalidated: Boolean = false
     }
 
@@ -236,6 +270,7 @@ class LearningMonitorEngine internal constructor(
     )
 
     private class RegularRun(
+        val generation: Long,
         val accountId: String,
         val accountEpoch: Long,
         val authEpoch: Long,
@@ -249,8 +284,96 @@ class LearningMonitorEngine internal constructor(
         var session: LearningSession? = null
         var pairs: List<RegularPair> = emptyList()
         var nextPairIndex: Int = 0
+        var activePairConsumer: RegularPairConsumer? = null
+        var activePairWork: ReportPairWork? = null
         var invalidated: Boolean = false
         var lastDispatchSequence: Long = 0L
+    }
+
+    private enum class ReportPurpose { SCREEN, MONITOR_INITIAL, MONITOR_REGULAR }
+
+    private enum class ConsumerTerminal { FINISHED, SUPERSEDED, INVALIDATED, CANCELLED }
+
+    private class ScreenPairConsumer(
+        val run: ScreenRun,
+        val subscription: ChildSubjectSubscription,
+    ) {
+        @Volatile var terminal: ConsumerTerminal? = null
+    }
+
+    private class BaselinePairConsumer(
+        val run: BaselineRun,
+        val subscription: ChildSubjectSubscription,
+        val targetRevision: Long,
+        val targetCount: Int,
+    ) {
+        @Volatile var terminal: ConsumerTerminal? = null
+    }
+
+    private class RegularPairConsumer(
+        val run: RegularRun,
+        val pair: RegularPair,
+    ) {
+        @Volatile var terminal: ConsumerTerminal? = null
+    }
+
+    private data class ScreenPairIdentity(
+        val accountId: String,
+        val accountEpoch: Long,
+        val authEpoch: Long,
+        val dateRevision: Long,
+        val reportDate: LocalDate,
+        val childName: String,
+        val subjectName: String,
+        val generation: Long,
+        val dispatchSequence: Long,
+    )
+
+    private class ReportPairWork(
+        val purpose: ReportPurpose,
+        val accountId: String,
+        val accountEpoch: Long,
+        val authEpoch: Long,
+        val dateRevision: Long,
+        val reportDate: LocalDate,
+        val childName: String,
+        val subjectName: String,
+        val generation: Long,
+        val targetRevision: Long?,
+        val dispatchSequence: Long,
+        val eligibilityRevisionAtDispatch: Long,
+        val permissionRevisionAtDispatch: Long,
+        val session: LearningSession,
+        val subscription: ChildSubjectSubscription,
+    ) {
+        @Volatile var screenConsumer: ScreenPairConsumer? = null
+        @Volatile var baselineConsumer: BaselinePairConsumer? = null
+        @Volatile var regularConsumer: RegularPairConsumer? = null
+        val cancellation = LearningRequestCancellation()
+        @Volatile var physicalCompleted = false
+    }
+
+    private class ScreenRun(
+        val generation: Long,
+        val email: String,
+        val password: String,
+        val reportDate: LocalDate,
+        val accountIdHint: String?,
+        val activeAccountIdAtStart: String?,
+        val accountEpochAtStart: Long,
+        val authEpochAtStart: Long?,
+        val dateRevisionAtStart: Long,
+        val listener: (LearningReportRequestOutcome) -> Unit,
+    ) {
+        var session: LearningSession? = null
+        var catalog: LearningCatalog? = null
+        var checkedAt: String? = null
+        var nextSubscriptionIndex: Int = 0
+        val totals = LinkedHashMap<String, Long>()
+        val subjectsByChild = LinkedHashMap<String, MutableList<SubjectProgress>>()
+        var activePairWork: ReportPairWork? = null
+        var activeCancellation: LearningRequestCancellation? = null
+        @Volatile var terminal = false
     }
 
     private class ListenerSlot(val listener: (LearningMonitorSnapshot) -> Unit) {
@@ -260,6 +383,9 @@ class LearningMonitorEngine internal constructor(
     private val accounts = mutableMapOf<String, AccountState>()
     private val credentials = mutableMapOf<String, Credentials>()
     private val baselineRuns = mutableMapOf<BaselineKey, BaselineRun>()
+    private val screenRequestIds = AtomicLong(0L)
+    private val regularRunIds = AtomicLong(0L)
+    private val screenPairWork = LinkedHashMap<ScreenPairIdentity, ReportPairWork>()
     private val listeners = mutableListOf<ListenerSlot>()
     private var activeAccountId: String? = null
     private var accountEpoch: Long = 0
@@ -271,6 +397,7 @@ class LearningMonitorEngine internal constructor(
     private var screenOn: Boolean = false
     private var lastCycleStartedAtMillis: Long? = null
     private var activeRegularRun: RegularRun? = null
+    private var activeScreenRun: ScreenRun? = null
     private var cadenceTimer: MonitorTimer? = null
     private var cadenceTimerGeneration: Long = 0L
     private var scheduledTimerCycleStart: Long? = null
@@ -290,6 +417,521 @@ class LearningMonitorEngine internal constructor(
     private var currentSnapshot = LearningMonitorSnapshot()
 
     override fun snapshot(): LearningMonitorSnapshot = currentSnapshot
+
+    /**
+     * Runs the interactive report through the same serialized command and pair-release boundary as monitoring.
+     * The callback receives one terminal outcome even when a newer screen request supersedes this one.
+     */
+    internal fun loadScreenReport(
+        email: String,
+        password: String,
+        date: LocalDate,
+        accountIdHint: String? = null,
+        listener: (LearningReportRequestOutcome) -> Unit,
+    ): LearningReportRequestHandle {
+        val generation = screenRequestIds.incrementAndGet()
+        commandQueue.enqueue {
+            activeScreenRun?.let { finishScreenRequest(it, LearningReportRequestOutcome.Superseded) }
+            val currentAccountAtStart = activeAccountId
+            val currentAccountHint = accountIdHint?.takeIf { it == currentAccountAtStart }
+            val authEpoch = currentAccountAtStart?.let { accounts[it]?.authEpoch }
+            val run = ScreenRun(
+                generation = generation,
+                email = email,
+                password = password,
+                reportDate = date,
+                accountIdHint = currentAccountHint,
+                activeAccountIdAtStart = currentAccountAtStart,
+                accountEpochAtStart = accountEpoch,
+                authEpochAtStart = authEpoch,
+                dateRevisionAtStart = monitoringDateRevision,
+                listener = listener,
+            )
+            activeScreenRun = run
+            loadScreenSession(run)
+        }
+        return LearningReportRequestHandle {
+            commandQueue.enqueue {
+                activeScreenRun?.takeIf { it.generation == generation }?.let {
+                    finishScreenRequest(it, LearningReportRequestOutcome.Cancelled)
+                }
+            }
+        }
+    }
+
+    private fun loadScreenSession(run: ScreenRun) = releaseScreenIo(
+        run,
+        operation = { cancellation -> signInCancellable(run.email, run.password, cancellation) },
+        onSuccess = { result ->
+            when (result) {
+                is LearningRepositoryResult.Success -> {
+                    run.session = result.value
+                    run.checkedAt = clock.checkedAt()
+                    loadScreenCatalog(run)
+                }
+                is LearningRepositoryResult.TemporaryFailure -> finishScreenRequest(
+                    run,
+                    LearningReportRequestOutcome.Finished(result),
+                )
+                is LearningRepositoryResult.AuthenticationDenied -> {
+                    pauseForScreenAuthenticationDenied(run)
+                    finishScreenRequest(run, LearningReportRequestOutcome.Finished(result))
+                }
+            }
+        },
+        onFailure = { exception ->
+            finishScreenRequest(run, LearningReportRequestOutcome.Finished(screenFailure(exception)))
+        },
+    )
+
+    private fun loadScreenCatalog(run: ScreenRun) {
+        val session = run.session ?: return finishScreenRequest(
+            run,
+            LearningReportRequestOutcome.Finished(
+                LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("로그인 상태를 확인하지 못했습니다.")),
+            ),
+        )
+        releaseScreenIo(
+            run,
+            operation = { cancellation -> loadCatalogCancellable(session, cancellation) },
+            onSuccess = { result ->
+                when (result) {
+                    is LearningRepositoryResult.Success -> {
+                        if (result.value.childOrder.isEmpty()) {
+                            finishScreenRequest(
+                                run,
+                                LearningReportRequestOutcome.Finished(
+                                    LearningRepositoryResult.TemporaryFailure(
+                                        LearningRepositoryException("아이 정보를 찾지 못했습니다."),
+                                    ),
+                                ),
+                            )
+                        } else {
+                            run.catalog = result.value
+                            loadNextScreenPair(run)
+                        }
+                    }
+                    is LearningRepositoryResult.TemporaryFailure -> finishScreenRequest(
+                        run,
+                        LearningReportRequestOutcome.Finished(result),
+                    )
+                    is LearningRepositoryResult.AuthenticationDenied -> {
+                        pauseForScreenAuthenticationDenied(run)
+                        finishScreenRequest(run, LearningReportRequestOutcome.Finished(result))
+                    }
+                }
+            },
+            onFailure = { exception ->
+                finishScreenRequest(run, LearningReportRequestOutcome.Finished(screenFailure(exception)))
+            },
+        )
+    }
+
+    private fun loadNextScreenPair(run: ScreenRun) {
+        if (!screenCanContinue(run)) return
+        val catalog = run.catalog ?: return finishScreenRequest(
+            run,
+            LearningReportRequestOutcome.Finished(
+                LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("과목 구독 정보를 확인하지 못했습니다.")),
+            ),
+        )
+        while (run.nextSubscriptionIndex < catalog.subscriptions.size) {
+            val subscription = catalog.subscriptions[run.nextSubscriptionIndex++]
+            val session = run.session ?: return finishScreenRequest(
+                run,
+                LearningReportRequestOutcome.Finished(
+                    LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("로그인 상태를 확인하지 못했습니다.")),
+                ),
+            )
+            val dispatchSequence = nextDispatchSequence()
+            val work = ReportPairWork(
+                purpose = ReportPurpose.SCREEN,
+                accountId = session.accountId.toString(),
+                accountEpoch = run.accountEpochAtStart,
+                authEpoch = run.authEpochAtStart ?: Long.MIN_VALUE,
+                dateRevision = run.dateRevisionAtStart,
+                reportDate = run.reportDate,
+                childName = subscription.childName,
+                subjectName = subscription.subjectName,
+                generation = run.generation,
+                targetRevision = null,
+                dispatchSequence = dispatchSequence,
+                eligibilityRevisionAtDispatch = runtimeEligibilityRevision,
+                permissionRevisionAtDispatch = runtimePermissionRevision,
+                session = session,
+                subscription = subscription,
+            )
+            work.screenConsumer = ScreenPairConsumer(run, subscription)
+            run.activePairWork = work
+            screenPairWork[screenPairIdentity(work)] = work
+            dispatchReportPair(work)
+            return
+        }
+
+        val session = run.session ?: return finishScreenRequest(
+            run,
+            LearningReportRequestOutcome.Finished(
+                LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("로그인 상태를 확인하지 못했습니다.")),
+            ),
+        )
+        val checkedAt = run.checkedAt ?: clock.checkedAt()
+        val children = catalog.childOrder.distinct().map { name ->
+            val minutes = kotlin.math.ceil((run.totals[name] ?: 0L) / 60.0).toInt()
+            ChildLearningInfo(name, minutes, run.subjectsByChild[name] ?: emptyList())
+        }
+        finishScreenRequest(
+            run,
+            LearningReportRequestOutcome.Finished(
+                LearningRepositoryResult.Success(LearningResult(checkedAt, children, session.accountId.toString())),
+            ),
+        )
+    }
+
+    private fun <T> releaseScreenIo(
+        run: ScreenRun,
+        operation: (LearningRequestCancellation) -> LearningRepositoryResult<T>,
+        onSuccess: (LearningRepositoryResult<T>) -> Unit,
+        onFailure: (Exception) -> Unit,
+    ) {
+        if (!screenCanContinue(run)) return
+        val cancellation = LearningRequestCancellation()
+        run.activeCancellation = cancellation
+        workerQueue.enqueue {
+            if (run.terminal || cancellation.isCancelled()) return@enqueue
+            val outcome = try {
+                Result.success(operation(cancellation))
+            } catch (exception: Exception) {
+                Result.failure(exception)
+            }
+            val authenticationDenied = outcome.getOrNull() is LearningRepositoryResult.AuthenticationDenied ||
+                outcome.exceptionOrNull() is LearningAuthenticationDeniedException
+            val afterRequest = if (authenticationDenied) inspectRuntimeStatus() else null
+            commandQueue.enqueue response@{
+                if (run.activeCancellation === cancellation) run.activeCancellation = null
+                if (!screenCanContinue(run)) return@response
+                if (authenticationDenied) {
+                    afterRequest?.let {
+                        applyExecutionConditions(it.accessibilityEnabled, it.notificationsEnabled)
+                    }
+                    refreshMonitoringDate()
+                    if (!screenCanContinue(run)) return@response
+                }
+                outcome.fold(onSuccess) { error -> onFailure(error as? Exception ?: RuntimeException(error)) }
+            }
+        }
+    }
+
+    private fun signInCancellable(
+        email: String,
+        password: String,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningSession> {
+        cancellation.throwIfCancelled()
+        val cancellable = repository as? CancellableMonitorRepository
+        return if (cancellable == null) repository.signIn(email, password)
+        else cancellable.signInCancellable(email, password, cancellation)
+    }
+
+    private fun loadCatalogCancellable(
+        session: LearningSession,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<LearningCatalog> {
+        cancellation.throwIfCancelled()
+        val cancellable = repository as? CancellableMonitorRepository
+        return if (cancellable == null) repository.loadCatalog(session)
+        else cancellable.loadCatalogCancellable(session, cancellation)
+    }
+
+    private fun loadSubjectReportCancellable(
+        session: LearningSession,
+        subscription: ChildSubjectSubscription,
+        date: LocalDate,
+        cancellation: LearningRequestCancellation,
+    ): LearningRepositoryResult<SubjectReport> {
+        cancellation.throwIfCancelled()
+        val cancellable = repository as? CancellableMonitorRepository
+        val result = if (cancellable == null) repository.loadSubjectReport(session, subscription, date)
+        else cancellable.loadSubjectReportCancellable(session, subscription, date, cancellation)
+        cancellation.throwIfCancelled()
+        return result
+    }
+
+    private fun dispatchReportPair(work: ReportPairWork) {
+        workerQueue.enqueue {
+            if (work.cancellation.isCancelled() || !hasActivePairConsumer(work)) {
+                work.physicalCompleted = true
+                return@enqueue
+            }
+            val hasMonitorConsumer = hasActiveMonitorConsumer(work)
+            val beforeRequest = if (hasMonitorConsumer) inspectRuntimeStatus() else null
+            val monitorDispatchStillValid = hasMonitorConsumer &&
+                work.permissionRevisionAtDispatch == runtimePermissionRevision &&
+                (work.purpose != ReportPurpose.MONITOR_REGULAR ||
+                    work.eligibilityRevisionAtDispatch == runtimeEligibilityRevision) &&
+                (beforeRequest == null || beforeRequest.permissionsReady)
+            if (hasMonitorConsumer && !monitorDispatchStillValid) {
+                commandQueue.enqueue {
+                    beforeRequest?.let {
+                        applyExecutionConditions(it.accessibilityEnabled, it.notificationsEnabled)
+                    }
+                    invalidateMonitorConsumers(work)
+                }
+                if (work.screenConsumer == null || work.screenConsumer?.terminal != null) {
+                    work.physicalCompleted = true
+                    return@enqueue
+                }
+            }
+            val result = try {
+                loadSubjectReportCancellable(work.session, work.subscription, work.reportDate, work.cancellation)
+            } catch (exception: Exception) {
+                screenFailure(exception)
+            }
+            val afterRequest = inspectRuntimeStatus()
+            work.physicalCompleted = true
+            commandQueue.enqueue {
+                val screenAuthenticationEvidence = result is LearningRepositoryResult.AuthenticationDenied &&
+                    work.screenConsumer?.terminal == null && work.screenConsumer != null
+                if (hasActiveMonitorConsumer(work) || screenAuthenticationEvidence) {
+                    afterRequest?.let {
+                        applyExecutionConditions(it.accessibilityEnabled, it.notificationsEnabled)
+                    }
+                    refreshMonitoringDate()
+                }
+                finishReportPair(work, result)
+            }
+        }
+    }
+
+    private fun finishReportPair(work: ReportPairWork, result: LearningRepositoryResult<SubjectReport>) {
+        screenPairWork.remove(screenPairIdentity(work))
+        // A current shared SCREEN 401 must reach the Activity before its auth pause advances authEpoch.
+        // That pause then invalidates the joined monitor consumer through its own freshness checks.
+        work.screenConsumer?.let { consumer ->
+            if (consumer.terminal == null) {
+                val run = consumer.run
+                if (run.activePairWork === work) run.activePairWork = null
+                if (screenCanContinue(run)) {
+                    consumer.terminal = ConsumerTerminal.FINISHED
+                    when (result) {
+                        is LearningRepositoryResult.Success -> {
+                            val report = result.value
+                            run.totals[report.childName] = (run.totals[report.childName] ?: 0L) + report.learningSeconds
+                            run.subjectsByChild.getOrPut(report.childName) { mutableListOf() }
+                                .add(SubjectProgress(report.subjectName, report.activityCount))
+                            loadNextScreenPair(run)
+                        }
+                        is LearningRepositoryResult.TemporaryFailure -> finishScreenRequest(
+                            run,
+                            LearningReportRequestOutcome.Finished(result),
+                        )
+                        is LearningRepositoryResult.AuthenticationDenied -> {
+                            pauseForScreenAuthenticationDenied(run)
+                            finishScreenRequest(run, LearningReportRequestOutcome.Finished(result))
+                        }
+                    }
+                } else {
+                    consumer.terminal = ConsumerTerminal.INVALIDATED
+                }
+                work.screenConsumer = null
+            }
+        }
+        work.baselineConsumer?.let { consumer ->
+            if (consumer.terminal == null) {
+                val run = consumer.run
+                if (run.activePairConsumer === consumer) run.activePairConsumer = null
+                if (run.activePairWork === work) run.activePairWork = null
+                if (baselineCanContinue(run)) {
+                    consumer.terminal = ConsumerTerminal.FINISHED
+                    val validated = when (result) {
+                        is LearningRepositoryResult.Success -> if (
+                            result.value.childName == consumer.subscription.childName &&
+                                result.value.subjectName == consumer.subscription.subjectName
+                        ) result else LearningRepositoryResult.TemporaryFailure(
+                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
+                        )
+                        is LearningRepositoryResult.TemporaryFailure -> result
+                        is LearningRepositoryResult.AuthenticationDenied -> result
+                    }
+                    applyBaselinePair(run, consumer.subscription, consumer.targetRevision, consumer.targetCount, validated)
+                    loadNextBaselinePair(run)
+                } else {
+                    consumer.terminal = ConsumerTerminal.INVALIDATED
+                }
+                work.baselineConsumer = null
+            }
+        }
+        work.regularConsumer?.let { consumer ->
+            if (consumer.terminal == null) {
+                val run = consumer.run
+                if (run.activePairConsumer === consumer) run.activePairConsumer = null
+                if (run.activePairWork === work) run.activePairWork = null
+                if (regularCanApply(run)) {
+                    consumer.terminal = ConsumerTerminal.FINISHED
+                    val pairResult = when (result) {
+                        is LearningRepositoryResult.Success -> if (
+                            result.value.childName == consumer.pair.subscription.childName &&
+                                result.value.subjectName == consumer.pair.subscription.subjectName
+                        ) result else LearningRepositoryResult.TemporaryFailure(
+                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
+                        )
+                        is LearningRepositoryResult.TemporaryFailure -> result
+                        is LearningRepositoryResult.AuthenticationDenied -> result
+                    }
+                    applyRegularPair(run, consumer.pair, pairResult)
+                    loadNextRegularPair(run)
+                } else {
+                    consumer.terminal = ConsumerTerminal.INVALIDATED
+                }
+                work.regularConsumer = null
+            }
+        }
+        cancelPairWorkIfUnconsumed(work)
+    }
+
+    private fun hasActiveMonitorConsumer(work: ReportPairWork): Boolean =
+        (work.baselineConsumer?.terminal == null && work.baselineConsumer != null) ||
+            (work.regularConsumer?.terminal == null && work.regularConsumer != null)
+
+    private fun invalidateMonitorConsumers(work: ReportPairWork) {
+        work.baselineConsumer?.let { consumer ->
+            if (consumer.terminal == null) {
+                consumer.terminal = ConsumerTerminal.INVALIDATED
+                consumer.run.activePairConsumer = null
+                consumer.run.activePairWork = null
+                work.baselineConsumer = null
+            }
+        }
+        work.regularConsumer?.let { consumer ->
+            if (consumer.terminal == null) {
+                val run = consumer.run
+                consumer.terminal = ConsumerTerminal.INVALIDATED
+                run.activePairConsumer = null
+                run.activePairWork = null
+                work.regularConsumer = null
+                finishRegularRun(run)
+            }
+        }
+        cancelPairWorkIfUnconsumed(work)
+    }
+
+    private fun screenPairIdentity(work: ReportPairWork): ScreenPairIdentity = ScreenPairIdentity(
+        accountId = work.accountId,
+        accountEpoch = work.accountEpoch,
+        authEpoch = work.authEpoch,
+        dateRevision = work.dateRevision,
+        reportDate = work.reportDate,
+        childName = work.childName,
+        subjectName = work.subjectName,
+        generation = work.generation,
+        dispatchSequence = work.dispatchSequence,
+    )
+
+    private fun hasActivePairConsumer(work: ReportPairWork): Boolean =
+        work.screenConsumer?.terminal == null && work.screenConsumer != null ||
+            work.baselineConsumer?.terminal == null && work.baselineConsumer != null ||
+            work.regularConsumer?.terminal == null && work.regularConsumer != null
+
+    private fun cancelPairWorkIfUnconsumed(work: ReportPairWork) {
+        if (!hasActivePairConsumer(work)) {
+            screenPairWork.remove(screenPairIdentity(work))
+            if (!work.physicalCompleted) work.cancellation.cancel()
+        }
+    }
+
+    private fun detachBaselineConsumer(run: BaselineRun, terminal: ConsumerTerminal) {
+        val work = run.activePairWork ?: return
+        val consumer = work.baselineConsumer?.takeIf { it.run === run } ?: return
+        if (consumer.terminal == null) consumer.terminal = terminal
+        work.baselineConsumer = null
+        run.activePairConsumer = null
+        run.activePairWork = null
+        cancelPairWorkIfUnconsumed(work)
+    }
+
+    private fun detachRegularConsumer(run: RegularRun, terminal: ConsumerTerminal) {
+        val work = run.activePairWork ?: return
+        val consumer = work.regularConsumer?.takeIf { it.run === run } ?: return
+        if (consumer.terminal == null) consumer.terminal = terminal
+        work.regularConsumer = null
+        run.activePairConsumer = null
+        run.activePairWork = null
+        cancelPairWorkIfUnconsumed(work)
+    }
+
+    private fun invalidateRegularRun(run: RegularRun) {
+        run.invalidated = true
+        detachRegularConsumer(run, ConsumerTerminal.INVALIDATED)
+        if (activeRegularRun === run) activeRegularRun = null
+    }
+
+    private fun invalidateActiveRegularRun() {
+        activeRegularRun?.let(::invalidateRegularRun)
+    }
+
+    private fun screenFailure(exception: Exception): LearningRepositoryResult<Nothing> =
+        if (exception is LearningAuthenticationDeniedException) {
+            LearningRepositoryResult.AuthenticationDenied(exception)
+        } else {
+            LearningRepositoryResult.TemporaryFailure(
+                if (exception is LearningRepositoryException) exception
+                else LearningRepositoryException(exception.message ?: exception.javaClass.simpleName, exception),
+            )
+        }
+
+    private fun pauseForScreenAuthenticationDenied(run: ScreenRun) {
+        val accountId = run.accountIdHint ?: return
+        if (!screenCanAffectMonitor(run) || accountId != activeAccountId) return
+        pauseForAuthenticationDenied(accountId)
+    }
+
+    private fun screenCanAffectMonitor(run: ScreenRun): Boolean {
+        val accountId = run.accountIdHint ?: return false
+        val state = accounts[accountId] ?: return false
+        val authEvidenceMatches = run.session?.let { session ->
+            session.accountId.toString() == accountId
+        } ?: (credentials[accountId] == Credentials(run.email, run.password))
+        return run.accountEpochAtStart == accountEpoch && accountId == activeAccountId &&
+            run.authEpochAtStart != null && state.authEpoch == run.authEpochAtStart &&
+            !state.authenticationRequired && executionReady(accountId) && authEvidenceMatches
+    }
+
+    private fun screenCanContinue(run: ScreenRun): Boolean {
+        if (activeScreenRun !== run || run.terminal) return false
+        val hintedAccount = run.accountIdHint
+        val capturedAccount = run.activeAccountIdAtStart
+        val identityChanged = run.accountEpochAtStart != accountEpoch ||
+            capturedAccount != activeAccountId ||
+            (capturedAccount != null && run.authEpochAtStart != accounts[capturedAccount]?.authEpoch) ||
+            (hintedAccount != null && hintedAccount != activeAccountId)
+        if (identityChanged) {
+            finishScreenRequest(run, LearningReportRequestOutcome.Invalidated)
+            return false
+        }
+        return true
+    }
+
+    private fun finishScreenRequest(run: ScreenRun, outcome: LearningReportRequestOutcome) {
+        if (run.terminal) return
+        run.terminal = true
+        run.activeCancellation?.cancel()
+        run.activeCancellation = null
+        run.activePairWork?.let { work ->
+            work.screenConsumer?.takeIf { it.run === run }?.let { consumer ->
+                consumer.terminal = when (outcome) {
+                    LearningReportRequestOutcome.Superseded -> ConsumerTerminal.SUPERSEDED
+                    LearningReportRequestOutcome.Invalidated -> ConsumerTerminal.INVALIDATED
+                    LearningReportRequestOutcome.Cancelled -> ConsumerTerminal.CANCELLED
+                    is LearningReportRequestOutcome.Finished -> ConsumerTerminal.FINISHED
+                }
+                work.screenConsumer = null
+                screenPairWork.remove(screenPairIdentity(work))
+                cancelPairWorkIfUnconsumed(work)
+            }
+        }
+        run.activePairWork = null
+        if (activeScreenRun === run) activeScreenRun = null
+        callbackQueue.enqueue { run.listener(outcome) }
+    }
 
     /** Listener registration and initial snapshot capture happen in one serial command. */
     override fun observe(listener: (LearningMonitorSnapshot) -> Unit): MonitorSubscription {
@@ -313,10 +955,15 @@ class LearningMonitorEngine internal constructor(
         require(accountId.isNotBlank())
         commandQueue.enqueue {
             val switchingAccounts = activeAccountId != accountId
+            val updatedCredentials = credentials[accountId] != Credentials(email, password)
+            if (switchingAccounts || updatedCredentials) {
+                activeScreenRun?.let {
+                    finishScreenRequest(it, LearningReportRequestOutcome.Invalidated)
+                }
+            }
             if (switchingAccounts) {
                 runtimeEligibilityRevision += 1L
-                activeRegularRun?.invalidated = true
-                activeRegularRun = null
+                invalidateActiveRegularRun()
                 cancelCadenceTimer()
                 cancelUnreleasedBaselines()
                 accountEpoch += 1
@@ -343,10 +990,10 @@ class LearningMonitorEngine internal constructor(
         require(accountId.isNotBlank())
         commandQueue.enqueue {
             val switchingAccounts = activeAccountId != accountId
+            activeScreenRun?.let { finishScreenRequest(it, LearningReportRequestOutcome.Invalidated) }
             if (switchingAccounts) {
                 runtimeEligibilityRevision += 1L
-                activeRegularRun?.invalidated = true
-                activeRegularRun = null
+                invalidateActiveRegularRun()
                 cancelCadenceTimer()
                 cancelUnreleasedBaselines()
                 accountEpoch += 1L
@@ -390,7 +1037,10 @@ class LearningMonitorEngine internal constructor(
             val state = accountState(accountId)
             runtimeEligibilityRevision += 1L
             val old = state.registrations.remove(childName)
-            baselineRuns.remove(BaselineKey(accountId, childName))?.invalidated = true
+            baselineRuns.remove(BaselineKey(accountId, childName))?.let { run ->
+                run.invalidated = true
+                detachBaselineConsumer(run, ConsumerTerminal.CANCELLED)
+            }
             state.generations[childName] = (state.generations[childName] ?: old?.generation ?: 0L) + 1L
             store.saveRegisteredChildren(accountId, state.registrations.keys)
             notificationSink.cancel(accountId, childName)
@@ -465,6 +1115,7 @@ class LearningMonitorEngine internal constructor(
                 val baseline = baselineRuns.remove(BaselineKey(accountId, childName))
                 if (baseline != null) {
                     baseline.invalidated = true
+                    detachBaselineConsumer(baseline, ConsumerTerminal.SUPERSEDED)
                     child.baselineStarted = false
                     restartBaseline = true
                 }
@@ -541,8 +1192,7 @@ class LearningMonitorEngine internal constructor(
                 }
             }
             cancelUnreleasedBaselines()
-            activeRegularRun?.invalidated = true
-            activeRegularRun = null
+            invalidateActiveRegularRun()
             cancelCadenceTimer()
         }
         publish()
@@ -561,8 +1211,7 @@ class LearningMonitorEngine internal constructor(
                 screenOn = false
                 runtimeEligibilityRevision += 1L
                 cancelUnreleasedBaselines()
-                activeRegularRun?.invalidated = true
-                activeRegularRun = null
+                invalidateActiveRegularRun()
                 cancelCadenceTimer()
                 publish()
             }
@@ -625,8 +1274,7 @@ class LearningMonitorEngine internal constructor(
             }
         }
         cancelUnreleasedBaselines()
-        activeRegularRun?.invalidated = true
-        activeRegularRun = null
+        invalidateActiveRegularRun()
         cancelCadenceTimer()
     }
 
@@ -715,7 +1363,10 @@ class LearningMonitorEngine internal constructor(
         val state = accounts[accountId] ?: return
         val child = state.registrations[childName] ?: return
         if (child.baselineStarted) return
-        baselineRuns.remove(BaselineKey(accountId, childName))?.invalidated = true
+        baselineRuns.remove(BaselineKey(accountId, childName))?.let { old ->
+            old.invalidated = true
+            detachBaselineConsumer(old, ConsumerTerminal.SUPERSEDED)
+        }
         child.baselineStarted = true
         lastCycleStartedAtMillis = clock.monotonicMillis()
         cancelCadenceTimer()
@@ -815,39 +1466,68 @@ class LearningMonitorEngine internal constructor(
                 continue
             }
             val session = run.session ?: return finishBaselineFailure(run, "로그인 상태를 확인하지 못했습니다.")
-            releaseBaselineIo(
-                run,
-                subjectPair = true,
-                operation = { repository.loadSubjectReport(session, subscription, run.reportDate) },
-                onSuccess = { result ->
-                    val validated = when (result) {
-                        is LearningRepositoryResult.Success -> if (
-                            result.value.childName == run.childName && result.value.subjectName == subscription.subjectName
-                        ) result else LearningRepositoryResult.TemporaryFailure(
-                            LearningRepositoryException("학습 보고서의 아이 또는 과목이 요청과 일치하지 않습니다."),
-                        )
-                        is LearningRepositoryResult.TemporaryFailure -> result
-                        is LearningRepositoryResult.AuthenticationDenied -> result
-                    }
-                    applyBaselinePair(run, subscription, targetRevision, target, validated)
-                    loadNextBaselinePair(run)
-                },
-                onFailure = { exception ->
-                    applyBaselinePair(
-                        run,
-                        subscription,
-                        targetRevision,
-                        target,
-                        LearningRepositoryResult.TemporaryFailure(
-                            LearningRepositoryException(exception.message ?: "학습 결과를 확인하지 못했습니다.", exception),
-                        ),
-                    )
-                    loadNextBaselinePair(run)
-                },
-            )
+            val consumer = BaselinePairConsumer(run, subscription, targetRevision, target)
+            val joinableScreenWork = findJoinableScreenPair(run, subscription)
+            if (joinableScreenWork != null) {
+                joinableScreenWork.baselineConsumer = consumer
+                run.activePairConsumer = consumer
+                run.activePairWork = joinableScreenWork
+                run.lastDispatchSequence = joinableScreenWork.dispatchSequence
+            } else {
+                val dispatchSequence = nextDispatchSequence()
+                val work = ReportPairWork(
+                    purpose = ReportPurpose.MONITOR_INITIAL,
+                    accountId = run.accountId,
+                    accountEpoch = run.accountEpoch,
+                    authEpoch = run.authEpoch,
+                    dateRevision = run.dateRevision,
+                    reportDate = run.reportDate,
+                    childName = subscription.childName,
+                    subjectName = subscription.subjectName,
+                    generation = run.generation,
+                    targetRevision = targetRevision,
+                    dispatchSequence = dispatchSequence,
+                    eligibilityRevisionAtDispatch = runtimeEligibilityRevision,
+                    permissionRevisionAtDispatch = runtimePermissionRevision,
+                    session = session,
+                    subscription = subscription,
+                )
+                work.baselineConsumer = consumer
+                run.lastDispatchSequence = dispatchSequence
+                run.activePairConsumer = consumer
+                run.activePairWork = work
+                dispatchReportPair(work)
+            }
             return
         }
         finishBaselineRun(run)
+    }
+
+    private fun findJoinableScreenPair(
+        run: BaselineRun,
+        subscription: ChildSubjectSubscription,
+    ): ReportPairWork? {
+        if (!baselineCanContinue(run) || !executionReady(run.accountId) ||
+            run.dateRevision != monitoringDateRevision || run.reportDate != monitoringDate
+        ) return null
+        return screenPairWork.values.firstOrNull { work ->
+            val screenConsumer = work.screenConsumer
+            val screenRun = screenConsumer?.run
+            work.purpose == ReportPurpose.SCREEN && !work.physicalCompleted &&
+                screenConsumer != null && screenConsumer.terminal == null &&
+                screenRun != null && screenCanContinue(screenRun) && screenCanAffectMonitor(screenRun) &&
+                screenRun.generation == work.generation &&
+                screenRun.accountIdHint == run.accountId &&
+                screenRun.accountEpochAtStart == run.accountEpoch &&
+                screenRun.authEpochAtStart == run.authEpoch &&
+                screenRun.dateRevisionAtStart == run.dateRevision &&
+                screenRun.reportDate == run.reportDate &&
+                work.accountId == run.accountId && work.accountEpoch == run.accountEpoch &&
+                work.authEpoch == run.authEpoch && work.dateRevision == run.dateRevision &&
+                work.reportDate == run.reportDate && work.childName == subscription.childName &&
+                work.subjectName == subscription.subjectName &&
+                work.dispatchSequence > run.baselineBoundarySequence
+        }
     }
 
     private fun applyBaselinePair(
@@ -950,6 +1630,7 @@ class LearningMonitorEngine internal constructor(
 
     private fun finishBaselineRun(run: BaselineRun) {
         if (!baselineRuns.remove(BaselineKey(run.accountId, run.childName), run)) return
+        detachBaselineConsumer(run, ConsumerTerminal.FINISHED)
         startUnattemptedBaselines()
         maybeStartRegularCycle()
     }
@@ -995,6 +1676,7 @@ class LearningMonitorEngine internal constructor(
 
         cancelCadenceTimer()
         val run = RegularRun(
+            generation = regularRunIds.incrementAndGet(),
             accountId = accountId,
             accountEpoch = accountEpoch,
             authEpoch = state.authEpoch,
@@ -1060,8 +1742,7 @@ class LearningMonitorEngine internal constructor(
         monitoringDate = today
         monitoringDateRevision += 1L
         cancelUnreleasedBaselines()
-        activeRegularRun?.invalidated = true
-        activeRegularRun = null
+        invalidateActiveRegularRun()
         cancelCadenceTimer()
         accounts.forEach { (accountId, state) ->
             state.metadataRetryNeeded = true
@@ -1248,25 +1929,30 @@ class LearningMonitorEngine internal constructor(
                 continue
             }
             val session = run.session ?: return failRegularRun(run, "로그인 상태를 확인하지 못했습니다.")
-            releaseRegularIo(
-                run,
-                subjectPair = true,
-                operation = { repository.loadSubjectReport(session, pair.subscription, run.reportDate) },
-                onSuccess = { result ->
-                    applyRegularPair(run, pair, result)
-                    loadNextRegularPair(run)
-                },
-                onFailure = { exception ->
-                    applyRegularPair(
-                        run,
-                        pair,
-                        LearningRepositoryResult.TemporaryFailure(
-                            LearningRepositoryException(exception.message ?: "학습 결과를 확인하지 못했습니다.", exception),
-                        ),
-                    )
-                    loadNextRegularPair(run)
-                },
+            val dispatchSequence = nextDispatchSequence()
+            val work = ReportPairWork(
+                purpose = ReportPurpose.MONITOR_REGULAR,
+                accountId = run.accountId,
+                accountEpoch = run.accountEpoch,
+                authEpoch = run.authEpoch,
+                dateRevision = run.dateRevision,
+                reportDate = run.reportDate,
+                childName = pair.subscription.childName,
+                subjectName = pair.subscription.subjectName,
+                generation = run.generation,
+                targetRevision = pair.targetRevision,
+                dispatchSequence = dispatchSequence,
+                eligibilityRevisionAtDispatch = runtimeEligibilityRevision,
+                permissionRevisionAtDispatch = runtimePermissionRevision,
+                session = session,
+                subscription = pair.subscription,
             )
+            val consumer = RegularPairConsumer(run, pair)
+            work.regularConsumer = consumer
+            run.activePairConsumer = consumer
+            run.activePairWork = work
+            run.lastDispatchSequence = dispatchSequence
+            dispatchReportPair(work)
             return
         }
         finishRegularRun(run)
@@ -1528,6 +2214,7 @@ class LearningMonitorEngine internal constructor(
         baselineRuns.clear()
         activeRuns.forEach { run ->
             run.invalidated = true
+            detachBaselineConsumer(run, ConsumerTerminal.INVALIDATED)
             accounts[run.accountId]?.registrations?.get(run.childName)
                 ?.takeIf { it.generation == run.generation }
                 ?.baselineStarted = false

@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     private var currentResult: LearningResult? = null
     private var monitorSnapshot: LearningMonitorSnapshot = LearningMonitorSnapshot()
     private var monitorSubscription: MonitorSubscription? = null
+    private var screenRequest: LearningReportRequestHandle? = null
 
     private lateinit var rootLayout: LinearLayout
     private lateinit var topNavLayout: LinearLayout
@@ -91,6 +92,13 @@ class MainActivity : Activity() {
         monitorSubscription?.close()
         monitorSubscription = null
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        requestTracker.nextRequestId()
+        screenRequest?.cancel()
+        screenRequest = null
+        super.onDestroy()
     }
 
     private fun setupSystemBars() {
@@ -506,57 +514,66 @@ class MainActivity : Activity() {
         errorView.visibility = View.GONE
         errorView.text = ""
 
-        Thread {
-            try {
-                val result = LearningReportRepository()
-                    .load(credentials.email, credentials.password, targetDate)
-                    .getOrThrow()
-                runOnUiThread {
-                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
-                        return@runOnUiThread
-                    }
-                    currentResult = result
-                    if (result.accountId.isNotBlank()) {
-                        if (humanReauthentication) {
-                            learningMonitorScreenUseCases.credentialsReauthenticated(
-                                result.accountId,
-                                credentials.email,
-                                credentials.password,
-                            )
-                        } else {
-                            learningMonitorScreenUseCases.credentialsAccepted(
-                                result.accountId,
-                                credentials.email,
-                                credentials.password,
-                            )
-                        }
-                    }
-                    setNavButtonsEnabled(true)
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                    checkedAtView.text = result.checkedAt
-                    renderChildren(result)
+        screenRequest = learningMonitorScreenUseCases.loadScreenReport(
+            email = credentials.email,
+            password = credentials.password,
+            date = targetDate,
+        ) { outcome ->
+            runOnUiThread {
+                if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
+                    return@runOnUiThread
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
-                        return@runOnUiThread
+                when (outcome) {
+                    is LearningReportRequestOutcome.Finished -> when (val result = outcome.result) {
+                        is LearningRepositoryResult.Success -> {
+                            currentResult = result.value
+                            if (result.value.accountId.isNotBlank()) {
+                                if (humanReauthentication) {
+                                    learningMonitorScreenUseCases.credentialsReauthenticated(
+                                        result.value.accountId,
+                                        credentials.email,
+                                        credentials.password,
+                                    )
+                                } else {
+                                    learningMonitorScreenUseCases.credentialsAccepted(
+                                        result.value.accountId,
+                                        credentials.email,
+                                        credentials.password,
+                                    )
+                                }
+                            }
+                            setNavButtonsEnabled(true)
+                            progressBar.visibility = View.GONE
+                            swipeRefreshLayout.isRefreshing = false
+                            checkedAtView.text = result.value.checkedAt
+                            renderChildren(result.value)
+                        }
+                        is LearningRepositoryResult.TemporaryFailure -> showLearningFailure(result.error)
+                        is LearningRepositoryResult.AuthenticationDenied -> showLearningFailure(result.error)
                     }
-                    setNavButtonsEnabled(true)
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                    childrenContainer.removeAllViews()
-                    checkedAtView.text = "확인 실패"
-                    errorView.visibility = View.VISIBLE
-                    errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
-
-                    if (e is LearningAuthenticationDeniedException) {
-                        CredentialStore(this).clear()
-                        askCredentials("로그인에 실패했습니다. 이메일과 비밀번호를 다시 입력하세요.")
-                    }
+                    LearningReportRequestOutcome.Invalidated -> showLearningFailure(
+                        LearningRepositoryException("인증 정보가 변경되어 조회 결과를 표시할 수 없습니다. 다시 조회해주세요."),
+                    )
+                    LearningReportRequestOutcome.Superseded,
+                    LearningReportRequestOutcome.Cancelled -> Unit
                 }
             }
-        }.start()
+        }
+    }
+
+    private fun showLearningFailure(error: Exception) {
+        setNavButtonsEnabled(true)
+        progressBar.visibility = View.GONE
+        swipeRefreshLayout.isRefreshing = false
+        childrenContainer.removeAllViews()
+        checkedAtView.text = "확인 실패"
+        errorView.visibility = View.VISIBLE
+        errorView.text = "학습시간을 불러오지 못했습니다.\n${error.message ?: error.javaClass.simpleName}"
+
+        if (error is LearningAuthenticationDeniedException) {
+            CredentialStore(this).clear()
+            askCredentials("로그인에 실패했습니다. 이메일과 비밀번호를 다시 입력하세요.")
+        }
     }
 
     private fun renderChildren(result: LearningResult) {

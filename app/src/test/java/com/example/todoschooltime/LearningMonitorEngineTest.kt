@@ -13,6 +13,36 @@ import org.junit.Test
 
 class LearningMonitorEngineTest {
     @Test
+    fun screenRequestReturnsTheFullLearningResultThroughTheEngine() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 3, 60))
+            },
+        )
+        val outcomes = mutableListOf<LearningReportRequestOutcome>()
+
+        fixture.engine.loadScreenReport(
+            email = "mail@example.test",
+            password = "secret",
+            date = LocalDate.of(2026, 10, 10),
+            accountIdHint = "account-A",
+            listener = outcomes::add,
+        )
+        fixture.commands.drain()
+        fixture.drainAll()
+        fixture.ui.drain()
+
+        assertEquals(1, outcomes.size)
+        val finished = outcomes.single() as LearningReportRequestOutcome.Finished
+        val result = (finished.result as LearningRepositoryResult.Success).value
+        assertEquals("account-A", result.accountId)
+        assertEquals(listOf("철수", "영희"), result.children.map { it.name })
+        assertEquals(listOf(3, 3), result.children.map { it.minutes })
+        assertEquals(listOf(3, 3, 3), result.children.first().subjects.map { it.count })
+        assertTrue(fixture.notifications.updates.none { it.completion })
+    }
+
+    @Test
     fun regularReportsWaitForScreenForegroundAndTheSharedStartBasedInterval() {
         val fixture = Fixture(
             reports = mapOf(
@@ -139,6 +169,38 @@ class LearningMonitorEngineTest {
         assertEquals(listOf("철수" to "수학", "철수" to "수학"), fixture.repository.reportedPairs)
         assertEquals(3, fixture.repository.signInCalls)
         assertEquals(30_000L, fixture.timers.scheduledDelays.last())
+    }
+
+    @Test
+    fun foregroundChangeBeforeRegularPairDispatchReleasesTheOldRunAndPollsCurrentSubject() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 2, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.runWorkerAndCommands()
+        fixture.runWorkerAndCommands()
+        val staleEnglishPair = fixture.workers.takeNext()
+
+        fixture.engine.foregroundPackageChanged("com.enuma.todomath")
+        fixture.commands.drain()
+        staleEnglishPair()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(60_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "수학"), fixture.repository.reportedPairs)
+        assertEquals(3, fixture.repository.signInCalls)
     }
 
     @Test
@@ -1855,6 +1917,11 @@ class LearningMonitorEngineTest {
             throw AssertionError("No worker reached the requested checkpoint")
         }
 
+        fun runWorkerAndCommands() {
+            workers.takeNext().invoke()
+            commands.drain()
+        }
+
         fun drainAll() {
             while (!commands.isEmpty() || !workers.isEmpty()) {
                 commands.drain()
@@ -1984,8 +2051,18 @@ class LearningMonitorEngineTest {
             reportGate(subscription)
             val queued = reportResults[subscription.childName to subscription.subjectName]
             val nextQueued = queued?.takeIf { it.isNotEmpty() }?.removeAt(0)
-            return nextQueued ?: reports[subscription.subjectName]
-                ?: LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("report unavailable"))
+            return nextQueued ?: reports[subscription.subjectName]?.let { result ->
+                when (result) {
+                    is LearningRepositoryResult.Success -> LearningRepositoryResult.Success(
+                        result.value.copy(
+                            childName = subscription.childName,
+                            subjectName = subscription.subjectName,
+                        ),
+                    )
+                    is LearningRepositoryResult.TemporaryFailure -> result
+                    is LearningRepositoryResult.AuthenticationDenied -> result
+                }
+            } ?: LearningRepositoryResult.TemporaryFailure(LearningRepositoryException("report unavailable"))
         }
 
         private fun defaultCatalog() = LearningCatalog(
