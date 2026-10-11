@@ -25,12 +25,18 @@ function Invoke-E2eCommand([string]$Json) {
     $bytes = [Text.Encoding]::UTF8.GetBytes($Json)
     $encoded = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     $output = & adb shell am broadcast `
+        --include-stopped-packages `
+        --receiver-foreground `
+        --receiver-include-background `
+        --user current `
         -a com.example.todoschooltime.e2e.COMMAND `
         -n com.example.todoschooltime.e2e/com.example.todoschooltime.E2eCommandReceiver `
-        --es request_b64 $encoded
+        --es request_b64 $encoded 2>&1
+    $adbExitCode = $LASTEXITCODE
     $joined = $output -join "`n"
+    if ($adbExitCode -ne 0) { throw "ADB broadcast failed with exit code ${adbExitCode}: $joined" }
     $match = [regex]::Match($joined, 'data="?E2E1:(?<payload>[A-Za-z0-9_-]+)"?')
-    if (-not $match.Success) { throw "ADB did not return an E2E1 response: $joined" }
+    if (-not $match.Success) { throw "ADB returned no E2E1 response; the E2E command did not complete successfully: $joined" }
     $response = $match.Groups['payload'].Value.Replace('-', '+').Replace('_', '/')
     $response += '=' * ((4 - ($response.Length % 4)) % 4)
     $responseBytes = [Convert]::FromBase64String($response)
@@ -79,3 +85,9 @@ State-changing commands call the existing product surface and then subscribe onc
 ## Android setup
 
 Basic ADB commands and `getState` work without notification or accessibility permission. To exercise screen report queries through the real product Activity, open `com.example.todoschooltime.e2e/com.example.todoschooltime.MainActivity` with the host's ADB `am start`. To exercise product monitoring and actual notification posting, enable the E2E app's notification permission and its `토도 학습 상태 알림 서비스` AccessibilityService in Android Settings yourself. The API can read those settings but cannot grant or revoke them. Its notification posting path preserves real Android permission behavior; a missing permission can leave the engine paused and the active-notification list empty. Device boot and task removal are controlled by the host's ADB/device actions, not by fake engine flags.
+
+## Device validation and limits
+
+On a real Android API 33 device, the documented broadcast options returned `getState` and a structured `invalid_request` response both with the E2E process initially cold and after launching the E2E `MainActivity`. During this smoke check, notification and accessibility permissions were false, the service lease was detached, and the E2E app had no active notifications. This does not validate the permission-enabled monitoring service or actual notification-posting integration. The real Activity's report-query flow and the `authenticationDenied` → `reset` recovery flow were not verified end to end, and API 35 was not tested.
+
+After an E2E package reinstall/data clear, the API 33 device once recorded the manifest receiver as skipped and `am broadcast` returned no `E2E1` result data. Rebooting restored successful cold and post-Activity responses; the cause of the earlier skip is unknown. The PowerShell helper throws on an `adb` failure or missing `E2E1` response, so a skipped receiver is not reported as a passing command. A structured API error is returned with `ok: false` and must also be treated as failure by the calling test unless that error is expected.
