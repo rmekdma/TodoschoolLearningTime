@@ -6,7 +6,7 @@ Build the installable variant with `:app:assembleE2e`. The explicit receiver act
 
 ```text
 action:    com.example.todoschooltime.e2e.COMMAND
-component: com.example.todoschooltime.e2e/.E2eCommandReceiver
+component: com.example.todoschooltime.e2e/com.example.todoschooltime.E2eCommandReceiver
 extra:     request_b64=<unpadded base64url of UTF-8 JSON>
 ```
 
@@ -26,7 +26,7 @@ function Invoke-E2eCommand([string]$Json) {
     $encoded = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
     $output = & adb shell am broadcast `
         -a com.example.todoschooltime.e2e.COMMAND `
-        -n com.example.todoschooltime.e2e/.E2eCommandReceiver `
+        -n com.example.todoschooltime.e2e/com.example.todoschooltime.E2eCommandReceiver `
         --es request_b64 $encoded
     $joined = $output -join "`n"
     $match = [regex]::Match($joined, 'data="?E2E1:(?<payload>[A-Za-z0-9_-]+)"?')
@@ -42,7 +42,7 @@ Invoke-E2eCommand '{"version":1,"command":"setReport","child":"child-a","subject
 Invoke-E2eCommand '{"version":1,"command":"registerChild","child":"child-a"}'
 ```
 
-The command object must contain exactly the fields listed below. JSON integers must be unquoted base-10 integers. Unknown fields, commands, aliases, versions, and values are rejected before state changes.
+The request must be one strict JSON object with no trailing text, comments, single-quoted strings, duplicate keys, unquoted names, or leading-zero numbers. The command object must contain exactly the fields listed below. JSON integers must be unquoted base-10 integers. Unknown fields, commands, aliases, versions, and values are rejected before state changes.
 
 ## Commands
 
@@ -51,7 +51,7 @@ The command object must contain exactly the fields listed below. JSON integers m
 | `getState` | `version`, `command` | Reads one engine snapshot after an engine queue fence, actual Android permission settings, service lease state, and this app's active notifications. |
 | `getEvents` | `version`, `command` | Reads the bounded fake-query and notification-request audit. |
 | `clearEvents` | `version`, `command` | Clears the event buffer. The sequence counter remains monotonic. |
-| `reset` | `version`, `command` | Restores the default fake reports, clears simulated date and saved goals, unregisters the fake account's children through `LearningMonitor`, resets its interval to one minute, then clears request events produced by reset. |
+| `reset` | `version`, `command` | Restores the default fake reports, clears simulated date and saved goals, unregisters the fake account's children through `LearningMonitor`, resets its interval to one minute, reauthenticates the fixed fake credentials to clear an authentication-denied latch, then clears request events produced by reset. |
 | `setReport` | `version`, `command`, `child`, `subject`, `count`, `outcome`, `delayMs` | Persists a fake report input for one child and subject. It takes effect when the product engine next requests that report; it does not start a check itself. |
 | `registerChild` | `version`, `command`, `child` | Calls the product engine's child registration method. |
 | `unregisterChild` | `version`, `command`, `child` | Calls the product engine's child unregistration method. |
@@ -72,10 +72,10 @@ State-changing commands call the existing product surface and then subscribe onc
 - `monitor` is the actual product engine snapshot. Its registered children, statuses, target counts, and revision are not synthesized by the test API. Permission values are read directly from current Android settings, and `serviceLeaseAttached` reflects the actual AccessibilityService connection.
 - `activeNotifications` comes from Android's active notifications for the E2E package only. This is posted state, separate from `getEvents` notification request records.
 - `fakeWorld` is persisted test input. The fixed test account is `e2e-test-account`; the E2E Application stores only its isolated fake credentials and uses a fake repository.
-- `date.source` is `Asia/Seoul_device_clock` until `advanceDate` is called, then `simulated`. The simulated date is persisted until `reset`; no device clock or timezone setting is changed.
+- `date.source` is `Asia/Seoul_device_clock` until `advanceDate` is called, then `simulated`. Until simulated, `checkedAt` and midnight cadence use the actual `DateHelper` Asia/Seoul clock. In simulated mode, `checkedAt` is a deterministic noon value and midnight cadence is a fixed 24 hours. The simulated date is persisted until `reset`; no device clock or timezone setting is changed.
 
-`getEvents` returns at most the latest 500 entries plus `truncated` and `lastSequence`. `kind: fake_query` records fake sign-in, catalog, and subject-report calls. `kind: notification_request` records calls made by the product engine to its notification sink. The decorator still delegates to the actual `AndroidChildNotificationSink`, The E2E composition pre-creates that package's product channel at low importance with sound and vibration disabled, and also suppresses completion alerts. A request record does not prove Android posted a notification; use `activeNotifications` for that. Event payloads contain only fake child/subject data, never content from other apps.
+`getEvents` returns at most the latest 500 entries plus `truncated` and `lastSequence`. `kind: fake_query` records fake sign-in, catalog, and subject-report calls. `kind: notification_request` records calls made by the product engine to its notification sink. The decorator still delegates to the actual `AndroidChildNotificationSink`. The E2E composition pre-creates that package's product channel at low importance with sound and vibration disabled, and also suppresses completion alerts. A request record does not prove Android posted a notification; use `activeNotifications` for that. Event payloads contain only fake child/subject data, never content from other apps.
 
 ## Android setup
 
-Basic ADB commands and `getState` work without notification or accessibility permission. To exercise product monitoring and actual notification posting, enable the E2E app's notification permission and its `토도 학습 상태 알림 서비스` AccessibilityService in Android Settings yourself. The API can read those settings but cannot grant or revoke them. Its notification posting path preserves real Android permission behavior; a missing permission can leave the engine paused and the active-notification list empty. Device boot and task removal are controlled by the host's ADB/device actions, not by fake engine flags.
+Basic ADB commands and `getState` work without notification or accessibility permission. To exercise screen report queries through the real product Activity, open `com.example.todoschooltime.e2e/com.example.todoschooltime.MainActivity` with the host's ADB `am start`. To exercise product monitoring and actual notification posting, enable the E2E app's notification permission and its `토도 학습 상태 알림 서비스` AccessibilityService in Android Settings yourself. The API can read those settings but cannot grant or revoke them. Its notification posting path preserves real Android permission behavior; a missing permission can leave the engine paused and the active-notification list empty. Device boot and task removal are controlled by the host's ADB/device actions, not by fake engine flags.

@@ -3,6 +3,7 @@ package com.example.todoschooltime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.math.BigInteger
 
 class E2eCommandParserTest {
     @Test
@@ -35,6 +36,17 @@ class E2eCommandParserTest {
     }
 
     @Test
+    fun preservesLargePositiveIntervalFromItsRawDecimalJsonToken() {
+        listOf(BigInteger("9223372036854775808"), BigInteger.TEN.pow(400)).forEach { expected ->
+            val command = E2eCommandParser.parse(
+                """{"version":1,"command":"setInterval","minutes":$expected}""",
+            ) as E2eCommand.SetInterval
+
+            assertEquals(expected, command.minutes)
+        }
+    }
+
+    @Test
     fun rejectsUnknownFieldsVersionsAliasesAndNonIntegerNumbers() {
         listOf(
             """{"version":1,"command":"getState","surprise":true}""",
@@ -49,6 +61,11 @@ class E2eCommandParserTest {
             """{"version":1,"command":"setInterval","minutes":0}""",
             """{"version":1,"command":"advanceDate","days":0}""",
             """{"version":1,"command":"forgetEverything"}""",
+            """{"version":1,"command":"reset"}garbage""",
+            """{'version':1,'command':'reset'}""",
+            """{"version":1,/*comment*/"command":"reset"}""",
+            """{"version":1,"command":"getState","command":"reset"}""",
+            """{"version":1,"command":"setReport","child":"child-a","subject":"math","count":010,"outcome":"success","delayMs":0}""",
         ).forEach { json ->
             assertRejected(json)
         }

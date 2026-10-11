@@ -234,6 +234,11 @@ private class E2eCommandService(
         val registered = app.learningMonitor.snapshot().registeredChildren
         registered.forEach { app.learningMonitor.unregisterChild(E2eWorldStore.TEST_ACCOUNT_ID, it) }
         app.learningMonitor.setIntervalMinutes(E2eWorldStore.TEST_ACCOUNT_ID, java.math.BigInteger.ONE)
+        app.learningMonitor.reauthenticate(
+            E2eWorldStore.TEST_ACCOUNT_ID,
+            E2eWorldStore.TEST_EMAIL,
+            E2eWorldStore.TEST_PASSWORD,
+        )
         afterFence("reset") { snapshot ->
             app.e2eWorld.clearEvents()
             success("reset", snapshot, JSONObject().put("state", state(snapshot)))

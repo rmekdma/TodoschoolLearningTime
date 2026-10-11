@@ -234,11 +234,20 @@ internal class E2eWorldStore(context: Context) {
 internal class E2eMonitorClock(private val world: E2eWorldStore) : MonitorClock {
     override fun today(): LocalDate = world.currentDate()
 
-    override fun checkedAt(): String = DateHelper.formatCheckedAt(
-        world.currentDate().atTime(12, 0).atZone(ZoneId.of("Asia/Seoul")),
-    )
+    override fun checkedAt(): String {
+        val checkedAt = if (world.isDateSimulated()) {
+            world.currentDate().atTime(12, 0).atZone(ZoneId.of("Asia/Seoul"))
+        } else {
+            DateHelper.nowZoned()
+        }
+        return DateHelper.formatCheckedAt(checkedAt)
+    }
 
     override fun monotonicMillis(): Long = SystemClock.elapsedRealtime()
 
-    override fun millisUntilNextSeoulMidnight(): Long = 24L * 60L * 60L * 1_000L
+    override fun millisUntilNextSeoulMidnight(): Long = if (world.isDateSimulated()) {
+        24L * 60L * 60L * 1_000L
+    } else {
+        DateHelper.millisUntilNextSeoulMidnight()
+    }
 }
