@@ -15,8 +15,19 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            isDebuggable = true
+        }
+        create("e2e") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".e2e"
+            versionNameSuffix = "-e2e"
+            isDebuggable = true
+            matchingFallbacks += listOf("debug")
+        }
         release {
             isMinifyEnabled = false
+            isDebuggable = false
             signingConfig = signingConfigs.getByName("debug")
         }
     }

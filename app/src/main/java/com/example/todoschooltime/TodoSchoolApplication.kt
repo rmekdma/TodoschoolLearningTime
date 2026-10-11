@@ -4,9 +4,10 @@ import android.app.Application
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.content.SharedPreferences
 import java.util.concurrent.Executors
 
-class TodoSchoolApplication : Application() {
+open class TodoSchoolApplication : Application() {
     lateinit var learningMonitor: LearningMonitor
         private set
     internal lateinit var learningMonitorRuntime: LearningMonitorRuntimeAdapter
@@ -29,27 +30,20 @@ class TodoSchoolApplication : Application() {
         val monitorPreferences = getSharedPreferences(MONITOR_PREFERENCES, MODE_PRIVATE)
         val notificationIdPreferences = getSharedPreferences(NOTIFICATION_ID_PREFERENCES, MODE_PRIVATE)
         val targetCountStore = TargetCountStore(this)
-        val learningReportRepository = LearningReportRepository()
+        val learningReportRepository = createMonitorRepository()
 
         val engine = LearningMonitorEngine(
             commandQueue = MonitorTaskQueue { task -> commandExecutor.execute { task() } },
             workerQueue = MonitorTaskQueue { task -> workerExecutor.execute { task() } },
             callbackQueue = MonitorTaskQueue { task -> mainHandler.post { task() } },
-            clock = object : MonitorClock {
-                override fun today() = DateHelper.today()
-                override fun checkedAt() = DateHelper.formatCheckedAt(DateHelper.nowZoned())
-                override fun monotonicMillis() = SystemClock.elapsedRealtime()
-            },
+            clock = createMonitorClock(),
             timerFactory = ScheduledMonitorTimerFactory(timerExecutor),
             store = SharedPreferencesMonitorStore(monitorPreferences),
             repository = learningReportRepository,
             targetProvider = MonitorTargetProvider { childName, subjectName ->
                 targetCountStore.getTargetCount(childName, subjectName)
             },
-            notificationSink = AndroidChildNotificationSink(
-                this,
-                SharedPreferencesNotificationIdAllocator(notificationIdPreferences),
-            ),
+            notificationSink = createNotificationSink(notificationIdPreferences),
             executionStatusProbe = MonitorExecutionStatusProbe {
                 MonitorExecutionStatusInspector.inspect(this@TodoSchoolApplication)
             },
@@ -59,6 +53,20 @@ class TodoSchoolApplication : Application() {
         learningMonitorRuntime = monitorRuntime
         learningMonitorScreenUseCases = monitorRuntime
     }
+
+    protected open fun createMonitorRepository(): MonitorRepository = LearningReportRepository()
+
+    protected open fun createMonitorClock(): MonitorClock = object : MonitorClock {
+        override fun today() = DateHelper.today()
+        override fun checkedAt() = DateHelper.formatCheckedAt(DateHelper.nowZoned())
+        override fun monotonicMillis() = SystemClock.elapsedRealtime()
+    }
+
+    protected open fun createNotificationSink(notificationIdPreferences: SharedPreferences): ChildNotificationSink =
+        AndroidChildNotificationSink(
+            this,
+            SharedPreferencesNotificationIdAllocator(notificationIdPreferences),
+        )
 
     private companion object {
         const val MONITOR_PREFERENCES = "learning_monitor"
