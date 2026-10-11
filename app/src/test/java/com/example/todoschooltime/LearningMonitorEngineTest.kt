@@ -437,6 +437,62 @@ class LearningMonitorEngineTest {
     }
 
     @Test
+    fun registeringAnotherChildPreservesExistingBelowTargetBaselineAndItsNextCompletion() {
+        val fixture = Fixture(
+            reports = listOf("한글", "수학", "영어").associateWith { subject ->
+                LearningRepositoryResult.Success(SubjectReport("철수", subject, 0, 0))
+            },
+        )
+        fixture.startAndRegister("철수")
+        fixture.repository.clearReports()
+
+        val oldBeforeRegistration = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("영어")
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, oldBeforeRegistration.status)
+        assertEquals(0, oldBeforeRegistration.activityCount)
+
+        // Model the old child reaching its goal while a different child is being registered.
+        fixture.repository.enqueueReportResult(
+            "철수",
+            "영어",
+            LearningRepositoryResult.Success(SubjectReport("철수", "영어", 8, 0)),
+        )
+        fixture.engine.registerChild("account-A", "영희")
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(
+            listOf("영희" to "한글", "영희" to "수학", "영희" to "영어"),
+            fixture.repository.reportedPairs,
+        )
+        val oldAfterRegistration = fixture.engine.snapshot().children.getValue("철수").subjects.getValue("영어")
+        assertEquals(MonitorSubjectStatus.BELOW_TARGET, oldAfterRegistration.status)
+        assertEquals(0, oldAfterRegistration.activityCount)
+        assertTrue(fixture.notifications.updates.none { it.completion })
+
+        fixture.repository.clearReports()
+        fixture.notifications.updates.clear()
+        fixture.engine.screenOnChanged(true)
+        fixture.engine.foregroundPackageChanged("com.enuma.todoenglish")
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.clock.advanceBy(30_000L)
+        fixture.timers.runDue()
+        fixture.commands.drain()
+        fixture.drainAll()
+
+        assertEquals(listOf("철수" to "영어", "영희" to "영어"), fixture.repository.reportedPairs)
+        val completion = fixture.notifications.updates.single { it.completion }
+        assertEquals("철수", completion.child.childName)
+        assertEquals("영어", completion.completionSubjectName)
+        assertEquals(MonitorSubjectStatus.COMPLETE,
+            completion.child.subjects.getValue("영어").status)
+        assertEquals(8, completion.child.subjects.getValue("영어").activityCount)
+        assertTrue(fixture.notifications.updates.filter { it.child.childName == "영희" }.all { !it.completion })
+    }
+
+    @Test
     fun changingATargetReclassifiesKnownCountsSilentlyAndOnlyLaterObservedCrossingAlerts() {
         val fixture = Fixture(
             reports = mapOf(
