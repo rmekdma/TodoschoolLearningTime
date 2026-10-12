@@ -17,6 +17,66 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class Ticket04ControlActivityTest {
     @Test
+    fun startingAReportKeepsTheControlScreenInFrontWhileTheRequestIsPrepared() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val token = "start-control-screen-token"
+        val instructions = "조회 중입니다. 자동으로 열린 설정 화면이 나올 때까지 이 화면에서 기다려 주세요."
+        val preferences = context.getSharedPreferences(Ticket04ControlActivity.PREFERENCES_NAME, android.content.Context.MODE_PRIVATE)
+        preferences.edit()
+            .putString(Ticket04ControlActivity.KEY_ACTIVE_TOKEN, token)
+            .remove(Ticket04ControlActivity.KEY_CLICKED_TOKEN)
+            .remove(Ticket04ControlActivity.KEY_CLICKED_AT)
+            .commit()
+        val intent = Intent(context, Ticket04ControlActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .putExtra(Ticket04ControlActivity.EXTRA_CASE_ID, "accessibility-revocation")
+            .putExtra(Ticket04ControlActivity.EXTRA_TOKEN, token)
+            .putExtra(Ticket04ControlActivity.EXTRA_INSTRUCTIONS, "시작 버튼 설명")
+            .putExtra(Ticket04ControlActivity.EXTRA_BUTTON_LABEL, "시험 시작")
+            .putExtra(Ticket04ControlActivity.EXTRA_KEEP_VISIBLE_AFTER_CLICK, true)
+            .putExtra(Ticket04ControlActivity.EXTRA_PENDING_INSTRUCTIONS, instructions)
+        val activity = instrumentation.startActivitySync(intent) as Ticket04ControlActivity
+
+        try {
+            instrumentation.runOnMainSync {
+                val container = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0) as LinearLayout
+                (container.getChildAt(2) as Button).performClick()
+            }
+
+            instrumentation.waitForIdleSync()
+            instrumentation.runOnMainSync {
+                val container = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0) as LinearLayout
+                val actionButton = container.getChildAt(2) as Button
+                assertFalse("Tapping start must not finish the control screen", activity.isFinishing)
+                assertTrue("The waiting screen must remain visible while the real request is prepared", activity.window.decorView.isShown)
+                assertTrue("The waiting screen must remain in front", activity.window.decorView.hasWindowFocus())
+                assertFalse("The start action must be disabled after one tap", actionButton.isEnabled)
+                assertEquals("조회 준비 중…", actionButton.text)
+                assertEquals(instructions, (container.getChildAt(1) as TextView).text)
+            }
+            assertEquals("The exact active run token must acknowledge the start click", token, preferences.getString(Ticket04ControlActivity.KEY_CLICKED_TOKEN, null))
+            assertTrue("The start click must retain its elapsed-realtime timestamp", preferences.getLong(Ticket04ControlActivity.KEY_CLICKED_AT, 0L) > 0L)
+
+            preferences.edit().putString(Ticket04ControlActivity.KEY_ACTIVE_TOKEN, "newer-run-token").commit()
+            instrumentation.waitForIdleSync()
+            instrumentation.runOnMainSync {
+                val container = activity.findViewById<ViewGroup>(android.R.id.content).getChildAt(0) as LinearLayout
+                assertEquals("An expired in-progress screen must explain that it ended", Ticket04ControlActivity.EXPIRED_INSTRUCTIONS, (container.getChildAt(1) as TextView).text)
+                assertEquals("An expired in-progress action must be visibly disabled", Ticket04ControlActivity.EXPIRED_BUTTON_LABEL, (container.getChildAt(2) as Button).text)
+                assertFalse("An expired in-progress action must stay disabled", (container.getChildAt(2) as Button).isEnabled)
+            }
+        } finally {
+            instrumentation.runOnMainSync { activity.finish() }
+            preferences.edit()
+                .remove(Ticket04ControlActivity.KEY_ACTIVE_TOKEN)
+                .remove(Ticket04ControlActivity.KEY_CLICKED_TOKEN)
+                .remove(Ticket04ControlActivity.KEY_CLICKED_AT)
+                .commit()
+        }
+    }
+
+    @Test
     fun notificationOffAcknowledgementNamesObserverAndDoesNotSubmitWithoutTap() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext

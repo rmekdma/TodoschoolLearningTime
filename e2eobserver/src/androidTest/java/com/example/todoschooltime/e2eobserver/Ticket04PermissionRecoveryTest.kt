@@ -287,23 +287,29 @@ class Ticket04PermissionRecoveryTest {
         assertTrue(armed.getBoolean("ok"))
 
         // Put the exact Settings page on the task stack first. The user still controls
-        // the start button; this keeps Settings navigation outside the 15-second window.
+        // the start button; the start screen remains in front until the live request is validated.
         assertEquals("The Seoul date changed after the silent baseline was prepared; start a fresh run", seoulDate, seoulDateNumber())
         openPermissionSettings(automation, context, permission)
+        val settingsPrewarmedAtElapsedRealtimeMs = SystemClock.elapsedRealtime()
         val startClickedAt = awaitUserAction(
             context = context,
             runId = runId,
             caseId = caseId,
             action = "START",
             buttonLabel = "시험 시작",
-            instructions = "$caseId 시험을 시작할 준비가 되었으면 아래 버튼을 누르세요.\n\n버튼을 누르면 실제 보고 요청을 시작합니다. 뒤에 준비된 Android 설정 화면에서 ${permission.displayName} 권한을 직접 끄는 작업만 수동으로 해주세요.",
+            instructions = "$caseId 시험을 시작할 준비가 되었으면 아래 버튼을 누르세요.\n\n시작 후에는 설정으로 이동하지 마세요. 실제 $subjectName 보고 요청과 접근성 연결을 확인하는 중에 학습 앱 화면이 잠시 전면에 나타날 수 있습니다. 학습 앱에서는 조작하지 말고, 확인 후 자동으로 열리는 Android 설정에서 ${permission.displayName} 권한을 꺼 주세요.",
             expectedSeoulDate = seoulDate,
+            keepVisibleAfterClick = true,
+            pendingInstructions = "실제 $subjectName 보고 요청과 접근성 연결 상태를 확인 중입니다.\n\n학습 앱 화면이 나타날 수 있습니다. 앱에서 조작하거나 설정으로 직접 이동하지 마세요. 확인이 끝나면 권한 설정 화면이 자동으로 열립니다.",
         )
         emitProgress(
             runId,
             "USER_STARTED",
             caseId,
-            JSONObject().put("buttonClickedElapsedRealtimeMs", startClickedAt).toString(),
+            JSONObject()
+                .put("buttonClickedElapsedRealtimeMs", startClickedAt)
+                .put("settingsPrewarmedAtElapsedRealtimeMs", settingsPrewarmedAtElapsedRealtimeMs)
+                .toString(),
         )
         launchActualSubjectApp(context, subjectPackage)
         val heldFixture = awaitFixtureState(apiBaseUrl, runId, REGULAR_POLL_TIMEOUT_MS) { snapshot ->
@@ -317,6 +323,19 @@ class Ticket04PermissionRecoveryTest {
         assertEquals(SUBJECT_USER_IDS.getValue(subjectName), heldRequest.getJSONObject("body").getString("userId"))
         assertEquals(seoulDate, heldRequest.getJSONObject("body").getInt("yyyymmdd"))
         assertEquals("ko", heldRequest.getJSONObject("body").getString("languageCode"))
+        val serverReceivedMonotonicNs = heldRequest.optLong("serverReceivedMonotonicNs", -1L)
+        val serverSnapshotMonotonicNs = heldFixture.optLong("serverMonotonicNs", -1L)
+        emitProgress(
+            runId,
+            "HELD_REQUEST_CAPTURED",
+            caseId,
+            JSONObject()
+                .put("requestSequence", heldSequence)
+                .put("serverReceivedMonotonicNs", serverReceivedMonotonicNs)
+                .put("serverSnapshotMonotonicNs", serverSnapshotMonotonicNs)
+                .put("responsePending", heldRequest.opt("responseStatus") === JSONObject.NULL)
+                .toString(),
+        )
 
         val dispatchState = waitForProductState(context, 2_000L) { state ->
             state.getJSONArray("httpRequestDispatchEvents").objects().any {
@@ -326,11 +345,33 @@ class Ticket04PermissionRecoveryTest {
         val dispatch = dispatchState.getJSONArray("httpRequestDispatchEvents").objects().last {
             it.optLong("sequence") > dispatchCursorBefore && it.optString("path") == subjectPath
         }
-        assertEquals(subjectPackage, dispatch.getString("foregroundPackage"))
+        val dispatchEvidence = JSONObject()
+            .put("requestSequence", heldSequence)
+            .put("serverReceivedMonotonicNs", serverReceivedMonotonicNs)
+            .put("serverSnapshotMonotonicNs", serverSnapshotMonotonicNs)
+            .put("dispatchSequence", dispatch.optLong("sequence", -1L))
+            .put("dispatchElapsedRealtimeMs", dispatch.optLong("elapsedRealtimeMs", -1L))
+            .put("foregroundEventSequence", dispatch.optLong("foregroundEventSequence", -1L))
+            .put("foregroundPackage", dispatch.optString("foregroundPackage"))
+            .put("foregroundEventElapsedRealtimeMs", dispatch.optLong("foregroundEventElapsedRealtimeMs", -1L))
+            .put("serviceLeaseAttached", dispatch.optBoolean("serviceLeaseAttached"))
+            .put("serviceLeaseObservedAtElapsedRealtimeMs", dispatch.optLong("serviceLeaseObservedAtElapsedRealtimeMs", -1L))
+        emitProgress(runId, "REQUEST_DISPATCH_OBSERVED", caseId, dispatchEvidence.toString())
+        assertEquals("The held report must dispatch while its own subject is foreground; evidence=$dispatchEvidence", subjectPackage, dispatch.getString("foregroundPackage"))
         assertTrue("The real monitor report must have dispatched with a connected AccessibilityService lease", dispatch.getBoolean("serviceLeaseAttached"))
         assertTrue("The observed foreground event must precede the report dispatch", dispatch.getLong("foregroundEventElapsedRealtimeMs") <= dispatch.getLong("elapsedRealtimeMs"))
 
         openPermissionSettings(automation, context, permission)
+        emitProgress(
+            runId,
+            "PERMISSION_SETTINGS_OPENED",
+            caseId,
+            JSONObject()
+                .put("settingsOpenedAtElapsedRealtimeMs", SystemClock.elapsedRealtime())
+                .put("requestSequence", heldSequence)
+                .put("dispatchElapsedRealtimeMs", dispatch.optLong("elapsedRealtimeMs", -1L))
+                .toString(),
+        )
         emitProgress(runId, "ACTION_REQUIRED", caseId, permission.manualInstruction)
         val revokedState = waitForManualRevocation(
             context = context,
@@ -676,6 +717,8 @@ class Ticket04PermissionRecoveryTest {
         buttonLabel: String,
         instructions: String,
         expectedSeoulDate: Int? = null,
+        keepVisibleAfterClick: Boolean = false,
+        pendingInstructions: String = Ticket04ControlActivity.REQUEST_PREPARING_INSTRUCTIONS,
     ): Long {
         val token = "$runId-$caseId-${SystemClock.elapsedRealtime()}"
         val preferences = context.getSharedPreferences(Ticket04ControlActivity.PREFERENCES_NAME, Context.MODE_PRIVATE)
@@ -691,6 +734,8 @@ class Ticket04PermissionRecoveryTest {
                 .putExtra(Ticket04ControlActivity.EXTRA_TOKEN, token)
                 .putExtra(Ticket04ControlActivity.EXTRA_INSTRUCTIONS, instructions)
                 .putExtra(Ticket04ControlActivity.EXTRA_BUTTON_LABEL, buttonLabel)
+                .putExtra(Ticket04ControlActivity.EXTRA_KEEP_VISIBLE_AFTER_CLICK, keepVisibleAfterClick)
+                .putExtra(Ticket04ControlActivity.EXTRA_PENDING_INSTRUCTIONS, pendingInstructions)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
         val deadline = SystemClock.elapsedRealtime() + USER_ACTION_TIMEOUT_MS
