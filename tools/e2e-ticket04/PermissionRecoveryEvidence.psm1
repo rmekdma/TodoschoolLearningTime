@@ -336,17 +336,34 @@ import sys
 root, revision, paths_json = sys.argv[1:4]
 parts = []
 for path in json.loads(paths_json):
-    content = subprocess.run(
+    result = subprocess.run(
         ["git", "-C", root, "show", revision + ":" + path],
-        check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-    ).stdout
+    )
+    if result.returncode != 0:
+        print(json.dumps({
+            "error": "git-show-failed",
+            "revision": revision,
+            "path": path,
+            "exitCode": result.returncode,
+        }))
+        sys.exit(1)
+    content = result.stdout
     parts.append(path + "=" + hashlib.sha256(content).hexdigest())
 print(hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest())
 '@
     $output = & $PythonPath -c $script $RepositoryRoot $Revision $pathsJson 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "Could not hash the Ticket 04 source snapshot at revision '$Revision'." }
+    if ($LASTEXITCODE -ne 0) {
+        $failureDetail = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'git-show-failed' } | Select-Object -Last 1)
+        if ($failureDetail.Count -gt 0) {
+            $failure = $failureDetail[0] | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($failure.error -ceq "git-show-failed" -and $failure.revision -ceq $Revision -and $failure.path -match '^[A-Za-z0-9_./-]+$') {
+                throw "Could not hash the Ticket 04 source snapshot at revision '$Revision': git show failed for '$($failure.path)' (exit $($failure.exitCode))."
+            }
+        }
+        throw "Could not hash the Ticket 04 source snapshot at revision '$Revision'."
+    }
     $hash = (@($output) | Select-Object -Last 1).Trim()
     if ($hash -notmatch '^[0-9a-f]{64}$') { throw "The Ticket 04 source snapshot hash at '$Revision' is invalid." }
     return $hash
