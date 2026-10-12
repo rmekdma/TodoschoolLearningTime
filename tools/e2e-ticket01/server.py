@@ -27,11 +27,13 @@ REPORT_PATHS = {details[1]: (subject, details) for subject, details in SUBJECTS.
 
 
 class FixtureState:
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, scenario: str) -> None:
         self.run_id = run_id
+        self.scenario = scenario
         self.lock = threading.Lock()
         self.sequence = 0
         self.requests: list[dict[str, Any]] = []
+        self.report_counts = {subject: details[3] for subject, details in SUBJECTS.items()}
 
     def record(self, path: str, body_text: str, body: Any, headers: dict[str, str]) -> dict[str, Any]:
         with self.lock:
@@ -45,17 +47,39 @@ class FixtureState:
                 "body": body,
                 "headers": headers,
                 "responseStatus": None,
+                "servedReportCount": None,
             }
             self.requests.append(event)
             return event
 
-    def complete(self, event: dict[str, Any], status: int) -> None:
+    def complete(self, event: dict[str, Any], status: int, served_report_count: int | None = None) -> None:
         with self.lock:
             event["responseStatus"] = status
+            event["servedReportCount"] = served_report_count
+
+    def report_count(self, subject: str) -> int:
+        with self.lock:
+            return self.report_counts[subject]
+
+    def set_report_counts(self, updates: dict[str, int]) -> tuple[dict[str, int], int]:
+        with self.lock:
+            self.report_counts.update(updates)
+            return dict(self.report_counts), self.sequence
+
+    def reset_requests(self) -> None:
+        with self.lock:
+            self.sequence = 0
+            self.requests.clear()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            return {"runId": self.run_id, "requests": list(self.requests)}
+            return {
+                "runId": self.run_id,
+                "scenario": self.scenario,
+                "sequence": self.sequence,
+                "reportCounts": dict(self.report_counts),
+                "requests": list(self.requests),
+            }
 
 
 class Ticket01HttpServer(ThreadingHTTPServer):
@@ -92,9 +116,15 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
 
         def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
             if self.path == "/__ticket01/health":
-                self._send_json(200, {"ok": True, "runId": state.run_id})
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
                 return
             if self.path == "/__ticket01/requests":
+                self._send_json(200, state.snapshot())
+                return
+            if self.path == "/__ticket02/health" and state.scenario == "ticket02":
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
+                return
+            if self.path == "/__ticket02/state" and state.scenario == "ticket02":
                 self._send_json(200, state.snapshot())
                 return
             self._send_json(404, {"error": "unknown path"})
@@ -108,6 +138,31 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
             except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
                 body_text = ""
                 body = None
+
+            if state.scenario == "ticket02" and self.path == "/__ticket02/reset-requests":
+                state.reset_requests()
+                self._send_json(200, {"ok": True, "runId": state.run_id})
+                return
+
+            if state.scenario == "ticket02" and self.path == "/__ticket02/set-report-counts":
+                reports = body.get("reports") if isinstance(body, dict) else None
+                if not isinstance(reports, dict) or not reports:
+                    self._send_json(400, {"error": "reports must be a non-empty object"})
+                    return
+                valid_updates: dict[str, int] = {}
+                for subject, count in reports.items():
+                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
+                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
+                        return
+                    valid_updates[subject] = count
+                report_counts, after_sequence = state.set_report_counts(valid_updates)
+                self._send_json(200, {
+                    "ok": True,
+                    "runId": state.run_id,
+                    "reportCounts": report_counts,
+                    "afterRequestSequence": after_sequence,
+                })
+                return
 
             headers = {
                 "content-type": self.headers.get("Content-Type", ""),
@@ -144,7 +199,7 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
 
             report = REPORT_PATHS.get(self.path)
             if report is not None:
-                subject, (_users_path, _report_path, user_id, count, seconds) = report
+                subject, (_users_path, _report_path, user_id, _default_count, seconds) = report
                 expected_array = "daily" if subject == "math" else "dailyCourse"
                 if (
                     not isinstance(body, dict)
@@ -155,7 +210,8 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     state.complete(event, 400)
                     self._send_json(400, {"error": "unexpected report request body"})
                     return
-                state.complete(event, 200)
+                count = state.report_count(subject)
+                state.complete(event, 200, served_report_count=count)
                 self._send_json(200, envelope(report_data(count, seconds, expected_array)))
                 return
 
@@ -170,15 +226,16 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")
     if not 1 <= args.port <= 65535:
         raise SystemExit("port must be in 1..65535")
 
-    server = Ticket01HttpServer((args.host, args.port), make_handler(FixtureState(args.run_id)))
+    server = Ticket01HttpServer((args.host, args.port), make_handler(FixtureState(args.run_id, args.scenario)))
     server.daemon_threads = True
-    print(json.dumps({"ready": True, "host": args.host, "port": args.port, "runId": args.run_id}), flush=True)
+    print(json.dumps({"ready": True, "host": args.host, "port": args.port, "runId": args.run_id, "scenario": args.scenario}), flush=True)
     try:
         server.serve_forever(poll_interval=0.2)
     finally:

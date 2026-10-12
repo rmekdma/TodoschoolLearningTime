@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="com.example.todoschooltime.debug.permission.READ_MONITOR_DIAGNOSTICS" />
+    <queries>
+        <package android:name="com.example.todoschooltime.debug" />
+        <package android:name="com.enuma.todohangeul" />
+        <package android:name="com.enuma.todoenglish" />
+        <package android:name="com.enuma.todomath" />
+    </queries>
+    <application
+        android:allowBackup="false"
+        android:label="Local E2E observer"
+        android:networkSecurityConfig="@xml/ticket02_network_security_config"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+</manifest>

@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">토도 학습시간 · 로컬 테스트</string>
+    <string name="monitor_accessibility_service_name">토도 학습 감시 · 로컬 테스트</string>
+    <string name="monitor_accessibility_service_description">로컬 테스트 계정으로 과목 앱 전면 감지를 확인합니다.</string>
+</resources>

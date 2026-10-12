@@ -37,6 +37,7 @@ internal interface LearningMonitorScreenUseCases {
 internal class LearningMonitorRuntimeAdapter(
     context: Context,
     private val engine: LearningMonitorEngine,
+    private val diagnostics: LearningMonitorDiagnostics? = null,
 ) : LearningMonitorScreenUseCases {
     private val appContext = context.applicationContext
     private val credentialStore = CredentialStore(appContext)
@@ -101,6 +102,7 @@ internal class LearningMonitorRuntimeAdapter(
     }
 
     fun foregroundPackageChanged(packageName: String?) {
+        diagnostics?.foregroundPackageObserved(packageName)
         engine.foregroundPackageChanged(packageName)
     }
 

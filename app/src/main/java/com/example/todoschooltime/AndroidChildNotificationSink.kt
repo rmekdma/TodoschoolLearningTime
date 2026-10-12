@@ -14,6 +14,15 @@ class AndroidChildNotificationSink(
 ) : ChildNotificationSink {
     private val appContext = context.applicationContext
     private val notificationManager = NotificationManagerCompat.from(appContext)
+    private var diagnostics: LearningMonitorDiagnostics? = null
+
+    internal constructor(
+        context: Context,
+        idAllocator: SharedPreferencesNotificationIdAllocator,
+        diagnostics: LearningMonitorDiagnostics,
+    ) : this(context, idAllocator) {
+        this.diagnostics = diagnostics
+    }
 
     init {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -32,6 +41,14 @@ class AndroidChildNotificationSink(
         completion: Boolean,
         completionSubjectName: String?,
     ) {
+        val notificationId = idAllocator.idFor(accountId, child.childName)
+        val diagnosticSequence = diagnostics?.notificationRequested(
+            accountId = accountId,
+            childName = child.childName,
+            completion = completion,
+            completionSubjectName = completionSubjectName,
+            notificationId = notificationId,
+        ) ?: 0L
         val body = MonitorNotificationText.body(child)
         val title = MonitorNotificationText.title(child, completionSubjectName)
         val notification: Notification = NotificationCompat.Builder(appContext, CHANNEL_ID)
@@ -47,8 +64,10 @@ class AndroidChildNotificationSink(
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         try {
-            notificationManager.notify(idAllocator.idFor(accountId, child.childName), notification)
+            notificationManager.notify(notificationId, notification)
+            diagnostics?.notificationManagerCallReturned(diagnosticSequence, returned = true)
         } catch (_: SecurityException) {
+            diagnostics?.notificationManagerCallReturned(diagnosticSequence, returned = false)
             // The app UI surfaces notification permission and settings separately.
         }
     }
