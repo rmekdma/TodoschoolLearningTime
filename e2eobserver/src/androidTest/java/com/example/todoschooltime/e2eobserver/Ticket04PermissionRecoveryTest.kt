@@ -583,7 +583,6 @@ class Ticket04PermissionRecoveryTest {
             .put("laterCompletionSubject", subjectName)
             .put("laterCompletionCount", completionEvents.size)
             .put("laterCompletionNotificationId", completionEvents.single().getInt("notificationId"))
-        emitProgress(runId, "CASE_RESULT", caseId, result.toString())
         return result
     }
 

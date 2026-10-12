@@ -246,6 +246,52 @@ function Test-Ticket04CaseResult {
     return $true
 }
 
+function Get-Ticket04CaseResultsFromStructuredResult {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Result,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{32}$')]
+        [string]$ExpectedRunId,
+        [Parameter(Mandatory = $true)]
+        [ValidateCount(1, 2)]
+        [string[]]$ExpectedCaseIds
+    )
+
+    $allowedCaseIds = @("notification-revocation", "accessibility-revocation")
+    if (@($ExpectedCaseIds | Where-Object { $_ -notin $allowedCaseIds }).Count -gt 0 -or
+        @($ExpectedCaseIds | Select-Object -Unique).Count -ne $ExpectedCaseIds.Count) {
+        throw "Ticket 04 structured result requested an unsupported or duplicate case set."
+    }
+    if ([string]$Result.runId -cne $ExpectedRunId) {
+        throw "Ticket 04 structured result run identity does not match '$ExpectedRunId'."
+    }
+
+    $caseResults = @($Result.cases)
+    if ($caseResults.Count -ne $ExpectedCaseIds.Count) {
+        throw "Ticket 04 structured result contains $($caseResults.Count) cases; expected $($ExpectedCaseIds.Count)."
+    }
+    $byCaseId = @{}
+    foreach ($case in $caseResults) {
+        $caseId = [string]$case.caseId
+        if ($caseId -notin $ExpectedCaseIds -or $byCaseId.ContainsKey($caseId)) {
+            throw "Ticket 04 structured result contains an unexpected or duplicate case '$caseId'."
+        }
+        if ([string]$case.runId -cne $ExpectedRunId -or -not (Test-Ticket04CaseResult -Case $case)) {
+            throw "Ticket 04 structured result case '$caseId' failed its run identity or case-level checks."
+        }
+        $byCaseId[$caseId] = $case
+    }
+
+    foreach ($caseId in $ExpectedCaseIds) {
+        if (-not $byCaseId.ContainsKey($caseId)) {
+            throw "Ticket 04 structured result omits required case '$caseId'."
+        }
+    }
+    return @($ExpectedCaseIds | ForEach-Object { $byCaseId[$_] })
+}
+
 function Test-Ticket04CaseEvidence {
     [CmdletBinding()]
     param(
@@ -580,4 +626,4 @@ function Join-Ticket04CaseEvidence {
     return @($byCase["notification-revocation"], $byCase["accessibility-revocation"])
 }
 
-Export-ModuleMember -Function Test-Ticket04CaseBoundaryEvidence, Test-Ticket04CaseResult, Test-Ticket04CaseEvidence, Join-Ticket04CaseEvidence, New-Ticket04SourceCompatibilityProof, Test-Ticket04SourceCompatibilityProof
+Export-ModuleMember -Function Test-Ticket04CaseBoundaryEvidence, Test-Ticket04CaseResult, Get-Ticket04CaseResultsFromStructuredResult, Test-Ticket04CaseEvidence, Join-Ticket04CaseEvidence, New-Ticket04SourceCompatibilityProof, Test-Ticket04SourceCompatibilityProof

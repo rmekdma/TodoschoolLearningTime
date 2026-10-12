@@ -261,12 +261,14 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                                 }
                                 "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
                                 "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
-                                "CASE_RESULT" { Save-Ticket04CaseEvidenceFromProgress $event }
                                 default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
                             }
                         } catch {
-                            if ($event.event -eq "CASE_RESULT") { throw }
-                            Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
+                            if ([string]$line -match '"event"\s*:\s*"CASE_RESULT"') {
+                                Write-Host "TICKET04 case progress payload was skipped; the full case is read from the validated chunked result."
+                            } else {
+                                Write-Host "TICKET04 progress event was skipped because its JSON record was incomplete."
+                            }
                         }
                     }
                 }
@@ -319,12 +321,14 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                         $boundary = $event.details | ConvertFrom-Json
                         Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
                     }
-                    "CASE_RESULT" { Save-Ticket04CaseEvidenceFromProgress $event }
                     default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
                 }
             } catch {
-                if ($event.event -eq "CASE_RESULT") { throw }
-                Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
+                if ([string]$line -match '"event"\s*:\s*"CASE_RESULT"') {
+                    Write-Host "TICKET04 case progress payload was skipped; the full case is read from the validated chunked result."
+                } else {
+                    Write-Host "TICKET04 progress event was skipped because its JSON record was incomplete."
+                }
             }
         }
         $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
@@ -772,19 +776,11 @@ function Get-Ticket04SourceSnapshot {
     }
 }
 
-function Save-Ticket04CaseEvidenceFromProgress($Event) {
-    if ($Event.event -cne "CASE_RESULT") { return }
-    $caseResult = [string]$Event.details | ConvertFrom-Json -ErrorAction Stop
-    if ($caseResult.runId -cne $runId -or $caseResult.caseId -cne $Event.caseId -or
-        -not (Test-Ticket04CaseResult -Case $caseResult)) {
-        throw "Ticket 04 case result failed its identity or case-level checks: caseId='$($Event.caseId)' runId='$($Event.runId)'"
+function Save-Ticket04CaseEvidenceFromResult($CaseResult, $FixtureEvidence) {
+    if ($CaseResult.runId -cne $runId -or -not (Test-Ticket04CaseResult -Case $CaseResult)) {
+        throw "Ticket 04 chunked result case failed its run identity or case-level checks: caseId='$($CaseResult.caseId)'"
     }
 
-    $snapshot = Read-ServerRequests
-    if ($null -eq $snapshot -or $snapshot.runId -cne $runId -or $snapshot.scenario -cne "ticket04") {
-        throw "Ticket 04 case result has no matching loopback fixture snapshot: caseId='$($Event.caseId)'"
-    }
-    $fixtureEvidence = Get-Ticket04ServerEvidence $snapshot
     $caseHolds = @($fixtureEvidence.releasedReportHolds | Where-Object { $_.caseId -ceq $caseResult.caseId })
     if ($caseHolds.Count -ne 1 -or
         [int]$caseHolds[0].responseStatus -ne [int]$caseResult.heldResponseStatus -or
@@ -792,19 +788,19 @@ function Save-Ticket04CaseEvidenceFromProgress($Event) {
         [int64]$caseHolds[0].sequence -ne [int64]$caseResult.serverRequestSequence -or
         [int]$fixtureEvidence.inFlightRequestCount -ne 0 -or
         [int]$fixtureEvidence.serverHeldResponseCount -ne 0) {
-        throw "Ticket 04 case result does not match a completed fixture release: caseId='$($Event.caseId)'"
+        throw "Ticket 04 chunked result case does not match a completed fixture release: caseId='$($CaseResult.caseId)'"
     }
 
-    $casePath = Join-Path $artifactDirectory "ticket04-case-evidence-$($caseResult.caseId).json"
+    $casePath = Join-Path $artifactDirectory "ticket04-case-evidence-$($CaseResult.caseId).json"
     if (Test-Path -LiteralPath $casePath) {
         throw "Ticket 04 case evidence is immutable and already exists for this run: $casePath"
     }
     $sourceSnapshot = Get-Ticket04SourceSnapshot
     $evidence = [ordered]@{
-        schemaVersion = if ($caseResult.caseId -eq "accessibility-revocation") { 2 } else { 1 }
+        schemaVersion = if ($CaseResult.caseId -eq "accessibility-revocation") { 2 } else { 1 }
         contractVersion = 1
-        caseId = [string]$caseResult.caseId
-        runId = [string]$caseResult.runId
+        caseId = [string]$CaseResult.caseId
+        runId = [string]$CaseResult.runId
         sourceRevision = $sourceSnapshot.revision
         sourceContentSha256 = $sourceSnapshot.contentSha256
         workingTreeDirty = $sourceSnapshot.workingTreeDirty
@@ -818,20 +814,20 @@ function Save-Ticket04CaseEvidenceFromProgress($Event) {
         observerApkSha256 = [string]$prepared.observerApkSha256
         observerTestApkSha256 = [string]$prepared.observerTestApkSha256
         fixture = $fixtureEvidence
-        caseResult = $caseResult
+        caseResult = $CaseResult
         validation = [ordered]@{
             status = "passed"
             checks = @("case-specific boundary and recovery result", "matching explicitly released fixture response", "no in-flight or held response at case completion")
         }
     }
     if (-not (Test-Ticket04CaseEvidence -Evidence ([pscustomobject]$evidence) -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)) {
-        throw "Ticket 04 case evidence failed its immutable artifact schema check: caseId='$($Event.caseId)'"
+        throw "Ticket 04 case evidence failed its immutable artifact schema check: caseId='$($CaseResult.caseId)'"
     }
 
     $temporaryPath = "$casePath.tmp"
     $evidence | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $temporaryPath -Encoding utf8
     Move-Item -LiteralPath $temporaryPath -Destination $casePath
-    Write-Host "Ticket 04 완료 case JSON 저장: $casePath"
+    Write-Host "Ticket 04 완료 case JSON saved from the validated chunked result: $casePath"
 }
 
 function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationText, [string]$CaseMode, $PriorNotificationEvidence) {
@@ -860,9 +856,10 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
         "both" { @("notification-revocation", "accessibility-revocation"); break }
         default { throw "Unsupported Ticket 04 case mode: $CaseMode" }
     }
-    if (@($result.cases).Count -ne $expectedCaseIds.Count) {
-        throw "Ticket 04 returned $(@($result.cases).Count) cases for '$CaseMode'; expected $($expectedCaseIds.Count)."
-    }
+    $caseResults = @(Get-Ticket04CaseResultsFromStructuredResult `
+        -Result $result `
+        -ExpectedRunId $runId `
+        -ExpectedCaseIds $expectedCaseIds)
     $expectsNotification = "notification-revocation" -in $expectedCaseIds
     $expectsAccessibility = "accessibility-revocation" -in $expectedCaseIds
     if ([bool]$result.notificationProcessRestartObserved -ne $expectsNotification -or
@@ -870,14 +867,8 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
         throw "Ticket 04 top-level case gates do not match the selected case results."
     }
     $caseById = @{}
-    foreach ($case in @($result.cases)) {
+    foreach ($case in $caseResults) {
         $caseId = [string]$case.caseId
-        if ($caseId -notin $expectedCaseIds -or $caseById.ContainsKey($caseId)) {
-            throw "Ticket 04 returned an unexpected or duplicate case: $caseId"
-        }
-        if (-not (Test-Ticket04CaseResult -Case $case)) {
-            throw "Ticket 04 failed its permission-specific boundary, process, stale-response, silent-recovery or later-completion assertions: $($case | ConvertTo-Json -Depth 8 -Compress)"
-        }
         $caseById[$caseId] = $case
         $heldRequest = @($Snapshot.releasedReportHolds | Where-Object { $_.caseId -eq $caseId })
         if ($heldRequest.Count -ne 1 -or
@@ -888,14 +879,18 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
         }
     }
 
+    $fixtureEvidence = Get-Ticket04ServerEvidence $Snapshot
     $caseArtifacts = @()
     foreach ($caseId in $expectedCaseIds) {
         if (-not $caseById.ContainsKey($caseId)) { throw "Ticket 04 omitted required case: $caseId" }
         $caseArtifactPath = Join-Path $artifactDirectory "ticket04-case-evidence-$caseId.json"
-        if (-not (Test-Path -LiteralPath $caseArtifactPath)) { throw "Ticket 04 omitted its immutable case evidence artifact: $caseArtifactPath" }
+        if (-not (Test-Path -LiteralPath $caseArtifactPath)) {
+            Save-Ticket04CaseEvidenceFromResult $caseById[$caseId] $fixtureEvidence
+        }
         $caseArtifact = Get-Content -LiteralPath $caseArtifactPath -Raw | ConvertFrom-Json -ErrorAction Stop
         if (-not (Test-Ticket04CaseEvidence -Evidence $caseArtifact -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256) -or
-            $caseArtifact.runId -cne $runId -or $caseArtifact.caseId -cne $caseId) {
+            $caseArtifact.runId -cne $runId -or $caseArtifact.caseId -cne $caseId -or
+            ($caseArtifact.caseResult | ConvertTo-Json -Compress -Depth 15) -cne ($caseById[$caseId] | ConvertTo-Json -Compress -Depth 15)) {
             throw "Ticket 04 case evidence artifact failed strict validation: $caseArtifactPath"
         }
         $caseArtifacts += $caseArtifact

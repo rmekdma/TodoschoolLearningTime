@@ -330,6 +330,63 @@ $accessibilityCaseResultValid = Test-Ticket04CaseResult -Case $accessibilityCase
 if (-not $notificationCaseResultValid -or -not $accessibilityCaseResultValid) {
     throw "Ticket 04 case-result validation failed (notification=$notificationCaseResultValid, accessibility=$accessibilityCaseResultValid)."
 }
+$sameRunNotificationResult = $notificationCaseResult.PSObject.Copy()
+$sameRunNotificationResult.runId = $runId
+$sameRunAccessibilityResult = $accessibilityCaseResult.PSObject.Copy()
+$sameRunAccessibilityResult.runId = $runId
+$structuredCaseResult = [pscustomobject]@{
+    runId = $runId
+    caseMode = "both"
+    cases = @($sameRunNotificationResult, $sameRunAccessibilityResult)
+}
+$parsedCaseResults = @(Get-Ticket04CaseResultsFromStructuredResult `
+    -Result $structuredCaseResult `
+    -ExpectedRunId $runId `
+    -ExpectedCaseIds @("notification-revocation", "accessibility-revocation"))
+if ($parsedCaseResults.Count -ne 2 -or
+    $parsedCaseResults[0].caseId -cne "notification-revocation" -or
+    $parsedCaseResults[1].caseId -cne "accessibility-revocation" -or
+    ($parsedCaseResults[1] | ConvertTo-Json -Compress -Depth 15) -cne ($sameRunAccessibilityResult | ConvertTo-Json -Compress -Depth 15)) {
+    throw "Ticket 04 did not preserve the complete case objects from the chunked structured result."
+}
+
+$missingStructuredCaseRejected = $false
+try {
+    Get-Ticket04CaseResultsFromStructuredResult `
+        -Result ([pscustomobject]@{ runId = $runId; cases = @($sameRunNotificationResult) }) `
+        -ExpectedRunId $runId `
+        -ExpectedCaseIds @("notification-revocation", "accessibility-revocation") | Out-Null
+} catch { $missingStructuredCaseRejected = $true }
+if (-not $missingStructuredCaseRejected) {
+    throw "Ticket 04 accepted a structured result with a missing case."
+}
+
+$duplicateStructuredCase = $sameRunAccessibilityResult.PSObject.Copy()
+$duplicateStructuredCase.caseId = "notification-revocation"
+$duplicateStructuredCasesRejected = $false
+try {
+    Get-Ticket04CaseResultsFromStructuredResult `
+        -Result ([pscustomobject]@{ runId = $runId; cases = @($sameRunNotificationResult, $duplicateStructuredCase) }) `
+        -ExpectedRunId $runId `
+        -ExpectedCaseIds @("notification-revocation", "accessibility-revocation") | Out-Null
+} catch { $duplicateStructuredCasesRejected = $true }
+if (-not $duplicateStructuredCasesRejected) {
+    throw "Ticket 04 accepted a duplicate case in its structured result."
+}
+
+$wrongStructuredCaseRun = $sameRunAccessibilityResult.PSObject.Copy()
+$wrongStructuredCaseRun.runId = "fedcba9876543210fedcba9876543210"
+$wrongStructuredRunRejected = $false
+try {
+    Get-Ticket04CaseResultsFromStructuredResult `
+        -Result ([pscustomobject]@{ runId = $runId; cases = @($sameRunNotificationResult, $wrongStructuredCaseRun) }) `
+        -ExpectedRunId $runId `
+        -ExpectedCaseIds @("notification-revocation", "accessibility-revocation") | Out-Null
+} catch { $wrongStructuredRunRejected = $true }
+if (-not $wrongStructuredRunRejected) {
+    throw "Ticket 04 accepted a case object from a different run."
+}
+
 $notificationCaseArtifact = New-Ticket04CaseArtifact $notificationCaseResult "notification-revocation" $notificationCaseResult.runId 5 200 "write-failed"
 $accessibilityCaseArtifact = New-Ticket04CaseArtifact $accessibilityCaseResult "accessibility-revocation" $accessibilityCaseResult.runId 9 401 "write-failed"
 if (-not (Test-Ticket04CaseEvidence -Evidence $notificationCaseArtifact -ExpectedDeviceSerial $notificationCaseArtifact.device.serial -ExpectedProductApkSha256 $notificationCaseArtifact.productApkSha256) -or
