@@ -475,6 +475,7 @@ function Assert-Ticket03ResultArrayShapes {
     $pollPrimitiveArrays = @{
         foregroundPackagesObservedDuringTransition = "string"
         requestsDuringTransitionSequences = "integer"
+        requestsDuringTransition = "string"
         foregroundPackagesObservedAtReport = "string"
         foregroundPackagesObservedAtApply = "string"
         requestCycleSequences = "integer"
@@ -492,6 +493,7 @@ function Assert-Ticket03ResultArrayShapes {
     )
     $windowPrimitiveArrays = @{
         foregroundPackagesObservedDuringTransition = "string"
+        requestsDuringTransition = "string"
         requestsDuringTransitionSequences = "integer"
         foregroundPackagesObservedDuringWindow = "string"
     }

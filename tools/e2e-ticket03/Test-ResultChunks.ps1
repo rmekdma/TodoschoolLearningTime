@@ -132,6 +132,20 @@ try { Assert-Ticket03ResultArrayShapes $numberPackageFixture }
 catch { $numberPackageRejected = $_.Exception.Message -match "foregroundPackagesObservedDuringTransition.*\[0\].*string" }
 if (-not $numberPackageRejected) { throw "A numeric foreground package array element was accepted." }
 
+$numberTransitionRequestPathRejected = $false
+$numberTransitionRequestPathFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$numberTransitionRequestPathFixture.pollRequests[0].requestsDuringTransition = @("/v3/account/signin", 17)
+try { Assert-Ticket03ResultArrayShapes $numberTransitionRequestPathFixture }
+catch { $numberTransitionRequestPathRejected = $_.Exception.Message -match "pollRequests\[0\].*requestsDuringTransition.*\[1\].*string" }
+if (-not $numberTransitionRequestPathRejected) { throw "A numeric transition request path in a poll record was accepted." }
+
+$numberWindowTransitionRequestPathRejected = $false
+$numberWindowTransitionRequestPathFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$numberWindowTransitionRequestPathFixture.observationWindows[1].requestsDuringTransition = @(17)
+try { Assert-Ticket03ResultArrayShapes $numberWindowTransitionRequestPathFixture }
+catch { $numberWindowTransitionRequestPathRejected = $_.Exception.Message -match "observationWindows\[1\].*no-poll window.*requestsDuringTransition.*\[0\].*string" }
+if (-not $numberWindowTransitionRequestPathRejected) { throw "A numeric transition request path in a no-poll window was accepted." }
+
 $nullCyclePathRejected = $false
 $nullCyclePathFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
 $nullCyclePathFixture.pollRequests[0].requestCyclePaths = @("/v3/account/signin", $null)
