@@ -1,5 +1,7 @@
 # ADB E2E test API
 
+This document describes the existing fake-repository `e2e` variant (`com.example.todoschooltime.e2e`). The real `LearningReportRepository` HTTP workflow against a PC fixture server is documented in [`tools/e2e-ticket01/README.md`](tools/e2e-ticket01/README.md). The two APKs keep separate package IDs and execution paths; the broadcast commands below remain available in the existing harness.
+
 The `e2e` build type installs as `com.example.todoschooltime.e2e`. It uses the production `LearningMonitorEngine`, runtime adapter, stores, Activity, accessibility service, and Android notification sink. Its Application supplies a fake report repository, a simulated Seoul date input, and a notification audit decorator. The E2E manifest removes `INTERNET`; it cannot call the TodoSchool server. The ordinary `debug` and `release` variants do not package the ADB receiver or E2E command classes and keep the production repository.
 
 Build the installable variant with `:app:assembleE2e`. The explicit receiver action and component are:

@@ -312,7 +312,9 @@ class LearningReportRepository internal constructor(
     }
 }
 
-private class UrlConnectionLearningHttpTransport : LearningHttpTransport {
+private class UrlConnectionLearningHttpTransport(
+    private val apiBaseUrl: String = BuildConfig.API_BASE_URL,
+) : LearningHttpTransport {
     override fun post(path: String, body: JSONObject, token: String?): LearningHttpResponse {
         return post(path, body, token, LearningRequestCancellation())
     }
@@ -324,7 +326,7 @@ private class UrlConnectionLearningHttpTransport : LearningHttpTransport {
         cancellation: LearningRequestCancellation,
     ): LearningHttpResponse {
         cancellation.throwIfCancelled()
-        val connection = (URL(API_BASE + path).openConnection() as HttpURLConnection).apply {
+        val connection = (URL(apiBaseUrl + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
             readTimeout = 15_000
@@ -347,9 +349,5 @@ private class UrlConnectionLearningHttpTransport : LearningHttpTransport {
             cancellation.detach(connection)
             connection.disconnect()
         }
-    }
-
-    companion object {
-        private const val API_BASE = "https://api.todomath.com"
     }
 }
