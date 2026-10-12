@@ -588,7 +588,7 @@ class Ticket04PermissionRecoveryTest {
                 .putExtra(Ticket04ControlActivity.EXTRA_BUTTON_LABEL, buttonLabel)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
-        val deadline = SystemClock.elapsedRealtime() + USER_START_TIMEOUT_MS
+        val deadline = SystemClock.elapsedRealtime() + USER_ACTION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             if (Ticket04ActionToken.matches(
                     expectedToken = token,
@@ -691,7 +691,7 @@ class Ticket04PermissionRecoveryTest {
     }
 
     private fun waitForManualRestoration(context: Context, automation: UiAutomation, permission: PermissionKind) {
-        waitForCondition(RESTORE_TIMEOUT_MS, "the user's manual ${permission.name.lowercase()} restoration") {
+        waitForCondition(USER_ACTION_TIMEOUT_MS, "the user's manual ${permission.name.lowercase()} restoration") {
             permission.isEnabled(context, automation)
         }
     }
@@ -1133,7 +1133,7 @@ class Ticket04PermissionRecoveryTest {
         const val PRODUCT_STATE_SAMPLE_INTERVAL_MS = 1_000L
         val INITIAL_COUNTS = mapOf("hangeul" to 2, "math" to 5, "english" to 7)
         val ACCESSIBILITY_INITIAL_COUNTS = mapOf("hangeul" to 6, "math" to 5, "english" to 7)
-        const val USER_START_TIMEOUT_MS = 30 * 60 * 1000L
+        const val USER_ACTION_TIMEOUT_MS = 30 * 60 * 1000L
         const val MAX_NOTIFICATION_PERMISSION_WAIT_MS = 5 * 60 * 1000L
         const val READ_TIMEOUT_MS = 15_000L
         const val DISCONNECT_BOUNDARY_TOLERANCE_MS = 500L
