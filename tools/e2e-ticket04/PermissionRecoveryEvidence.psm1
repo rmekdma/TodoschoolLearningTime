@@ -231,6 +231,57 @@ function Test-Ticket04CaseResult {
         "client-still-connected-near-or-after-read-timeout; outcome-ambiguous"
     )) { return $false }
 
+    if (-not $isNotificationCase) {
+        $interruption = $Case.interruptionCompletion
+        $interruptionProperties = @(
+            "subjectName", "initialBaselineIncompleteSubjects", "permissionEnabledWhenChanged", "serviceLeaseAttachedWhenChanged",
+            "statusAtPause", "activityCountAtPause", "targetCount",
+            "secondIncompleteSubjectAtPause", "secondIncompleteStatusAtPause",
+            "secondIncompleteActivityCountAtPause", "secondIncompleteTargetCountAtPause",
+            "fixtureActivityCountWhilePaused", "statusAtRecovery", "activityCountAtRecovery",
+            "recoveryCheckText", "recoveryCompletionAlerts"
+        )
+        if ($null -eq $interruption -or
+            @($interruption.PSObject.Properties.Name | Where-Object { $_ -in $interruptionProperties }).Count -ne $interruptionProperties.Count -or
+            $interruption.permissionEnabledWhenChanged -isnot [bool] -or $interruption.permissionEnabledWhenChanged -or
+            $interruption.serviceLeaseAttachedWhenChanged -isnot [bool] -or $interruption.serviceLeaseAttachedWhenChanged -or
+            [string]$interruption.statusAtPause -cne "BELOW_TARGET" -or
+            [string]$interruption.secondIncompleteStatusAtPause -cne "BELOW_TARGET" -or
+            [string]$interruption.statusAtRecovery -cne "COMPLETE" -or
+            [string]::IsNullOrWhiteSpace([string]$interruption.subjectName) -or
+            @($interruption.initialBaselineIncompleteSubjects).Count -ne 2 -or
+            @($interruption.initialBaselineIncompleteSubjects | Select-Object -Unique).Count -ne 2 -or
+            @($interruption.initialBaselineIncompleteSubjects | Where-Object { [string]$_ -ceq [string]$interruption.subjectName }).Count -ne 1 -or
+            @($interruption.initialBaselineIncompleteSubjects | Where-Object { [string]$_ -ceq [string]$Case.laterCompletionSubject }).Count -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$interruption.secondIncompleteSubjectAtPause) -or
+            [string]$interruption.subjectName -ceq [string]$interruption.secondIncompleteSubjectAtPause -or
+            [string]$interruption.secondIncompleteSubjectAtPause -cne [string]$Case.laterCompletionSubject -or
+            [string]$interruption.subjectName -ceq [string]$Case.laterCompletionSubject -or
+            [int]$interruption.recoveryCompletionAlerts -ne 0) { return $false }
+
+        foreach ($property in @(
+            "activityCountAtPause", "targetCount", "secondIncompleteActivityCountAtPause",
+            "secondIncompleteTargetCountAtPause", "fixtureActivityCountWhilePaused", "activityCountAtRecovery",
+            "recoveryCompletionAlerts"
+        )) {
+            $value = $interruption.PSObject.Properties[$property].Value
+            if ($value -isnot [ValueType] -or $value -is [bool]) { return $false }
+            try {
+                $integer = [int64]$value
+                if ([double]$value -ne [double]$integer -or $integer -lt 0) { return $false }
+            } catch { return $false }
+        }
+        if ([int64]$interruption.targetCount -le 0 -or
+            [int64]$interruption.activityCountAtPause -ge [int64]$interruption.targetCount -or
+            [int64]$interruption.fixtureActivityCountWhilePaused -lt [int64]$interruption.targetCount -or
+            [int64]$interruption.activityCountAtRecovery -ne [int64]$interruption.fixtureActivityCountWhilePaused -or
+            [int64]$interruption.secondIncompleteTargetCountAtPause -le 0 -or
+            [int64]$interruption.secondIncompleteActivityCountAtPause -ge [int64]$interruption.secondIncompleteTargetCountAtPause -or
+            [string]$interruption.recoveryCheckText -cnotmatch ([regex]::Escape("✔ $($interruption.subjectName) 완료 $($interruption.activityCountAtRecovery)/$($interruption.targetCount)"))) {
+            return $false
+        }
+    }
+
     foreach ($property in @("userAcknowledgementElapsedRealtimeMs", "permissionBoundaryElapsedRealtimeMs", "responseReleaseElapsedRealtimeMs")) {
         $value = $Case.PSObject.Properties[$property].Value
         if ($value -isnot [ValueType] -or $value -is [bool]) { return $false }
@@ -307,7 +358,7 @@ function Test-Ticket04CaseEvidence {
         "observerApkSha256", "observerTestApkSha256", "fixture", "caseResult", "validation"
     )
     if (@($Evidence.PSObject.Properties.Name | Where-Object { $_ -in $requiredProperties }).Count -ne $requiredProperties.Count) { return $false }
-    $expectedSchemaVersion = if ($Evidence.caseId -ceq "accessibility-revocation") { 2 } else { 1 }
+    $expectedSchemaVersion = if ($Evidence.caseId -ceq "accessibility-revocation") { 3 } else { 1 }
     if ($Evidence.schemaVersion -ne $expectedSchemaVersion -or $Evidence.contractVersion -ne 1 -or
         [string]$Evidence.caseId -notin @("notification-revocation", "accessibility-revocation") -or
         [string]$Evidence.runId -notmatch '^[0-9a-f]{32}$' -or
@@ -503,7 +554,7 @@ function New-Ticket04SourceCompatibilityProof {
     }
     $currentHash = Get-Ticket04SourceContentHashAtRevision -RepositoryRoot $RepositoryRoot -Revision $head -PythonPath $PythonPath -Version current
     if ($currentHash -cne [string]$CurrentSourceSnapshot.contentSha256) {
-        throw "The current Ticket 04 source hash does not match its committed revision and version-2 source snapshot contract."
+        throw "The current Ticket 04 source hash does not match its committed revision and version-3 source snapshot contract."
     }
     return [ordered]@{
         status = "verified"
@@ -512,7 +563,7 @@ function New-Ticket04SourceCompatibilityProof {
         notificationSchemaVersion = [int]$NotificationEvidence.schemaVersion
         accessibilitySourceRevision = $head
         accessibilitySourceContentSha256 = $currentHash
-        accessibilitySchemaVersion = 2
+        accessibilitySchemaVersion = 3
         contractVersion = 1
         applicationId = "com.example.todoschooltime.debug"
         productApkSha256 = $ExpectedProductApkSha256

@@ -799,7 +799,7 @@ function Save-Ticket04CaseEvidenceFromResult($CaseResult, $FixtureEvidence) {
     }
     $sourceSnapshot = Get-Ticket04SourceSnapshot
     $evidence = [ordered]@{
-        schemaVersion = if ($CaseResult.caseId -eq "accessibility-revocation") { 2 } else { 1 }
+        schemaVersion = if ($CaseResult.caseId -eq "accessibility-revocation") { 3 } else { 1 }
         contractVersion = 1
         caseId = [string]$CaseResult.caseId
         runId = [string]$CaseResult.runId

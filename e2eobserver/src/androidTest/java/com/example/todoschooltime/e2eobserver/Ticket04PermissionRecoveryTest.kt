@@ -78,11 +78,14 @@ class Ticket04PermissionRecoveryTest {
         )
         val initialState = readProductState(observerContext)
         val hangeulId = onlyChildNotification(initialState).getInt("id")
-        val initialHangeulCount = if (caseMode == CASE_MODE_ACCESSIBILITY) 6 else 2
-        val initialHangeulStatus = if (caseMode == CASE_MODE_ACCESSIBILITY) "COMPLETE" else "BELOW_TARGET"
+        val initialCounts = if (caseMode == CASE_MODE_ACCESSIBILITY) ACCESSIBILITY_INITIAL_COUNTS else INITIAL_COUNTS
+        val initialHangeulCount = initialCounts.getValue("hangeul")
+        val initialHangeulStatus = if (initialHangeulCount >= TARGET_COUNTS.getValue(HANGEUL_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
+        val initialMathCount = initialCounts.getValue("math")
+        val initialMathStatus = if (initialMathCount >= TARGET_COUNTS.getValue(MATH_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
         assertExpectedSubject(initialState, HANGEUL_SUBJECT, initialHangeulStatus, initialHangeulCount, 6)
-        assertExpectedSubject(initialState, MATH_SUBJECT, "COMPLETE", 5, 5)
-        assertExpectedSubject(initialState, ENGLISH_SUBJECT, "BELOW_TARGET", 7, 8)
+        assertExpectedSubject(initialState, MATH_SUBJECT, initialMathStatus, initialMathCount, 5)
+        assertExpectedSubject(initialState, ENGLISH_SUBJECT, "BELOW_TARGET", initialCounts.getValue("english"), 8)
 
         var notificationCase: JSONObject? = null
         if (caseMode != CASE_MODE_ACCESSIBILITY) {
@@ -101,7 +104,9 @@ class Ticket04PermissionRecoveryTest {
                 expectedBeforeCount = 2,
                 heldResponseStatus = 200,
                 heldResponseCount = 6,
+                dispatchCounts = INITIAL_COUNTS,
                 recoveryCounts = INITIAL_COUNTS,
+                interruptionCompletionSubjectName = null,
                 followUpCount = 6,
                 followUpTarget = 6,
                 notificationId = hangeulId,
@@ -125,7 +130,9 @@ class Ticket04PermissionRecoveryTest {
                 expectedBeforeCount = 7,
                 heldResponseStatus = 401,
                 heldResponseCount = null,
-                recoveryCounts = ACCESSIBILITY_INITIAL_COUNTS,
+                dispatchCounts = ACCESSIBILITY_INITIAL_COUNTS,
+                recoveryCounts = ACCESSIBILITY_RECOVERY_COUNTS,
+                interruptionCompletionSubjectName = HANGEUL_SUBJECT,
                 followUpCount = 8,
                 followUpTarget = 8,
                 notificationId = hangeulId,
@@ -193,12 +200,18 @@ class Ticket04PermissionRecoveryTest {
         clickDescription(automation, "$CHILD_NAME 감시 등록")
         val expectedHangeulCount = reportCounts.getValue("hangeul")
         val expectedHangeulStatus = if (expectedHangeulCount >= TARGET_COUNTS.getValue(HANGEUL_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
+        val expectedMathCount = reportCounts.getValue("math")
+        val expectedMathStatus = if (expectedMathCount >= TARGET_COUNTS.getValue(MATH_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
         val baseline = waitForProductState(context, RECOVERY_TIMEOUT_MS) { snapshot ->
             snapshot.getJSONArray("registeredChildren").strings().contains(CHILD_NAME) &&
                 snapshot.getBoolean("serviceLeaseAttached") &&
                 subject(snapshot, HANGEUL_SUBJECT).let { it.optString("status") == expectedHangeulStatus && it.optInt("activityCount", -1) == expectedHangeulCount && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(HANGEUL_SUBJECT) } &&
-                subject(snapshot, MATH_SUBJECT).let { it.optString("status") == "COMPLETE" && it.optInt("activityCount", -1) == 5 && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(MATH_SUBJECT) } &&
-                subject(snapshot, ENGLISH_SUBJECT).let { it.optString("status") == "BELOW_TARGET" && it.optInt("activityCount", -1) == 7 && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(ENGLISH_SUBJECT) }
+                subject(snapshot, MATH_SUBJECT).let { it.optString("status") == expectedMathStatus && it.optInt("activityCount", -1) == expectedMathCount && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(MATH_SUBJECT) } &&
+                subject(snapshot, ENGLISH_SUBJECT).let {
+                    val count = reportCounts.getValue("english")
+                    val status = if (count >= TARGET_COUNTS.getValue(ENGLISH_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
+                    it.optString("status") == status && it.optInt("activityCount", -1) == count && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(ENGLISH_SUBJECT)
+                }
         }
         assertReadyProduct(baseline)
         val requests = awaitFixtureState(apiBaseUrl, runId, RECOVERY_TIMEOUT_MS) { fixture ->
@@ -230,7 +243,9 @@ class Ticket04PermissionRecoveryTest {
         expectedBeforeCount: Int,
         heldResponseStatus: Int,
         heldResponseCount: Int?,
+        dispatchCounts: Map<String, Int>,
         recoveryCounts: Map<String, Int>,
+        interruptionCompletionSubjectName: String?,
         followUpCount: Int,
         followUpTarget: Int,
         notificationId: Int,
@@ -242,6 +257,10 @@ class Ticket04PermissionRecoveryTest {
         assertEquals(expectedBeforeCount, subject(before, subjectName).optInt("activityCount", -1))
         assertEquals(notificationId, onlyChildNotification(before).getInt("id"))
         requireSilentChannel(before)
+        val initialBaselineIncompleteSubjects = SUBJECT_NAMES.values.filter { subject(before, it).optString("status") == "BELOW_TARGET" }
+        if (interruptionCompletionSubjectName != null) {
+            assertEquals("The Accessibility scenario must start with exactly two incomplete subjects", setOf(interruptionCompletionSubjectName, subjectName), initialBaselineIncompleteSubjects.toSet())
+        }
         val baselineVectors = subjectVectors(before)
         val dispatchCursorBefore = before.getLong("httpRequestDispatchCursor")
         val notificationCursorBefore = lastSequence(before.getJSONArray("notificationEvents"))
@@ -252,7 +271,7 @@ class Ticket04PermissionRecoveryTest {
             apiBaseUrl,
             "POST",
             "/__ticket04/set-report-counts",
-            JSONObject().put("reports", JSONObject().put("hangeul", recoveryCounts.getValue("hangeul")).put("math", recoveryCounts.getValue("math")).put("english", recoveryCounts.getValue("english"))),
+            JSONObject().put("reports", JSONObject().put("hangeul", dispatchCounts.getValue("hangeul")).put("math", dispatchCounts.getValue("math")).put("english", dispatchCounts.getValue("english"))),
         ).also { assertEquals(runId, it.getString("runId")) }
         fixtureRequest(apiBaseUrl, "POST", "/__ticket04/reset-requests", JSONObject())
         val armed = fixtureRequest(
@@ -445,18 +464,39 @@ class Ticket04PermissionRecoveryTest {
             .filter { it.optBoolean("completionRequested") }
         assertTrue("The stale held response requested a completion alert: $staleCompletionEvents", staleCompletionEvents.isEmpty())
 
-        fixtureRequest(
+        val resetFixture = fixtureRequest(
             apiBaseUrl,
             "POST",
             "/__ticket04/reset-requests",
             JSONObject(),
         )
-        fixtureRequest(
+        assertEquals(runId, resetFixture.getString("runId"))
+        val permissionEnabledWhenInterruptionCountChanged = permission.isEnabled(context, automation)
+        if (interruptionCompletionSubjectName != null) {
+            assertEquals(PermissionKind.ACCESSIBILITY, permission)
+            assertFalse("The Accessibility permission must stay OFF while the completion occurs", permissionEnabledWhenInterruptionCountChanged)
+            assertFalse("The service lease must remain detached while the completion occurs", pauseSnapshot.getBoolean("serviceLeaseAttached"))
+            val interruptedSubject = subject(pauseSnapshot, interruptionCompletionSubjectName)
+            val otherIncompleteSubject = subject(pauseSnapshot, subjectName)
+            assertEquals("The outage-completed subject must be below target before permission restoration", "BELOW_TARGET", interruptedSubject.getString("status"))
+            assertTrue("The outage-completed subject must be below target before the interruption", interruptedSubject.getInt("activityCount") < interruptedSubject.getInt("targetCount"))
+            assertEquals("The later completion subject must also be incomplete during the pause", "BELOW_TARGET", otherIncompleteSubject.getString("status"))
+            assertTrue("The later completion subject must be incomplete during the pause", otherIncompleteSubject.getInt("activityCount") < otherIncompleteSubject.getInt("targetCount"))
+            assertTrue("The later completion must use a different subject", interruptionCompletionSubjectName != subjectName)
+        }
+        val pausedCountUpdate = fixtureRequest(
             apiBaseUrl,
             "POST",
             "/__ticket04/set-report-counts",
             JSONObject().put("reports", JSONObject().put("hangeul", recoveryCounts.getValue("hangeul")).put("math", recoveryCounts.getValue("math")).put("english", recoveryCounts.getValue("english"))),
         )
+        assertEquals(runId, pausedCountUpdate.getString("runId"))
+        val fixtureWhilePaused = fixtureRequest(apiBaseUrl, "GET", "/__ticket04/state")
+        assertEquals(runId, fixtureWhilePaused.getString("runId"))
+        assertEquals("The outage fixture may not have an unobserved request while permission is off", 0, fixtureWhilePaused.getJSONArray("inFlightRequests").length())
+        recoveryCounts.forEach { (key, count) ->
+            assertEquals("The held local fixture count was not updated while the service was paused: $key", count, fixtureWhilePaused.getJSONObject("reportCounts").getInt(key))
+        }
         val notificationCursorBeforeRecovery = lastSequence(afterRelease.getJSONArray("notificationEvents"))
         val dispatchCursorBeforeRecovery = afterRelease.getLong("httpRequestDispatchCursor")
         openPermissionSettings(automation, context, permission)
@@ -486,13 +526,54 @@ class Ticket04PermissionRecoveryTest {
             state.getBoolean("serviceLeaseAttached") && state.getBoolean("accessibilityEnabled") && state.getBoolean("notificationsEnabled") &&
                 state.getJSONArray("registeredChildren").strings().contains(CHILD_NAME) &&
                 state.getLong("httpRequestDispatchCursor") > dispatchCursorBeforeRecovery &&
-                recoveryCounts.all { (key, count) -> subject(state, SUBJECT_NAMES.getValue(key)).optInt("activityCount", -1) == count }
+                recoveryCounts.all { (key, count) ->
+                    val reportSubject = subject(state, SUBJECT_NAMES.getValue(key))
+                    reportSubject.optInt("activityCount", -1) == count &&
+                        reportSubject.optString("status") == if (count >= TARGET_COUNTS.getValue(SUBJECT_NAMES.getValue(key))) "COMPLETE" else "BELOW_TARGET"
+                }
         }
         assertReadyProduct(baselineState)
-        assertEquals("The recovery baseline must not request a completion alert", emptyList<JSONObject>(), eventsAfter(baselineState.getJSONArray("notificationEvents"), notificationCursorBeforeRecovery).filter { it.optBoolean("completionRequested") })
+        val recoveryCompletionEvents = eventsAfter(baselineState.getJSONArray("notificationEvents"), notificationCursorBeforeRecovery)
+            .filter { it.optBoolean("completionRequested") }
+        assertEquals("The recovery baseline must not request a completion alert", emptyList<JSONObject>(), recoveryCompletionEvents)
         assertEquals(notificationId, onlyChildNotification(baselineState).getInt("id"))
         requireSilentChannel(baselineState)
         assertEquals(seoulDate, seoulDateNumber())
+
+        val interruptionCompletionEvidence = interruptionCompletionSubjectName?.let { interruptedSubjectName ->
+            val subjectAtPause = subject(pauseSnapshot, interruptedSubjectName)
+            val subjectAtRecovery = subject(baselineState, interruptedSubjectName)
+            val otherIncompleteAtPause = subject(pauseSnapshot, subjectName)
+            val recoveryCheckText = onlyChildNotification(baselineState).optString("bigText")
+            val targetCount = TARGET_COUNTS.getValue(interruptedSubjectName)
+            val reportKey = if (interruptedSubjectName == HANGEUL_SUBJECT) "hangeul" else "english"
+            val recoveryCount = recoveryCounts.getValue(reportKey)
+            assertEquals("The interrupted subject must be checked complete at the first restored baseline", "COMPLETE", subjectAtRecovery.getString("status"))
+            assertEquals(recoveryCount, subjectAtRecovery.getInt("activityCount"))
+            assertTrue("The silent recovery notification must display the completed subject check", recoveryCheckText.contains("✔ $interruptedSubjectName 완료 $recoveryCount/$targetCount"))
+            assertEquals("The later completion must remain below target at recovery", "BELOW_TARGET", otherIncompleteAtPause.getString("status"))
+            assertTrue("The first recovery baseline must not emit a completion alert for an outage completion", recoveryCompletionEvents.isEmpty())
+            JSONObject()
+                .put("subjectName", interruptedSubjectName)
+                .put("initialBaselineIncompleteSubjects", JSONArray(initialBaselineIncompleteSubjects))
+                .put("permissionEnabledWhenChanged", permissionEnabledWhenInterruptionCountChanged)
+                .put("serviceLeaseAttachedWhenChanged", pauseSnapshot.getBoolean("serviceLeaseAttached"))
+                .put("statusAtPause", subjectAtPause.getString("status"))
+                .put("activityCountAtPause", subjectAtPause.getInt("activityCount"))
+                .put("targetCount", targetCount)
+                .put("secondIncompleteSubjectAtPause", subjectName)
+                .put("secondIncompleteStatusAtPause", otherIncompleteAtPause.getString("status"))
+                .put("secondIncompleteActivityCountAtPause", otherIncompleteAtPause.getInt("activityCount"))
+                .put("secondIncompleteTargetCountAtPause", otherIncompleteAtPause.getInt("targetCount"))
+                .put("fixtureActivityCountWhilePaused", fixtureWhilePaused.getJSONObject("reportCounts").getInt(reportKey))
+                .put("statusAtRecovery", subjectAtRecovery.getString("status"))
+                .put("activityCountAtRecovery", subjectAtRecovery.getInt("activityCount"))
+                .put("recoveryCheckText", recoveryCheckText)
+                .put("recoveryCompletionAlerts", recoveryCompletionEvents.size)
+        }
+        if (interruptionCompletionEvidence != null) {
+            assertTrue("The later completion must target a different subject from the outage completion", interruptionCompletionEvidence.getString("subjectName") != subjectName)
+        }
 
         val completionCursor = lastSequence(baselineState.getJSONArray("notificationEvents"))
         val completionUpdate = fixtureRequest(
@@ -583,6 +664,7 @@ class Ticket04PermissionRecoveryTest {
             .put("laterCompletionSubject", subjectName)
             .put("laterCompletionCount", completionEvents.size)
             .put("laterCompletionNotificationId", completionEvents.single().getInt("notificationId"))
+        if (interruptionCompletionEvidence != null) result.put("interruptionCompletion", interruptionCompletionEvidence)
         return result
     }
 
@@ -1412,7 +1494,8 @@ class Ticket04PermissionRecoveryTest {
         const val NOTIFICATION_PERMISSION_POLL_INTERVAL_MS = 250L
         const val PRODUCT_STATE_SAMPLE_INTERVAL_MS = 1_000L
         val INITIAL_COUNTS = mapOf("hangeul" to 2, "math" to 5, "english" to 7)
-        val ACCESSIBILITY_INITIAL_COUNTS = mapOf("hangeul" to 6, "math" to 5, "english" to 7)
+        val ACCESSIBILITY_INITIAL_COUNTS = mapOf("hangeul" to 2, "math" to 5, "english" to 7)
+        val ACCESSIBILITY_RECOVERY_COUNTS = mapOf("hangeul" to 6, "math" to 5, "english" to 7)
         const val USER_ACTION_TIMEOUT_MS = 30 * 60 * 1000L
         const val MAX_NOTIFICATION_PERMISSION_WAIT_MS = 5 * 60 * 1000L
         const val READ_TIMEOUT_MS = 15_000L

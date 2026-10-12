@@ -290,6 +290,25 @@ $accessibilityCaseResult = [pscustomobject]@{
     restoredServiceLease = $true
     recoverySilentBaseline = $true
     laterCompletionCount = 1
+    laterCompletionSubject = "영어"
+    interruptionCompletion = [pscustomobject]@{
+        subjectName = "한글"
+        initialBaselineIncompleteSubjects = @("한글", "영어")
+        permissionEnabledWhenChanged = $false
+        serviceLeaseAttachedWhenChanged = $false
+        statusAtPause = "BELOW_TARGET"
+        activityCountAtPause = 2
+        targetCount = 6
+        secondIncompleteSubjectAtPause = "영어"
+        secondIncompleteStatusAtPause = "BELOW_TARGET"
+        secondIncompleteActivityCountAtPause = 7
+        secondIncompleteTargetCountAtPause = 8
+        fixtureActivityCountWhilePaused = 6
+        statusAtRecovery = "COMPLETE"
+        activityCountAtRecovery = 6
+        recoveryCheckText = "✔ 한글 완료 6/6"
+        recoveryCompletionAlerts = 0
+    }
     serverRequestSequence = 9
 }
 
@@ -307,7 +326,7 @@ function New-Ticket04CaseArtifact($CaseResult, [string]$CaseId, [string]$CaseRun
         serverHeldResponseCount = 0
     }
     return [pscustomobject]@{
-        schemaVersion = if ($CaseId -eq "accessibility-revocation") { 2 } else { 1 }
+        schemaVersion = if ($CaseId -eq "accessibility-revocation") { 3 } else { 1 }
         contractVersion = 1
         caseId = $CaseId
         runId = $CaseRunId
@@ -329,6 +348,22 @@ $notificationCaseResultValid = Test-Ticket04CaseResult -Case $notificationCaseRe
 $accessibilityCaseResultValid = Test-Ticket04CaseResult -Case $accessibilityCaseResult
 if (-not $notificationCaseResultValid -or -not $accessibilityCaseResultValid) {
     throw "Ticket 04 case-result validation failed (notification=$notificationCaseResultValid, accessibility=$accessibilityCaseResultValid)."
+}
+$legacyAccessibilityCaseResult = $accessibilityCaseResult.PSObject.Copy()
+$legacyAccessibilityCaseResult.PSObject.Properties.Remove("interruptionCompletion")
+if (Test-Ticket04CaseResult -Case $legacyAccessibilityCaseResult) {
+    throw "Ticket 04 accepted an Accessibility case without the recovery-time interrupted-completion evidence."
+}
+$alertedRecoveryCaseResult = $accessibilityCaseResult.PSObject.Copy()
+$alertedRecoveryCaseResult.interruptionCompletion = $accessibilityCaseResult.interruptionCompletion.PSObject.Copy()
+$alertedRecoveryCaseResult.interruptionCompletion.recoveryCompletionAlerts = 1
+if (Test-Ticket04CaseResult -Case $alertedRecoveryCaseResult) {
+    throw "Ticket 04 accepted a completion alert for a subject first completed in the silent recovery baseline."
+}
+$sameLaterCompletionCaseResult = $accessibilityCaseResult.PSObject.Copy()
+$sameLaterCompletionCaseResult.laterCompletionSubject = "한글"
+if (Test-Ticket04CaseResult -Case $sameLaterCompletionCaseResult) {
+    throw "Ticket 04 accepted the interruption-baseline subject as the later completion subject."
 }
 $sameRunNotificationResult = $notificationCaseResult.PSObject.Copy()
 $sameRunNotificationResult.runId = $runId
@@ -392,6 +427,11 @@ $accessibilityCaseArtifact = New-Ticket04CaseArtifact $accessibilityCaseResult "
 if (-not (Test-Ticket04CaseEvidence -Evidence $notificationCaseArtifact -ExpectedDeviceSerial $notificationCaseArtifact.device.serial -ExpectedProductApkSha256 $notificationCaseArtifact.productApkSha256) -or
     -not (Test-Ticket04CaseEvidence -Evidence $accessibilityCaseArtifact -ExpectedDeviceSerial $notificationCaseArtifact.device.serial -ExpectedProductApkSha256 $notificationCaseArtifact.productApkSha256)) {
     throw "Ticket 04 rejected valid immutable per-case artifacts."
+}
+$legacyAccessibilityArtifact = $accessibilityCaseArtifact.PSObject.Copy()
+$legacyAccessibilityArtifact.schemaVersion = 2
+if (Test-Ticket04CaseEvidence -Evidence $legacyAccessibilityArtifact -ExpectedDeviceSerial $legacyAccessibilityArtifact.device.serial -ExpectedProductApkSha256 $legacyAccessibilityArtifact.productApkSha256) {
+    throw "Ticket 04 accepted a legacy Accessibility artifact without the recovery-time interrupted-completion gate."
 }
 $combinedCases = @(Join-Ticket04CaseEvidence -Evidence @($accessibilityCaseArtifact, $notificationCaseArtifact) -ExpectedDeviceSerial $notificationCaseArtifact.device.serial -ExpectedProductApkSha256 $notificationCaseArtifact.productApkSha256)
 if ($combinedCases.Count -ne 2 -or $combinedCases[0].caseId -cne "notification-revocation" -or $combinedCases[1].caseId -cne "accessibility-revocation") {
