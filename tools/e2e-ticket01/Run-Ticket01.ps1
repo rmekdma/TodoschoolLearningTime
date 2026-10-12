@@ -11,6 +11,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Scenario -eq "ticket04") {
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/PermissionRecoveryEvidence.psm1") -Force
+}
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04")
 $configExample = Join-Path $PSScriptRoot "config.example.json"
@@ -195,6 +198,7 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $ticket04ProgressPath = Join-Path $artifactDirectory "ticket04-user-actions.log"
     $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
     $failure = $null
+    $previousSamplePid = $before.pid
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 2
         if ($process.HasExited) { break }
@@ -235,11 +239,16 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                 $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
             }
         }
-        $lifecycleChanged = $state.pid -ne $before.pid -or $state.crashed -or ($Scenario -ne "ticket04" -and -not $state.bound)
+        $lifecycleChanged = $state.crashed -or
+            ($Scenario -ne "ticket04" -and ($state.pid -ne $before.pid -or -not $state.bound))
+        if ($Scenario -eq "ticket04" -and $state.pid -ne $previousSamplePid) {
+            Write-Host "TICKET04 product lifecycle transition observed: priorSamplePID='$previousSamplePid', currentPID='$($state.pid)', bound=$($state.bound); the permission-specific result gate will decide whether it is expected."
+        }
         if ($lifecycleChanged) {
             $failure = "The observed product lifecycle changed during external instrumentation: beforePID='$($before.pid)', currentPID='$($state.pid)', bound=$($state.bound), crashed=$($state.crashed)."
             break
         }
+        $previousSamplePid = $state.pid
     }
     $samples | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $samplePath -Encoding utf8
 
@@ -251,20 +260,48 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     }
 
     $process.WaitForExit()
+    if ($Scenario -eq "ticket04") {
+        $finalProgressOutput = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket04Progress:I", "*:S"))
+        $finalMatchingProgress = @($finalProgressOutput | Where-Object { $_ -match [regex]::Escape($RunId) -and $_ -match "TICKET04_PROGRESS=" })
+        foreach ($line in $finalMatchingProgress) {
+            if ($ticket04ProgressLines.Contains([string]$line)) { continue }
+            [void]$ticket04ProgressLines.Add([string]$line)
+            $marker = [regex]::Match([string]$line, 'TICKET04_PROGRESS=(\{.*\})')
+            if (-not $marker.Success) { continue }
+            try {
+                $event = $marker.Groups[1].Value | ConvertFrom-Json
+                switch ($event.event) {
+                    "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
+                    "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
+                    "BOUNDARY_CAPTURED" {
+                        $boundary = $event.details | ConvertFrom-Json
+                        Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
+                    }
+                    default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
+                }
+            } catch {
+                Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
+            }
+        }
+        $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
+    }
     $after = Get-DeviceMonitorState
     $after.accessibilityDump | Set-Content -LiteralPath (Join-Path $artifactDirectory "product-service-after-observer.txt") -Encoding utf8
-    if ($after.pid -ne $before.pid -or -not $after.bound -or $after.crashed) {
-        throw "The product service PID or binding changed during external instrumentation: beforePID='$($before.pid)', afterPID='$($after.pid)', bound=$($after.bound), crashed=$($after.crashed)."
-    }
     if ($process.ExitCode -ne 0) {
         throw "External observer adb process exited with code $($process.ExitCode). See $stdoutPath and $stderrPath"
     }
     if ($Scenario -eq "ticket04") {
-        $stdout = (& rg --no-heading -e 'OK \(1 test\)' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' $stdoutPath 2>$null) -join "`n"
+        $stdout = (& rg --no-heading -n -C 2 -e 'OK \(1 test\)' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' -e 'INSTRUMENTATION_STATUS: stack=' -e 'at com\.example\.todoschooltime\.e2eobserver\.Ticket04PermissionRecoveryTest' $stdoutPath 2>$null) -join "`n"
         $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
     } else {
         $stdout = Get-Content -LiteralPath $stdoutPath -Raw
         $stderr = Get-Content -LiteralPath $stderrPath -Raw
+    }
+    if ($Scenario -eq "ticket04" -and $stdout -match 'FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[0-9]') {
+        throw "Ticket 04 observer instrumentation failed. Filtered test evidence:`n$stdout`n$stderr"
+    }
+    if ($after.crashed -or -not $after.bound -or ($Scenario -ne "ticket04" -and $after.pid -ne $before.pid)) {
+        throw "The product service lifecycle failed its post-observer checks: beforePID='$($before.pid)', afterPID='$($after.pid)', bound=$($after.bound), crashed=$($after.crashed)."
     }
     $observerResultLogLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "${ResultLogTag}:I", "*:S"))
     $observerResultLog = $observerResultLogLines | Out-String
@@ -671,27 +708,19 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
     foreach ($case in @($result.cases)) {
         if (-not $expected.ContainsKey([string]$case.caseId)) { throw "Ticket 04 returned an unexpected case: $($case.caseId)" }
         $isNotificationCase = $case.caseId -eq "notification-revocation"
-        $caseHasRequiredBoundaryEvidence = if ($isNotificationCase) {
-            $case.processRestartExpected -and $case.processRestartedAfterBoundary -and
-                $case.productPidAfterReturn -ne $case.productPidBefore -and
-                $case.requestBoundaryClassification -in @(
-                    "no-client-request-at-permission-boundary",
-                    "client-socket-closed-at-permission-boundary",
-                    "client-request-in-flight-with-open-socket-within-evidence-window",
-                    "client-request-in-flight-with-open-socket-outside-evidence-window"
-                ) -and [int64]$case.requestAgeAtBoundaryMs -ge 0
+        $caseHasRequiredBoundaryEvidence = Test-Ticket04CaseBoundaryEvidence -Case $case
+        $expectedStateComparison = if ($isNotificationCase) {
+            "unchanged-after-release-in-restarted-process"
         } else {
-            -not $case.processRestartExpected -and $case.requestStillInFlight -and
-                $case.clientSocketOpenAtPermissionBoundary -and $case.sameProductPidAtBoundary -and
-                -not $case.processRestartedAfterBoundary -and $case.productPidAfterReturn -eq $case.productPidBefore -and
-                $case.requestBoundaryClassification -eq "client-request-in-flight-with-open-socket-within-evidence-window" -and
-                [int64]$case.requestAgeAtBoundaryMs -ge 0 -and [int64]$case.requestAgeAtBoundaryMs -lt 13500
+            "unchanged-after-release-in-same-process"
         }
         if ([int]$case.heldResponseStatus -ne $expected[[string]$case.caseId] -or
             -not $caseHasRequiredBoundaryEvidence -or
             $case.actualPermissionEnabledAtBoundary -or -not $case.permissionPauseUiObserved -or
             $case.staleCompletionRequests -ne 0 -or $case.authenticationPauseAfterRelease -or
-            -not $case.registeredChildrenPreserved -or -not $case.subjectStateUnchangedAfterRelease -or
+            -not $case.registeredChildrenPreserved -or -not $case.serviceLeaseAtDispatch -or
+            $case.serviceLeaseAtPause -ne $isNotificationCase -or
+            $case.subjectStateComparison -cne $expectedStateComparison -or
             -not $case.restoredServiceLease -or -not $case.recoverySilentBaseline -or
             $case.laterCompletionCount -ne 1 -or
             $case.userAcknowledgementElapsedRealtimeMs -le $case.permissionBoundaryElapsedRealtimeMs -or
@@ -725,7 +754,7 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
     $resultPath = Join-Path $artifactDirectory "ticket04-result.json"
     $result | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $resultPath -Encoding utf8
     $notificationCase = @($result.cases | Where-Object { $_.caseId -eq "notification-revocation" })[0]
-    Write-Host "PASS Ticket 04: notification OFF restarted the process with registration preserved; Accessibility OFF captured a same-PID, in-flight, socket-open request; explicit acknowledgement preceded release; restored monitoring was silent before later completion."
+    Write-Host "PASS Ticket 04: notification OFF restarted the process with registration preserved; Accessibility OFF captured a same-PID, in-flight, socket-open request and preserved that process state; explicit acknowledgement preceded release; restored monitoring was silent before later completion."
     Write-Host "Notification request at OFF: $($notificationCase.requestBoundaryClassification), age=$($notificationCase.requestAgeAtBoundaryMs)ms; no same-process cancellation claim is made."
     Write-Host "Fixture evidence (selected fields): $serverEvidencePath"
     Write-Host "Observer evidence: $resultPath"

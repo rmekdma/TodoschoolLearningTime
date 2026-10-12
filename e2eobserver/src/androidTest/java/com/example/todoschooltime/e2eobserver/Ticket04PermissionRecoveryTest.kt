@@ -322,9 +322,15 @@ class Ticket04PermissionRecoveryTest {
             assertEquals("The AccessibilityService boundary changed the product process before response release", productPidsBefore, pidsAfterReturn)
         }
         assertEquals(setOf(CHILD_NAME), pauseSnapshot.getJSONArray("registeredChildren").strings().toSet())
-        assertEquals(baselineVectors, subjectVectors(pauseSnapshot))
+        var subjectStateComparison = "not-yet-compared"
+        if (permission == PermissionKind.ACCESSIBILITY) {
+            assertEquals("The same-process Accessibility pause changed the subject state", baselineVectors, subjectVectors(pauseSnapshot))
+        }
         assertFalse("Permission revocation must not create an authentication pause: $pausedUi", pausedUi.any { it.contains("다시 로그인 필요") })
         assertTrue("The real monitoring UI did not show its permission-paused state: $pausedUi", pausedUi.any { it.contains("감시 일시 중지") })
+        val completionEventsAtPause = eventsAfter(pauseSnapshot.getJSONArray("notificationEvents"), notificationCursorBefore)
+            .filter { it.optBoolean("completionRequested") }
+        assertTrue("The permission-paused state requested a completion alert: $completionEventsAtPause", completionEventsAtPause.isEmpty())
         val pauseLease = pauseSnapshot.getBoolean("serviceLeaseAttached")
         if (permission == PermissionKind.NOTIFICATIONS) {
             assertTrue("Notification revocation unexpectedly detached AccessibilityService", pauseLease)
@@ -383,7 +389,17 @@ class Ticket04PermissionRecoveryTest {
         SystemClock.sleep(CALLBACK_SETTLE_MS)
         val afterRelease = readProductState(context)
         assertEquals("The permission pause must remain active after the previous response returns", pauseSnapshot.getJSONArray("registeredChildren").strings().toSet(), afterRelease.getJSONArray("registeredChildren").strings().toSet())
-        assertEquals("The held report changed the child state after its generation was invalidated", baselineVectors, subjectVectors(afterRelease))
+        if (permission == PermissionKind.NOTIFICATIONS) {
+            assertEquals(
+                "The old held report changed the subject state in the restarted process",
+                subjectVectors(pauseSnapshot),
+                subjectVectors(afterRelease),
+            )
+            subjectStateComparison = "unchanged-after-release-in-restarted-process"
+        } else {
+            assertEquals("The held report changed the child state after its same-process generation was invalidated", baselineVectors, subjectVectors(afterRelease))
+            subjectStateComparison = "unchanged-after-release-in-same-process"
+        }
         assertFalse("A stale HTTP response created an authentication pause", screenTexts(automation).any { it.contains("다시 로그인 필요") })
         val staleCompletionEvents = eventsAfter(afterRelease.getJSONArray("notificationEvents"), notificationCursorBefore)
             .filter { it.optBoolean("completionRequested") }
@@ -505,7 +521,9 @@ class Ticket04PermissionRecoveryTest {
             .put("authenticationPauseAfterRelease", false)
             .put("staleCompletionRequests", staleCompletionEvents.size)
             .put("registeredChildrenPreserved", true)
-            .put("subjectStateUnchangedAfterRelease", true)
+            .put("subjectStateComparison", subjectStateComparison)
+            .put("subjectVectorsAtPause", JSONArray(subjectVectors(pauseSnapshot)))
+            .put("subjectVectorsAfterRelease", JSONArray(subjectVectors(afterRelease)))
             .put("heldResponseStatus", heldResponseStatus)
             .put("serverResponseWrite", serverWrite)
             .put("clientConnectedAtUserAcknowledgement", clientConnectedAtAcknowledgement)
