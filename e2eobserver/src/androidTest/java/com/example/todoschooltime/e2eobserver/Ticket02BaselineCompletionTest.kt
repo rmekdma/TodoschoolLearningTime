@@ -213,7 +213,7 @@ class Ticket02BaselineCompletionTest {
                 .put("completionNotificationId", completedNotification.getInt("id"))
                 .put("baselineCompletionRequests", baselineEvents.count { it.optBoolean("completionRequested") })
                 .put("followUpCompletionRequests", completionEvents.size)
-                .put("foregroundServiceConnected", completedSnapshot.getBoolean("serviceLeaseAttached"))
+                .put("accessibilityServiceLeaseAttached", completedSnapshot.getBoolean("serviceLeaseAttached"))
                 .put("foregroundPackageObserved", HANGEUL_APP_PACKAGE)
                 .put("silentChannelPrepared", true)
                 .put("notificationChannelImportance", initialChannel.getInt("importance"))

@@ -405,7 +405,7 @@ function Assert-Ticket02BaselineCompletion($Snapshot, [string]$InstrumentationTe
         $result.baselineNotificationId -ne $result.completionNotificationId -or
         $result.baselineCompletionRequests -ne 0 -or
         $result.followUpCompletionRequests -ne 1 -or
-        -not $result.foregroundServiceConnected -or
+        -not $result.accessibilityServiceLeaseAttached -or
         $result.foregroundPackageObserved -ne "com.enuma.todohangeul" -or
         -not $result.silentChannelPrepared -or
         $result.notificationChannelVibrationEnabled -or
