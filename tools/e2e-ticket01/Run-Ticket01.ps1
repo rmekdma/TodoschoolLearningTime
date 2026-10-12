@@ -254,6 +254,7 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                             switch ($event.event) {
                                 "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
                                 "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
+                                "ACTION_EXPIRED" { Write-Warning "TICKET04 준비 화면 만료 [$($event.caseId)]: $($event.details)" }
                                 "BOUNDARY_CAPTURED" {
                                     $boundary = $event.details | ConvertFrom-Json
                                     Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
@@ -313,6 +314,7 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                 switch ($event.event) {
                     "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
                     "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
+                    "ACTION_EXPIRED" { Write-Warning "TICKET04 준비 화면 만료 [$($event.caseId)]: $($event.details)" }
                     "BOUNDARY_CAPTURED" {
                         $boundary = $event.details | ConvertFrom-Json
                         Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
@@ -733,6 +735,7 @@ function Get-Ticket04SourceSnapshot {
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ActionToken.kt",
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidence.kt",
         "e2eobserver/src/test/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidenceTest.kt",
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivityTest.kt",
         "tools/e2e-ticket01/Run-Ticket01.ps1",
         "tools/e2e-ticket01/server.py",
         "tools/e2e-ticket01/test_server.py",

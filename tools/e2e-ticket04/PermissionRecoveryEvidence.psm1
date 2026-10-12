@@ -309,6 +309,7 @@ function Get-Ticket04SourcePaths([string]$Version) {
     )
     $current = @($legacy[0..5]) + @(
         "e2eobserver/src/test/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidenceTest.kt"
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivityTest.kt"
     ) + @($legacy[6]) + @(
         "tools/e2e-ticket01/server.py",
         "tools/e2e-ticket01/test_server.py"
@@ -401,6 +402,8 @@ print(hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest())
 function Get-Ticket04AllowedCompatibilityPaths {
     return @(
         "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04PermissionRecoveryTest.kt",
+        "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivity.kt",
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivityTest.kt",
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidence.kt",
         "e2eobserver/src/test/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidenceTest.kt",
         "tools/e2e-ticket01/Run-Ticket01.ps1",

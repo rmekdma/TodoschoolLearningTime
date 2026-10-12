@@ -269,6 +269,7 @@ class Ticket04PermissionRecoveryTest {
 
         // Put the exact Settings page on the task stack first. The user still controls
         // the start button; this keeps Settings navigation outside the 15-second window.
+        assertEquals("The Seoul date changed after the silent baseline was prepared; start a fresh run", seoulDate, seoulDateNumber())
         openPermissionSettings(automation, context, permission)
         val startClickedAt = awaitUserAction(
             context = context,
@@ -277,6 +278,7 @@ class Ticket04PermissionRecoveryTest {
             action = "START",
             buttonLabel = "시험 시작",
             instructions = "$caseId 시험을 시작할 준비가 되었으면 아래 버튼을 누르세요.\n\n버튼을 누르면 실제 보고 요청을 시작합니다. 뒤에 준비된 Android 설정 화면에서 ${permission.displayName} 권한을 직접 끄는 작업만 수동으로 해주세요.",
+            expectedSeoulDate = seoulDate,
         )
         emitProgress(
             runId,
@@ -352,6 +354,7 @@ class Ticket04PermissionRecoveryTest {
             action = "CONTINUE_AFTER_OFF",
             buttonLabel = "권한 OFF 확인 · 계속",
             instructions = "${permission.displayName} 권한 OFF를 확인했습니다.\n\n$boundaryDescription\n\n권한이 꺼진 상태인지 확인하고 결과 확인을 계속하려면 아래 버튼을 누르세요. 서버 응답은 이 버튼을 누르기 전까지 해제하지 않습니다.",
+            expectedSeoulDate = seoulDate,
         )
         assertFalse("The permission must still be disabled when the user acknowledges the boundary", permission.isEnabled(context, automation))
 
@@ -591,12 +594,14 @@ class Ticket04PermissionRecoveryTest {
         action: String,
         buttonLabel: String,
         instructions: String,
+        expectedSeoulDate: Int? = null,
     ): Long {
         val token = "$runId-$caseId-${SystemClock.elapsedRealtime()}"
         val preferences = context.getSharedPreferences(Ticket04ControlActivity.PREFERENCES_NAME, Context.MODE_PRIVATE)
         preferences.edit()
             .remove(Ticket04ControlActivity.KEY_CLICKED_TOKEN)
             .remove(Ticket04ControlActivity.KEY_CLICKED_AT)
+            .putString(Ticket04ControlActivity.KEY_ACTIVE_TOKEN, token)
             .commit()
         emitProgress(runId, "WAITING_FOR_USER_ACTION", caseId, "$action: $instructions")
         context.startActivity(
@@ -609,6 +614,11 @@ class Ticket04PermissionRecoveryTest {
         )
         val deadline = SystemClock.elapsedRealtime() + USER_ACTION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
+            if (expectedSeoulDate != null && seoulDateNumber() != expectedSeoulDate) {
+                expireUserAction(preferences, token)
+                emitProgress(runId, "ACTION_EXPIRED", caseId, "$action 준비 시 저장한 한국 날짜가 바뀌어 이 화면을 만료했습니다. 새 시험을 준비해야 합니다.")
+                throw AssertionError("Ticket 04 $caseId preparation expired because the Asia/Seoul date changed before the action was accepted")
+            }
             if (Ticket04ActionToken.matches(
                     expectedToken = token,
                     clickedToken = preferences.getString(Ticket04ControlActivity.KEY_CLICKED_TOKEN, null),
@@ -620,7 +630,30 @@ class Ticket04PermissionRecoveryTest {
             }
             SystemClock.sleep(MANUAL_POLL_INTERVAL_MS)
         }
-        throw AssertionError("Ticket 04 $caseId did not receive the user's '$buttonLabel' button press")
+        if (expectedSeoulDate == null || seoulDateNumber() == expectedSeoulDate) {
+            if (Ticket04ActionToken.matches(
+                    expectedToken = token,
+                    clickedToken = preferences.getString(Ticket04ControlActivity.KEY_CLICKED_TOKEN, null),
+                )
+            ) {
+                val clickedAt = preferences.getLong(Ticket04ControlActivity.KEY_CLICKED_AT, 0L)
+                assertTrue("The user-start button did not record an elapsed-realtime timestamp", clickedAt > 0L)
+                return clickedAt
+            }
+        }
+        expireUserAction(preferences, token)
+        emitProgress(runId, "ACTION_EXPIRED", caseId, "$action 준비 화면이 만료됐습니다. 새 시험 준비를 요청해야 합니다.")
+        throw AssertionError("Ticket 04 $caseId did not receive the user's '$buttonLabel' button press before its preparation expired")
+    }
+
+    private fun expireUserAction(preferences: android.content.SharedPreferences, token: String) {
+        if (Ticket04ActionToken.matches(
+                expectedToken = token,
+                clickedToken = preferences.getString(Ticket04ControlActivity.KEY_ACTIVE_TOKEN, null),
+            )
+        ) {
+            preferences.edit().remove(Ticket04ControlActivity.KEY_ACTIVE_TOKEN).commit()
+        }
     }
 
     private fun waitForManualRevocation(
