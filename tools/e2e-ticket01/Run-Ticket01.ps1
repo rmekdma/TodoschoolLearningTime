@@ -2,7 +2,7 @@
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot "config.json"),
     [string]$DeviceSerial,
-    [ValidateSet("ticket01", "ticket02")]
+    [ValidateSet("ticket01", "ticket02", "ticket03")]
     [string]$Scenario = "ticket01",
     [switch]$DeviceOnly,
     [switch]$PrepareDevice,
@@ -12,23 +12,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+$usesExternalObserver = $Scenario -in @("ticket02", "ticket03")
 $configExample = Join-Path $PSScriptRoot "config.example.json"
 $configFile = if (Test-Path -LiteralPath $ConfigPath) { $ConfigPath } else { $configExample }
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 
 if ($DeviceOnly -and ($PrepareDevice -or $RunPrepared -or $RefreshObserver)) {
-    throw "Choose only one Ticket 02 phase: -PrepareDevice, -RunPrepared, -RefreshObserver, or legacy -DeviceOnly."
+    throw "Choose only one phase: -PrepareDevice, -RunPrepared, -RefreshObserver, or legacy -DeviceOnly."
 }
-if ($PrepareDevice -and ($RunPrepared -or $RefreshObserver)) { throw "Choose only one Ticket 02 phase: -PrepareDevice, -RunPrepared, or -RefreshObserver." }
+if ($PrepareDevice -and ($RunPrepared -or $RefreshObserver)) { throw "Choose only one external-observer phase: -PrepareDevice, -RunPrepared, or -RefreshObserver." }
 if ($RunPrepared -and $RefreshObserver) { throw "Choose either -RunPrepared or -RefreshObserver, not both." }
-if ($Scenario -eq "ticket02" -and $DeviceOnly -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
+if ($usesExternalObserver -and $DeviceOnly -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
     $PrepareDevice = $true
 }
-if ($Scenario -eq "ticket02" -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
+if ($usesExternalObserver -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
     $RunPrepared = $true
 }
-if (($PrepareDevice -or $RunPrepared -or $RefreshObserver) -and $Scenario -ne "ticket02") {
-    throw "-PrepareDevice, -RunPrepared, and -RefreshObserver are reserved for Ticket 02."
+if (($PrepareDevice -or $RunPrepared -or $RefreshObserver) -and -not $usesExternalObserver) {
+    throw "-PrepareDevice, -RunPrepared, and -RefreshObserver are reserved for observer-based scenarios."
 }
 
 if ($config.serverHost -ne "127.0.0.1") {
@@ -154,7 +155,7 @@ function Assert-InstalledApkEquals([string]$PackageName, [string]$LocalApk, [str
     $expectedHash = Get-ApkSha256 $LocalApk
     $installedHash = Get-InstalledApkSha256 $PackageName $ArtifactName
     if ($installedHash -ne $expectedHash) {
-        throw "Installed $PackageName does not match the prepared APK; refusing to instrument or reinstall it. Run Ticket 02 -PrepareDevice, then restore the service manually."
+        throw "Installed $PackageName does not match the prepared APK; refusing to instrument or reinstall it. Run the observer scenario -PrepareDevice, then restore the service manually."
     }
     return $installedHash
 }
@@ -175,12 +176,12 @@ function Get-DeviceMonitorState {
     }
 }
 
-function Invoke-Ticket02Observer([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass) {
+function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass, [string]$ResultLogTag, [int]$TimeoutMinutes) {
     $before = Get-DeviceMonitorState
     $beforePath = Join-Path $artifactDirectory "product-service-before-observer.txt"
     $before.accessibilityDump | Set-Content -LiteralPath $beforePath -Encoding utf8
     if (-not $before.pid -or -not $before.bound -or $before.crashed) {
-        throw "Refusing to start Ticket 02: the real debug AccessibilityService is not currently bound. PID='$($before.pid)', bound=$($before.bound), crashed=$($before.crashed). No registration or fixture API request was attempted. See $beforePath"
+        throw "Refusing to start ${Scenario}: the real debug AccessibilityService is not currently bound. PID='$($before.pid)', bound=$($before.bound), crashed=$($before.crashed). No registration or fixture API request was attempted. See $beforePath"
     }
 
     $stdoutPath = Join-Path $artifactDirectory "observer-instrumentation.stdout.txt"
@@ -190,7 +191,7 @@ function Invoke-Ticket02Observer([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $process = Start-Process -FilePath $adbPath -ArgumentList $argumentText -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $samples = [System.Collections.Generic.List[object]]::new()
-    $deadline = [DateTimeOffset]::UtcNow.AddMinutes(6)
+    $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
     $failure = $null
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 2
@@ -211,7 +212,7 @@ function Invoke-Ticket02Observer([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $samples | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $samplePath -Encoding utf8
 
     if ($failure -or -not $process.HasExited) {
-        if (-not $failure) { $failure = "External observer exceeded its six-minute limit." }
+        if (-not $failure) { $failure = "External observer exceeded its $TimeoutMinutes-minute limit." }
         try { Invoke-SelectedAdb @("shell", "am", "force-stop", $observerTestApplicationId) | Out-Null } catch { }
         if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
         throw "$failure The observer was stopped without altering the product app. PID/binding samples: $samplePath"
@@ -228,10 +229,22 @@ function Invoke-Ticket02Observer([string]$ApiBaseUrl, [string]$RunId, [string]$I
     }
     $stdout = Get-Content -LiteralPath $stdoutPath -Raw
     $stderr = Get-Content -LiteralPath $stderrPath -Raw
-    $observerResultLog = (Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket02E2E:I", "*:S") | Out-String)
-    $structuredResult = $observerResultLog -split "`r?`n" |
-        Where-Object { $_ -match "TICKET02_RESULT=" -and $_ -match [regex]::Escape($RunId) } |
-        Select-Object -Last 1
+    $observerResultLogLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "${ResultLogTag}:I", "*:S"))
+    $observerResultLog = $observerResultLogLines | Out-String
+    if ($Scenario -eq "ticket03") {
+        $observerResultLog | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-result-logcat.txt") -Encoding utf8
+    }
+    $resultMarker = if ($Scenario -eq "ticket03") { "TICKET03_RESULT=" } else { "TICKET02_RESULT=" }
+    if ($Scenario -eq "ticket03") {
+        Import-Module (Join-Path $PSScriptRoot "../e2e-ticket03/ResultChunks.psm1") -Force
+        $structuredJson = Join-Ticket03ResultChunks -LogLines $observerResultLogLines -RunId $RunId
+        $structuredResult = "$resultMarker$structuredJson"
+    }
+    else {
+        $structuredResult = $observerResultLogLines |
+            Where-Object { $_ -match [regex]::Escape($resultMarker) -and $_ -match [regex]::Escape($RunId) } |
+            Select-Object -Last 1
+    }
     if ($structuredResult) {
         $structuredResult | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-structured-result.log") -Encoding utf8
     }
@@ -259,11 +272,257 @@ function Invoke-Gradle([string[]]$Tasks, [string]$LogName) {
 
 function Read-ServerRequests {
     try {
-        return Invoke-RestMethod -Uri "$apiBaseUrl/__ticket01/requests" -Method Get -TimeoutSec 3
+        $statePath = switch ($Scenario) {
+            "ticket02" { "/__ticket02/state"; break }
+            "ticket03" { "/__ticket03/state"; break }
+            default { "/__ticket01/requests" }
+        }
+        return Invoke-RestMethod -Uri "$apiBaseUrl$statePath" -Method Get -TimeoutSec 3
     } catch {
         Write-Warning "Could not read the local server request log: $($_.Exception.Message)"
         return $null
     }
+}
+
+function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationText) {
+    if ($null -eq $Snapshot) { throw "The temporary server request log is unavailable." }
+    if ($Snapshot.runId -ne $runId -or $Snapshot.scenario -ne "ticket03") {
+        throw "Connected to a server with the wrong Ticket 03 run identity."
+    }
+    if (@($Snapshot.inFlightRequests).Count -ne 0) {
+        throw "Ticket 03 ended with fixture requests still in flight: $($Snapshot.inFlightRequests | ConvertTo-Json -Depth 5 -Compress)"
+    }
+
+    $resultMatch = [regex]::Match($InstrumentationText, 'TICKET03_RESULT=(\{[^\r\n]+\})')
+    if (-not $resultMatch.Success) { throw "Observer instrumentation omitted structured Ticket 03 evidence." }
+    $result = $resultMatch.Groups[1].Value | ConvertFrom-Json
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket03/ResultSchema.psm1") -Force
+    Assert-Ticket03ResultArrayShapes $result
+    $expectedPaths = @(
+        "/v3/todoschool/report/daily/hangeul",
+        "/v3/todoschool/report/daily/math",
+        "/v3/todoschool/report/daily/english",
+        "/v3/todoschool/report/daily/hangeul",
+        "/v3/todoschool/report/daily/math",
+        "/v3/todoschool/report/daily/english"
+    )
+    $expectedCounts = @(2, 2, 2, 6, 2, 2)
+    $expectedPackages = @(
+        "com.enuma.todohangeul",
+        "com.enuma.todomath",
+        "com.enuma.todoenglish",
+        "com.enuma.todohangeul",
+        "com.enuma.todomath",
+        "com.enuma.todoenglish"
+    )
+    $polls = @($result.pollRequests)
+    $seoulTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("Korea Standard Time")
+    $expectedSeoulDate = [int][TimeZoneInfo]::ConvertTime([DateTimeOffset]::Now, $seoulTimeZone).ToString("yyyyMMdd")
+    if ($polls.Count -ne $expectedPaths.Count -or
+        $result.runId -ne $runId -or
+        $result.apiBaseUrl -ne $apiBaseUrl -or
+        [int]$result.seoulDate -ne $expectedSeoulDate -or
+        [int]$result.configuredIntervalMinutes -ne 1 -or
+        -not $result.intervalMeasuredUsingRealElapsedTime -or
+        -not $result.registeredChildOnly -or
+        $result.registeredChild -ne "테스트 아이" -or
+        [int]$result.deviceApi -ne $sdkVersion -or
+        -not $result.serviceLeaseAttached -or
+        -not $result.silentChannelPrepared -or
+        $result.notificationChannelVibrationEnabled -or
+        $result.productAlertDeliveryTested -or
+        $result.actualTodoApiCalled -or
+        [int]$result.noRegistrationNewReportCount -ne 0) {
+        throw "Ticket 03 structured evidence does not meet the foreground-polling contract."
+    }
+
+    $requestBySequence = @{}
+    foreach ($request in @($Snapshot.requests)) { $requestBySequence[[string]$request.sequence] = $request }
+    $lastReceivedAt = $null
+    $reportUserIds = @{
+        "/v3/todoschool/report/daily/hangeul" = "ticket01-hangeul"
+        "/v3/todoschool/report/daily/math" = "ticket01-math"
+        "/v3/todoschool/report/daily/english" = "ticket01-english"
+    }
+    for ($index = 0; $index -lt $polls.Count; $index++) {
+        $poll = $polls[$index]
+        $expectedPath = $expectedPaths[$index]
+        if ($poll.requestPath -ne $expectedPath -or
+            [int]$poll.servedCount -ne $expectedCounts[$index] -or
+            $poll.packageName -ne $expectedPackages[$index] -or
+            $poll.foregroundActiveWindowPackageAtWindowStart -ne $expectedPackages[$index] -or
+            $poll.foregroundPackageAtReport -ne $expectedPackages[$index] -or
+            [int64]$poll.foregroundEventSequence -gt [int64]$poll.foregroundEventSequenceAtWindowStart -or
+            [int64]$poll.foregroundEventSequenceAtReport -lt [int64]$poll.foregroundEventSequence -or
+            [int64]$poll.foregroundEventSequenceAtApply -lt [int64]$poll.foregroundEventSequenceAtReport -or
+            [int64]$poll.requestSequenceBeforeTransition -gt [int64]$poll.requestSequenceCursorAtWindowStart -or
+            [int64]$poll.requestSequenceCursorAtWindowStart -gt [int64]$poll.requestSequence -or
+            [int64]$poll.requestSequenceCursorAtReport -ne [int64]$poll.requestSequence -or
+            [int64]$poll.inFlightRequestsAtWindowStart -ne 0 -or
+            -not $poll.serviceLeaseAttachedAtWindowStart -or
+            [int64]$poll.foregroundSnapshotCapturedAtElapsedRealtimeMs -gt [int64]$poll.requestSnapshotCapturedAtElapsedRealtimeMs -or
+            @($poll.foregroundPackagesObservedAtReport | Where-Object { $_ -ne $expectedPackages[$index] }).Count -gt 0 -or
+            @($poll.foregroundPackagesObservedAtApply | Where-Object { $_ -ne $expectedPackages[$index] }).Count -gt 0 -or
+            [int]$poll.reportRequestCountInCycle -ne 1 -or
+            [int]$poll.inFlightRequestsAtEnd -ne 0) {
+            throw "Ticket 03 poll record $index does not match its actual subject foreground window: $($poll | ConvertTo-Json -Compress -Depth 5)"
+        }
+        $transitionEvents = @($poll.foregroundEventsDuringTransition)
+        $targetTransition = @($transitionEvents | Where-Object { [int64]$_.sequence -eq [int64]$poll.foregroundEventSequence })
+        $transitionAfterTarget = @($transitionEvents | Where-Object { [int64]$_.sequence -ge [int64]$poll.foregroundEventSequence })
+        if ($transitionEvents.Count -eq 0 -or $targetTransition.Count -ne 1 -or
+            $targetTransition[0].packageName -ne $expectedPackages[$index] -or
+            @($transitionAfterTarget | Where-Object { $_.packageName -ne $expectedPackages[$index] }).Count -gt 0 -or
+            @($poll.foregroundEventsObservedAtReport | Where-Object { $_.packageName -ne $expectedPackages[$index] }).Count -gt 0 -or
+            @($poll.foregroundEventsObservedAtApply | Where-Object { $_.packageName -ne $expectedPackages[$index] }).Count -gt 0) {
+            throw "Ticket 03 poll record $index lacks a stable actual foreground-event window: $($poll | ConvertTo-Json -Compress -Depth 5)"
+        }
+        $transitionPaths = @($poll.requestsDuringTransition)
+        $transitionSequences = @($poll.requestsDuringTransitionSequences)
+        $transitionReportPaths = @($transitionPaths | Where-Object { $_ -like "/v3/todoschool/report/daily/*" })
+        if ($transitionPaths.Count -ne $transitionSequences.Count -or
+            $transitionReportPaths.Count -gt 1 -or
+            @($transitionReportPaths | Where-Object { $_ -ne $expectedPath }).Count -gt 0) {
+            throw "Ticket 03 foreground transition included an unexpected or repeated subject report: $($poll | ConvertTo-Json -Compress -Depth 5)"
+        }
+        for ($transitionIndex = 0; $transitionIndex -lt $transitionPaths.Count; $transitionIndex++) {
+            $transitionRequest = $requestBySequence[[string]$transitionSequences[$transitionIndex]]
+            if (-not $transitionRequest -or $transitionRequest.path -ne $transitionPaths[$transitionIndex] -or
+                [int64]$transitionSequences[$transitionIndex] -le [int64]$poll.requestSequenceBeforeTransition -or
+                [int64]$transitionSequences[$transitionIndex] -gt [int64]$poll.requestSequenceCursorAtWindowStart) {
+                throw "Ticket 03 transition request evidence did not match the window-start cursor: $($poll | ConvertTo-Json -Compress -Depth 5)"
+            }
+        }
+        $cyclePaths = @($poll.requestCyclePaths)
+        $cycleSequences = @($poll.requestCycleSequences)
+        $cycleReportPaths = @($cyclePaths | Where-Object { $_ -like "/v3/todoschool/report/daily/*" })
+        $allowedCyclePaths = @(
+            "/v3/account/signin",
+            "/v3/todohangeul/user",
+            "/v3/math/user",
+            "/v3/english/user",
+            $expectedPath
+        )
+        $expectedCyclePaths = @(
+            "/v3/account/signin",
+            "/v3/todohangeul/user",
+            "/v3/math/user",
+            "/v3/english/user",
+            $expectedPath
+        )
+        if ($cyclePaths.Count -ne $cycleSequences.Count -or
+            ($cyclePaths -join "|") -ne ($expectedCyclePaths -join "|") -or
+            $cycleReportPaths.Count -ne 1 -or
+            $cycleReportPaths[0] -ne $expectedPath -or
+            @($cyclePaths | Where-Object { $_ -notin $allowedCyclePaths }).Count -gt 0) {
+            throw "Ticket 03 poll cycle $index included another subject report or an unexpected request origin: $($poll | ConvertTo-Json -Compress -Depth 5)"
+        }
+        for ($cycleIndex = 0; $cycleIndex -lt $cyclePaths.Count; $cycleIndex++) {
+            $cycleRequest = $requestBySequence[[string]$cycleSequences[$cycleIndex]]
+            if (-not $cycleRequest -or $cycleRequest.path -ne $cyclePaths[$cycleIndex]) {
+                throw "Ticket 03 poll cycle request sequence $($cycleSequences[$cycleIndex]) does not match the recorded server window."
+            }
+        }
+        $request = $requestBySequence[[string]$poll.requestSequence]
+        if (-not $request -or
+            $request.path -ne $expectedPath -or
+            $request.method -ne "POST" -or
+            [int]$request.responseStatus -ne 200 -or
+            [int]$request.servedReportCount -ne $expectedCounts[$index] -or
+            $request.body.userId -ne $reportUserIds[$expectedPath] -or
+            $request.headers.authorization -ne "Bearer ticket01-fake-token") {
+            throw "Ticket 03 periodic request $($poll.requestSequence) did not match the expected fake child/subject response."
+        }
+        if ([int]$request.body.yyyymmdd -ne $expectedSeoulDate -or $request.body.languageCode -ne "ko") {
+            throw "Ticket 03 request $($request.sequence) used a non-Seoul date or language."
+        }
+        $receivedAt = [DateTimeOffset]::Parse($request.receivedAt)
+        if ($lastReceivedAt) {
+            $gap = ($receivedAt - $lastReceivedAt).TotalMilliseconds
+            if ($gap -lt 58000 -or $gap -gt 180000) {
+                throw "Ticket 03 poll requests were not separated by the configured one-minute cadence: $gap ms."
+            }
+        }
+        $lastReceivedAt = $receivedAt
+    }
+
+    $expectedBaselinePaths = @(
+        "/v3/account/signin",
+        "/v3/todohangeul/user",
+        "/v3/math/user",
+        "/v3/english/user",
+        "/v3/todoschool/report/daily/hangeul",
+        "/v3/todoschool/report/daily/math",
+        "/v3/todoschool/report/daily/english"
+    )
+    $baseline = @($result.baselineRequests)
+    $baselinePaths = @($baseline | ForEach-Object { [string]$_.path })
+    if ($baseline.Count -ne $expectedBaselinePaths.Count -or ($baselinePaths -join "|") -ne ($expectedBaselinePaths -join "|")) {
+        throw "Ticket 03 did not finish the complete initial sign-in, catalog, and report baseline before the periodic observation window."
+    }
+    $observationStartSequence = [int64]$result.observationStartSequence
+    $serverBaseline = @($Snapshot.requests | Where-Object { [int64]$_.sequence -le $observationStartSequence })
+    if ($observationStartSequence -ne $baseline.Count -or $serverBaseline.Count -ne $baseline.Count -or
+        (@($serverBaseline | ForEach-Object { [string]$_.path }) -join "|") -ne ($expectedBaselinePaths -join "|")) {
+        throw "Ticket 03 observation start did not follow the exact server-recorded initial baseline."
+    }
+    foreach ($entry in $baseline) {
+        if ([int]$entry.responseStatus -ne 200) { throw "Ticket 03 baseline request failed: $($entry | ConvertTo-Json -Compress -Depth 5)" }
+        if ($entry.path -like "/v3/todoschool/report/daily/*" -and
+            ([int]$entry.servedReportCount -ne 2 -or $entry.body.userId -notin @("ticket01-hangeul", "ticket01-math", "ticket01-english"))) {
+            throw "Ticket 03 initial baseline did not leave every subscribed subject below its configured target."
+        }
+    }
+
+    foreach ($transition in @("afterCompletion", "home", "other_app", "no_registered_children")) {
+        $window = @($result.observationWindows | Where-Object { $_.transition -eq $transition })
+        if ($window.Count -gt 0) {
+            foreach ($entry in $window) {
+                $transitionEvents = @($entry.foregroundEventsDuringTransition)
+                $targetTransition = @($transitionEvents | Where-Object { [int64]$_.sequence -eq [int64]$entry.expectedForegroundEventSequence })
+                $stableTransitionEvents = @($transitionEvents | Where-Object { [int64]$_.sequence -le [int64]$entry.foregroundEventSequenceAtWindowStart })
+                $latestStableTransitionEvent = @($stableTransitionEvents | Sort-Object { [int64]$_.sequence } | Select-Object -Last 1)
+                if ([int64]$entry.durationMs -lt 65000 -or [int]$entry.sampleCount -lt 60 -or
+                    [int64]$entry.serverSequenceBefore -ne [int64]$entry.serverSequenceAfter -or
+                    [int64]$entry.inFlightRequestsBefore -ne 0 -or
+                    [int64]$entry.inFlightRequestsAfter -ne 0 -or
+                    [int64]$entry.requestSequenceCursorAtWindowStart -ne [int64]$entry.serverSequenceBefore -or
+                    [int64]$entry.inFlightRequestsAtWindowStart -ne 0 -or
+                    -not $entry.serviceLeaseAttachedAtWindowStart -or
+                    $entry.activeWindowPackageAtWindowStart -ne $entry.foregroundPackage -or
+                    [int64]$entry.foregroundSnapshotCapturedAtElapsedRealtimeMs -gt [int64]$entry.requestSnapshotCapturedAtElapsedRealtimeMs -or
+                    @($entry.requestsDuringTransition).Count -ne 0 -or
+                    @($entry.requestsDuringTransitionSequences).Count -ne 0 -or
+                    $transitionEvents.Count -eq 0 -or $targetTransition.Count -ne 1 -or
+                    $targetTransition[0].packageName -ne $entry.foregroundPackage -or
+                    $stableTransitionEvents.Count -eq 0 -or
+                    $latestStableTransitionEvent.Count -ne 1 -or
+                    [int64]$latestStableTransitionEvent[0].sequence -ne [int64]$entry.foregroundEventSequenceAtWindowStart -or
+                    $latestStableTransitionEvent[0].packageName -ne $entry.foregroundPackage -or
+                    @($transitionEvents | Where-Object { [int64]$_.sequence -gt [int64]$entry.foregroundEventSequenceAtWindowStart }).Count -gt 0 -or
+                    [int64]$entry.foregroundEventSequenceAtWindowEnd -lt [int64]$entry.foregroundEventSequenceAtWindowStart -or
+                    [int64]$entry.expectedForegroundEventSequence -gt [int64]$entry.foregroundEventSequenceAtWindowStart -or
+                    @($entry.foregroundEventsObservedDuringWindow | Where-Object { $_.packageName -ne $entry.foregroundPackage }).Count -gt 0 -or
+                    @($entry.foregroundPackagesObservedDuringWindow | Where-Object { $_ -ne $entry.foregroundPackage }).Count -gt 0 -or
+                    -not $entry.serviceLeaseAttachedAtEnd) {
+                    throw "Ticket 03 observed a new or in-flight request during ${transition}: $($entry | ConvertTo-Json -Compress -Depth 5)"
+                }
+            }
+        }
+    }
+    foreach ($transition in @("afterCompletion", "home", "other_app", "no_registered_children")) {
+        if (@($result.observationWindows | Where-Object { $_.transition -eq $transition }).Count -ne 1) {
+            throw "Ticket 03 omitted its $transition no-request observation window."
+        }
+    }
+
+    $requestPath = Join-Path $artifactDirectory "server-requests.json"
+    $Snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $requestPath -Encoding utf8
+    $resultPath = Join-Path $artifactDirectory "ticket03-result.json"
+    $result | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $resultPath -Encoding utf8
+    Write-Host "PASS Ticket 03: six one-minute reports followed the real foreground subject; completion, Home, Settings, and zero-registration windows had no periodic requests."
+    Write-Host "Request evidence: $requestPath"
+    Write-Host "Android evidence: $resultPath"
 }
 
 function Assert-ServerRoundTrip($Snapshot) {
@@ -490,7 +749,7 @@ try {
     if ($debugPackageBefore) { Write-Host "Existing isolated debug package is installed at: $debugPackageBefore" }
 
     if ($RunPrepared) {
-        Write-Host "Ticket 02 prepared-run mode: reusing the installed APKs without rebuilding or reinstalling the product app."
+        Write-Host "Prepared observer-run mode: reusing the installed APKs without rebuilding or reinstalling the product app."
         $gradleTasks = @()
     } elseif ($PrepareDevice) {
         $gradleTasks = @(
@@ -503,13 +762,13 @@ try {
             ":e2eobserver:assembleDebug",
             ":e2eobserver:assembleDebugAndroidTest"
         )
-        $gradleLogName = "ticket02-device-preparation-build.log"
+        $gradleLogName = "observer-device-preparation-build.log"
     } elseif ($RefreshObserver) {
         $gradleTasks = @(
             ":e2eobserver:assembleDebug",
             ":e2eobserver:assembleDebugAndroidTest"
         )
-        $gradleLogName = "ticket02-observer-refresh-build.log"
+        $gradleLogName = "observer-refresh-build.log"
     } elseif ($DeviceOnly) {
         $gradleTasks = @(
             ":app:assembleDebug",
@@ -517,7 +776,7 @@ try {
             ":app:assembleE2e",
             ":app:assembleRelease"
         )
-        if ($Scenario -eq "ticket02") { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
+        if ($usesExternalObserver) { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
         $gradleLogName = "device-apk-build.log"
     } else {
         $gradleTasks = @(
@@ -530,7 +789,7 @@ try {
             ":app:lintDebug",
             ":app:lintRelease"
         )
-        if ($Scenario -eq "ticket02") { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
+        if ($usesExternalObserver) { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
         $gradleLogName = "build-and-unit-tests.log"
     }
     if ($gradleTasks.Count -gt 0) { Invoke-Gradle $gradleTasks $gradleLogName }
@@ -544,9 +803,9 @@ try {
     foreach ($apk in @($debugApk, $testApk, $releaseApk, $e2eApk)) {
         if (-not (Test-Path -LiteralPath $apk)) { throw "Expected APK was not built: $apk" }
     }
-    if (($Scenario -eq "ticket02" -or $PrepareDevice -or $RunPrepared) -and
+    if (($usesExternalObserver -or $PrepareDevice -or $RunPrepared -or $RefreshObserver) -and
         (-not (Test-Path -LiteralPath $observerApk) -or -not (Test-Path -LiteralPath $observerTestApk))) {
-        throw "Ticket 02 observer APKs are missing; prepare them with -PrepareDevice first."
+        throw "External observer APKs are missing; build them or run -PrepareDevice first."
     }
 
     $debugBadging = (& $aaptPath dump badging $debugApk 2>&1) -join "`n"
@@ -570,12 +829,12 @@ try {
     if ($e2eBadging -notmatch "package: name='$([regex]::Escape($e2eApplicationId))'") {
         throw "Existing E2E APK package identity changed."
     }
-    if ($Scenario -eq "ticket02" -and
+    if ($usesExternalObserver -and
         ($observerBadging -notmatch "package: name='com.example.todoschooltime.e2eobserver'" -or
          $observerTestBadging -notmatch "package: name='com.example.todoschooltime.e2eobserver.test'")) {
-        throw "Ticket 02 observer APK package identities are unexpected."
+        throw "External observer APK package identities are unexpected."
     }
-    if ($Scenario -eq "ticket02") {
+    if ($usesExternalObserver) {
         $debugSigner = Get-ApkSignerFingerprint $debugApk
         $observerSigner = Get-ApkSignerFingerprint $observerApk
         $observerTestSigner = Get-ApkSignerFingerprint $observerTestApk
@@ -586,20 +845,20 @@ try {
     }
     $releaseManifest = (& $aaptPath dump xmltree $releaseApk AndroidManifest.xml 2>&1) -join "`n"
     $debugManifest = (& $aaptPath dump xmltree $debugApk AndroidManifest.xml 2>&1) -join "`n"
-    $observerManifest = if ($Scenario -eq "ticket02") { (& $aaptPath dump xmltree $observerApk AndroidManifest.xml 2>&1) -join "`n" } else { "" }
+    $observerManifest = if ($usesExternalObserver) { (& $aaptPath dump xmltree $observerApk AndroidManifest.xml 2>&1) -join "`n" } else { "" }
     if ($releaseManifest -match "android:networkSecurityConfig") {
         throw "Release APK unexpectedly includes the debug network security configuration."
     }
     if ($releaseManifest -match "LearningMonitorDiagnosticsProvider|READ_MONITOR_DIAGNOSTICS|monitor-diagnostics") {
         throw "Release APK unexpectedly includes the debug-only diagnostics provider or permission."
     }
-    if ($Scenario -eq "ticket02" -and
+    if ($usesExternalObserver -and
         ($debugManifest -notmatch "LearningMonitorDiagnosticsProvider" -or
          $debugManifest -notmatch "READ_MONITOR_DIAGNOSTICS" -or
          $debugManifest -notmatch "protectionLevel.*0x2")) {
         throw "Debug APK is missing its signature-protected read-only diagnostics provider."
     }
-    if ($Scenario -eq "ticket02" -and
+    if ($usesExternalObserver -and
         ($observerManifest -notmatch "E: queries[\s\S]*?E: package[\s\S]*?com\.example\.todoschooltime\.debug" -or
          $observerManifest -notmatch "com\.enuma\.todohangeul" -or
          $observerManifest -notmatch "com\.enuma\.todoenglish" -or
@@ -607,9 +866,9 @@ try {
          $observerManifest -notmatch "READ_MONITOR_DIAGNOSTICS" -or
          $observerManifest -notmatch "android:networkSecurityConfig" -or
          $observerManifest -notmatch "android:usesCleartextTraffic.*\(type 0x12\)0x0")) {
-        throw "Ticket 02 observer APK must query the debug and subject packages, request its diagnostics signature permission, and deny cleartext by default."
+        throw "External observer APK must query the debug and subject packages, request its diagnostics signature permission, and deny cleartext by default."
     }
-    if ($Scenario -eq "ticket02") {
+    if ($usesExternalObserver) {
         Write-Host "PASS observer manifest declares visibility for the debug and subject packages, requests its signature permission, and denies cleartext by default."
     }
     if ($debugManifest -notmatch "android:networkSecurityConfig") {
@@ -636,17 +895,17 @@ try {
     if ($e2ePermissions -match "android.permission.INTERNET") {
         throw "The existing fake E2E APK unexpectedly regained INTERNET permission."
     }
-    if ($Scenario -eq "ticket02") {
+    if ($usesExternalObserver) {
         $observerPermissions = (& $aaptPath dump permissions $observerApk 2>&1) -join "`n"
         if ($observerPermissions -notmatch "android.permission.INTERNET") {
-            throw "Ticket 02 observer APK needs INTERNET permission to call only the host-mapped loopback fixture."
+            throw "External observer APK needs INTERNET permission to call only the host-mapped loopback fixture."
         }
         $observerNetworkConfig = (& $aaptPath dump xmltree $observerApk "res/xml/ticket02_network_security_config.xml" 2>&1) -join "`n"
         if ($observerNetworkConfig -notmatch "E: base-config[\s\S]*?cleartextTrafficPermitted.*0x0" -or
             $observerNetworkConfig -notmatch "E: domain-config[\s\S]*?cleartextTrafficPermitted.*0xffffffff" -or
             $observerNetworkConfig -notmatch 'C: "127\.0\.0\.1"' -or
             $observerNetworkConfig -notmatch "includeSubdomains.*0x0") {
-            throw "Ticket 02 observer APK must allow cleartext only to 127.0.0.1 for the temporary fixture."
+            throw "External observer APK must allow cleartext only to 127.0.0.1 for the temporary fixture."
         }
         Write-Host "PASS observer network access is limited to cleartext loopback fixture traffic."
     }
@@ -655,11 +914,12 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Debug/release API URL artifact inspection failed." }
     Write-Host "PASS debug and release APK settings; existing fake E2E app ID and no-INTERNET boundary remain intact."
 
+    # Ticket 03 intentionally reuses Ticket 02's prepared package identities and product APK.
     $preparedDeviceDirectory = Join-Path $repositoryRoot "build\e2e-ticket02"
     $preparedDeviceManifestPath = Join-Path $preparedDeviceDirectory "prepared-device.json"
     if ($RefreshObserver) {
         if (-not (Test-Path -LiteralPath $preparedDeviceManifestPath)) {
-            throw "No prepared Ticket 02 installation was found. Run -PrepareDevice once before -RefreshObserver."
+            throw "No prepared external-observer installation was found. Run Ticket 02 preparation once before -RefreshObserver."
         }
         $prepared = Get-Content -LiteralPath $preparedDeviceManifestPath -Raw | ConvertFrom-Json
         if ($prepared.applicationId -ne $debugApplicationId -or
@@ -697,7 +957,7 @@ try {
         $prepared.observerTestApkSha256 = Get-ApkSha256 $observerTestApk
         $prepared | Add-Member -NotePropertyName observerRefreshedAtUtc -NotePropertyValue ([DateTimeOffset]::UtcNow.ToString("O")) -Force
         $prepared | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $preparedDeviceManifestPath -Encoding utf8
-        Write-Host "Ticket 02 observer APKs were refreshed; product APK was not reinstalled. Product service PID $($before.pid) remained bound. Observer installs updated=$observerNeedsInstall, observer-test install updated=$observerTestNeedsInstall."
+        Write-Host "External observer APKs were refreshed; product APK was not reinstalled. Product service PID $($before.pid) remained bound. Observer installs updated=$observerNeedsInstall, observer-test install updated=$observerTestNeedsInstall."
         Write-Host "Preparation manifest: $preparedDeviceManifestPath"
         return
     }
@@ -718,14 +978,14 @@ try {
             preparedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
         }
         $prepared | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $preparedDeviceManifestPath -Encoding utf8
-        Write-Host "Ticket 02 APKs are installed and verified. Accessibility reconnect requires the human's settings action; no scenario ran and the local server was not started."
+        Write-Host "Observer scenario APKs are installed and verified. Accessibility reconnect requires the human's settings action; no scenario ran and the local server was not started."
         Write-Host "Preparation manifest: $preparedDeviceManifestPath"
         return
     }
 
     if ($RunPrepared) {
         if (-not (Test-Path -LiteralPath $preparedDeviceManifestPath)) {
-            throw "No prepared Ticket 02 installation was found. Run Run-Ticket02.ps1 -PrepareDevice, then restore accessibility manually."
+            throw "No prepared observer installation was found. Prepare Ticket 02 once, then restore accessibility manually."
         }
         $prepared = Get-Content -LiteralPath $preparedDeviceManifestPath -Raw | ConvertFrom-Json
         if ($prepared.applicationId -ne $debugApplicationId -or
@@ -733,12 +993,12 @@ try {
             $prepared.observerTestApplicationId -ne $observerTestApplicationId -or
             $prepared.deviceSerial -ne $DeviceSerial -or
             $prepared.apiBaseUrl -ne $apiBaseUrl) {
-            throw "Prepared Ticket 02 APKs do not match the selected device or loopback server configuration. Re-run -PrepareDevice."
+            throw "Prepared observer APKs do not match the selected device or loopback server configuration."
         }
         if ($prepared.debugApkSha256 -ne (Get-ApkSha256 $debugApk) -or
             $prepared.observerApkSha256 -ne (Get-ApkSha256 $observerApk) -or
             $prepared.observerTestApkSha256 -ne (Get-ApkSha256 $observerTestApk)) {
-            throw "Ticket 02 APK build outputs changed after preparation. Re-run -PrepareDevice and reconnect accessibility manually."
+            throw "Prepared APK build outputs changed. Refresh only the observer when the product APK hash still matches; otherwise stop for manual recovery."
         }
         Assert-InstalledApkEquals $debugApplicationId $debugApk "installed-debug.apk" | Out-Null
         Assert-InstalledApkEquals $observerApplicationId $observerApk "installed-observer.apk" | Out-Null
@@ -766,7 +1026,11 @@ try {
             throw "Temporary server exited before becoming ready. See $serverErrorLog"
         }
         try {
-            $healthPath = if ($Scenario -eq "ticket02") { "/__ticket02/health" } else { "/__ticket01/health" }
+            $healthPath = switch ($Scenario) {
+                "ticket02" { "/__ticket02/health"; break }
+                "ticket03" { "/__ticket03/health"; break }
+                default { "/__ticket01/health" }
+            }
             $health = Invoke-RestMethod -Uri "$apiBaseUrl$healthPath" -TimeoutSec 2
             if ($health.ok -and $health.runId -eq $runId -and $health.scenario -eq $Scenario) { $serverReady = $true; break }
         } catch { }
@@ -802,7 +1066,12 @@ try {
     if ($Scenario -eq "ticket02") {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.Ticket02BaselineCompletionTest"
-        $instrumentationText = Invoke-Ticket02Observer $apiBaseUrl $runId $instrumentationComponent $testClass
+        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket02E2E" 6
+        $instrumentationOutput = @($instrumentationText -split "`r?`n")
+    } elseif ($Scenario -eq "ticket03") {
+        $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
+        $testClass = "com.example.todoschooltime.e2eobserver.Ticket03ForegroundPollingTest"
+        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket03E2E" 22
         $instrumentationOutput = @($instrumentationText -split "`r?`n")
     } else {
         Invoke-SelectedAdb @("install", "-r", $debugApk) | Out-Null
@@ -821,7 +1090,11 @@ try {
     $instrumentationLog = Join-Path $artifactDirectory "connected-device-test.log"
     $instrumentationOutput | Set-Content -LiteralPath $instrumentationLog -Encoding utf8
     if ($instrumentationText -notmatch "OK \(1 test\)" -or $instrumentationText -match "FAILURES!!!|INSTRUMENTATION_FAILED") {
-        $testDescription = if ($Scenario -eq "ticket02") { "Ticket 02 external observer test" } else { "Ticket 01 server-screen test" }
+        $testDescription = switch ($Scenario) {
+            "ticket02" { "Ticket 02 external observer test"; break }
+            "ticket03" { "Ticket 03 foreground-polling observer test"; break }
+            default { "Ticket 01 server-screen test" }
+        }
         throw "$testDescription did not report one passing test. See $instrumentationLog"
     }
 
@@ -830,6 +1103,8 @@ try {
     if ($null -ne $snapshot) { $snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $snapshotPath -Encoding utf8 }
     if ($Scenario -eq "ticket02") {
         Assert-Ticket02BaselineCompletion $snapshot $instrumentationText
+    } elseif ($Scenario -eq "ticket03") {
+        Assert-Ticket03ForegroundPolling $snapshot $instrumentationText
     } else {
         Assert-ServerRoundTrip $snapshot
         Save-AppScreenshot

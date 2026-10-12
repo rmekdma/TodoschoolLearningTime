@@ -33,7 +33,11 @@ class FixtureState:
         self.lock = threading.Lock()
         self.sequence = 0
         self.requests: list[dict[str, Any]] = []
-        self.report_counts = {subject: details[3] for subject, details in SUBJECTS.items()}
+        self.report_counts = (
+            {subject: 2 for subject in SUBJECTS}
+            if scenario == "ticket03"
+            else {subject: details[3] for subject, details in SUBJECTS.items()}
+        )
 
     def record(self, path: str, body_text: str, body: Any, headers: dict[str, str]) -> dict[str, Any]:
         with self.lock:
@@ -79,6 +83,11 @@ class FixtureState:
                 "sequence": self.sequence,
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
+                "inFlightRequests": [
+                    {"sequence": request["sequence"], "path": request["path"]}
+                    for request in self.requests
+                    if request["responseStatus"] is None
+                ],
             }
 
 
@@ -127,6 +136,12 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
             if self.path == "/__ticket02/state" and state.scenario == "ticket02":
                 self._send_json(200, state.snapshot())
                 return
+            if self.path == "/__ticket03/health" and state.scenario == "ticket03":
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
+                return
+            if self.path == "/__ticket03/state" and state.scenario == "ticket03":
+                self._send_json(200, state.snapshot())
+                return
             self._send_json(404, {"error": "unknown path"})
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -145,6 +160,31 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 return
 
             if state.scenario == "ticket02" and self.path == "/__ticket02/set-report-counts":
+                reports = body.get("reports") if isinstance(body, dict) else None
+                if not isinstance(reports, dict) or not reports:
+                    self._send_json(400, {"error": "reports must be a non-empty object"})
+                    return
+                valid_updates: dict[str, int] = {}
+                for subject, count in reports.items():
+                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
+                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
+                        return
+                    valid_updates[subject] = count
+                report_counts, after_sequence = state.set_report_counts(valid_updates)
+                self._send_json(200, {
+                    "ok": True,
+                    "runId": state.run_id,
+                    "reportCounts": report_counts,
+                    "afterRequestSequence": after_sequence,
+                })
+                return
+
+            if state.scenario == "ticket03" and self.path == "/__ticket03/reset-requests":
+                state.reset_requests()
+                self._send_json(200, {"ok": True, "runId": state.run_id})
+                return
+
+            if state.scenario == "ticket03" and self.path == "/__ticket03/set-report-counts":
                 reports = body.get("reports") if isinstance(body, dict) else None
                 if not isinstance(reports, dict) or not reports:
                     self._send_json(400, {"error": "reports must be a non-empty object"})
@@ -226,7 +266,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--scenario", choices=("ticket01", "ticket02"), default="ticket01")
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")
