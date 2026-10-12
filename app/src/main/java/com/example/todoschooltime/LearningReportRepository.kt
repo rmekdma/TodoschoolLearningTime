@@ -105,6 +105,10 @@ class LearningReportRepository internal constructor(
 ) : MonitorRepository, CancellableMonitorRepository {
     constructor() : this(UrlConnectionLearningHttpTransport())
 
+    internal constructor(diagnostics: LearningMonitorDiagnostics) : this(
+        UrlConnectionLearningHttpTransport(diagnostics = diagnostics),
+    )
+
     private data class SubjectEndpoint(
         val name: String,
         val usersPath: String,
@@ -314,6 +318,7 @@ class LearningReportRepository internal constructor(
 
 private class UrlConnectionLearningHttpTransport(
     private val apiBaseUrl: String = BuildConfig.API_BASE_URL,
+    private val diagnostics: LearningMonitorDiagnostics? = null,
 ) : LearningHttpTransport {
     override fun post(path: String, body: JSONObject, token: String?): LearningHttpResponse {
         return post(path, body, token, LearningRequestCancellation())
@@ -339,6 +344,8 @@ private class UrlConnectionLearningHttpTransport(
 
         try {
             cancellation.throwIfCancelled()
+            // Record on the device elapsed-realtime axis immediately before the real HTTP body dispatch.
+            runCatching { diagnostics?.httpRequestDispatching(path) }
             connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
             val statusCode = connection.responseCode
             val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream

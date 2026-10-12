@@ -40,6 +40,7 @@ class Ticket03ForegroundPollingTest {
         val launchRequestedAtElapsedRealtimeMs: Long? = null,
         val foregroundEventObservedAtUtc: String? = null,
         val foregroundEventObservedAtElapsedRealtimeMs: Long? = null,
+        val foregroundCallbackAtElapsedRealtimeMs: Long? = null,
     )
 
     private data class ForegroundEventObservation(
@@ -47,6 +48,7 @@ class Ticket03ForegroundPollingTest {
         val sequence: Long,
         val observedAtUtc: String,
         val observedAtElapsedRealtimeMs: Long,
+        val callbackAtElapsedRealtimeMs: Long,
         val activeWindowPackage: String,
     )
 
@@ -269,6 +271,7 @@ class Ticket03ForegroundPollingTest {
             HANGEUL_APP_PACKAGE,
             pollRecords.last().getLong("foregroundEventSequence"),
             pollRecords.last().getLong("foregroundEventSequence") - 1,
+            foregroundCallbackAtElapsedRealtimeMs = pollRecords.last().getLong("foregroundCallbackAtElapsedRealtimeMs"),
         )
         val afterCompletion = awaitNoReportsForDuration(
             automation = automation,
@@ -307,6 +310,7 @@ class Ticket03ForegroundPollingTest {
             .put("launchRequestedAtUtc", homeForeground.launchRequestedAtUtc)
             .put("launchRequestedAtElapsedRealtimeMs", homeForeground.launchRequestedAtElapsedRealtimeMs)
             .put("foregroundEventSequence", homeForeground.eventSequence)
+            .put("foregroundCallbackAtElapsedRealtimeMs", homeForeground.foregroundCallbackAtElapsedRealtimeMs)
             .put("foregroundEventObservedAtUtc", homeForeground.foregroundEventObservedAtUtc)
             .put("foregroundEventObservedAtElapsedRealtimeMs", homeForeground.foregroundEventObservedAtElapsedRealtimeMs)
             .put("activeWindowPackageAtForegroundEventObservation", homeForeground.packageName)
@@ -325,7 +329,9 @@ class Ticket03ForegroundPollingTest {
             registeredChildren = setOf(CHILD_NAME), foregroundTransition = settingsForeground,
             requestSequenceBeforeTransition = pollRecords.last().getLong("requestSequence"),
             expectedSequence = pollRecords.last().getLong("requestSequence"), expectedSeoulDate = startDate,
-        ).put("foregroundEventSequence", settingsForeground.eventSequence).put("transition", "other_app")
+        ).put("foregroundEventSequence", settingsForeground.eventSequence)
+            .put("foregroundCallbackAtElapsedRealtimeMs", settingsForeground.foregroundCallbackAtElapsedRealtimeMs)
+            .put("transition", "other_app")
         windows += settingsWindow
 
         openProductApp(instrumentation)
@@ -359,6 +365,7 @@ class Ticket03ForegroundPollingTest {
             requestSequenceBeforeTransition = noRegistrationStartSequence,
             expectedSequence = noRegistrationStartSequence, expectedSeoulDate = startDate,
         ).put("foregroundEventSequence", noRegistrationForeground.eventSequence)
+            .put("foregroundCallbackAtElapsedRealtimeMs", noRegistrationForeground.foregroundCallbackAtElapsedRealtimeMs)
             .put("transition", "no_registered_children")
         windows += noRegistrationWindow
         val finalState = readProductState(context)
@@ -390,6 +397,8 @@ class Ticket03ForegroundPollingTest {
             .put("noRegistrationNewReportCount", 0)
             .put("serviceLeaseAttached", finalState.getBoolean("serviceLeaseAttached"))
             .put("foregroundEvents", finalState.getJSONArray("foregroundEvents"))
+            .put("httpRequestDispatchCursor", finalState.getLong("httpRequestDispatchCursor"))
+            .putJsonArray("httpRequestDispatchEvents", finalState.getJSONArray("httpRequestDispatchEvents").objects())
             .put("silentChannelPrepared", true)
             .put("notificationChannelImportance", channel.getInt("importance"))
             .put("notificationChannelHasSoundUri", channel.optString("soundUri") != "null")
@@ -426,6 +435,7 @@ class Ticket03ForegroundPollingTest {
         val foregroundCursor = lastSequence(beforeProduct.getJSONArray("foregroundEvents"))
         val cycleObservationStartedAtElapsedMs = SystemClock.elapsedRealtime()
         val cycleObservationStartedAtUtc = Instant.now().toString()
+        val requestDispatchCursorBeforeTransition = beforeProduct.getLong("httpRequestDispatchCursor")
 
         val foregroundTransition = launchActualSubjectApp(
             automation, context, subjectKey, foregroundCursor,
@@ -550,10 +560,26 @@ class Ticket03ForegroundPollingTest {
             expectedPackage,
             afterForegroundSequence = foregroundEventSequence - 1,
         )
+        val cycleDispatchEvents = appliedForeground.getJSONArray("httpRequestDispatchEvents").objects().filter {
+            it.getLong("sequence") > requestDispatchCursorBeforeTransition
+        }
+        assertEquals("The actual HTTP dispatches must match the server-recorded full monitor cycle", expectedCyclePaths, cycleDispatchEvents.map { it.getString("path") })
+        val reportDispatch = cycleDispatchEvents.single { it.getString("path") == path }
+        assertTrue("The foreground callback sequence was not current at report dispatch", reportDispatch.getLong("foregroundEventSequence") >= foregroundEventSequence)
+        assertEquals(expectedPackage, reportDispatch.getString("foregroundPackage"))
+        assertTrue("The target foreground callback occurred after the report HTTP dispatch", reportDispatch.getLong("foregroundEventElapsedRealtimeMs") >= foregroundTransition.foregroundCallbackAtElapsedRealtimeMs!!)
+        assertTrue("The report HTTP dispatch preceded its captured foreground callback", reportDispatch.getLong("foregroundEventElapsedRealtimeMs") <= reportDispatch.getLong("elapsedRealtimeMs"))
+        assertTrue("The product AccessibilityService lease was absent at report dispatch", reportDispatch.getBoolean("serviceLeaseAttached"))
+        val dispatchForegroundEvent = appliedForeground.getJSONArray("foregroundEvents").objects().single {
+            it.getLong("sequence") == reportDispatch.getLong("foregroundEventSequence")
+        }
+        assertEquals(reportDispatch.getString("foregroundPackage"), dispatchForegroundEvent.getString("packageName"))
+        assertEquals(reportDispatch.getLong("foregroundEventElapsedRealtimeMs"), dispatchForegroundEvent.getLong("elapsedRealtimeMs"))
         val record = JSONObject()
             .put("subject", subjectName)
             .put("packageName", SUBJECT_PACKAGES.getValue(subjectKey))
             .put("foregroundEventSequence", foregroundEventSequence)
+            .put("foregroundCallbackAtElapsedRealtimeMs", foregroundTransition.foregroundCallbackAtElapsedRealtimeMs)
             .put("foregroundEventCursorBefore", foregroundCursor)
             .put("appLaunchRequestedAtUtc", foregroundTransition.launchRequestedAtUtc)
             .put("appLaunchRequestedAtElapsedRealtimeMs", foregroundTransition.launchRequestedAtElapsedRealtimeMs)
@@ -563,6 +589,14 @@ class Ticket03ForegroundPollingTest {
             .put("foregroundEventsDuringTransition", observationStart.getJSONArray("foregroundEventsDuringTransition"))
             .put("foregroundEventSequenceAtWindowStart", observationStart.getLong("foregroundEventCursorAtWindowStart"))
             .put("requestSequenceBeforeTransition", requestSequenceBeforeTransition)
+            .put("requestDispatchCursorBeforeTransition", requestDispatchCursorBeforeTransition)
+            .putJsonArray("httpRequestDispatchEventsDuringCycle", cycleDispatchEvents)
+            .put("requestDispatchSequenceAtReport", reportDispatch.getLong("sequence"))
+            .put("requestDispatchElapsedRealtimeMsAtReport", reportDispatch.getLong("elapsedRealtimeMs"))
+            .put("foregroundEventSequenceAtReportDispatch", reportDispatch.getLong("foregroundEventSequence"))
+            .put("foregroundEventElapsedRealtimeMsAtReportDispatch", reportDispatch.getLong("foregroundEventElapsedRealtimeMs"))
+            .put("foregroundPackageAtReportDispatch", reportDispatch.getString("foregroundPackage"))
+            .put("serviceLeaseAttachedAtReportDispatch", reportDispatch.getBoolean("serviceLeaseAttached"))
             .put("requestSequenceAtForegroundEventObservation", serverAtForegroundEventObservation.getLong("sequence"))
             .put("inFlightRequestsAtForegroundEventObservation", serverAtForegroundEventObservation.getJSONArray("inFlightRequests").length())
             .put("eventObservationFixtureSnapshotStartedAtUtc", eventObservationSnapshotStartedAtUtc)
@@ -704,6 +738,9 @@ class Ticket03ForegroundPollingTest {
             .put("activeWindowPackageAtWindowStart", observationStart.getString("activeWindowPackageAtWindowStart"))
             .put("foregroundCursorBeforeTransition", foregroundTransition.cursorBeforeTransition)
             .put("foregroundEventSequence", foregroundTransition.eventSequence)
+            .put("foregroundCallbackAtElapsedRealtimeMs", foregroundTransition.foregroundCallbackAtElapsedRealtimeMs)
+            .put("requestDispatchCursorAtWindowStart", observationStart.getLong("requestDispatchCursorAtWindowStart"))
+            .put("requestDispatchCursorAtWindowEnd", finalProduct.getLong("httpRequestDispatchCursor"))
             .put("foregroundPackagesObservedDuringTransition", observationStart.getJSONArray("foregroundPackagesObservedDuringTransition"))
             .put("foregroundEventsDuringTransition", observationStart.getJSONArray("foregroundEventsDuringTransition"))
             .put("foregroundEventCursorAtWindowStart", foregroundCursor)
@@ -801,6 +838,7 @@ class Ticket03ForegroundPollingTest {
                             val serverConfirm = fixtureState(apiBaseUrl, runId)
                             val inFlightAtWindowStart = serverConfirm.getJSONArray("inFlightRequests").length()
                             if (serverConfirm.getLong("sequence") == serverBeforeConfirm.getLong("sequence") && inFlightAtWindowStart == 0) {
+                                val dispatchCursorAtWindowStart = readProductState(context).getLong("httpRequestDispatchCursor")
                                 val foregroundSnapshotElapsedMs = SystemClock.elapsedRealtime()
                                 val transitionEvents = confirmEvents.filter {
                                     it.getLong("sequence") > foregroundCursorBeforeTransition
@@ -814,6 +852,7 @@ class Ticket03ForegroundPollingTest {
                                     .put("foregroundEventSequence", foregroundEventSequence)
                                     .put("foregroundCursorBeforeTransition", foregroundCursorBeforeTransition)
                                     .put("foregroundEventCursorAtWindowStart", lastSequence(productConfirm.getJSONArray("foregroundEvents")))
+                                    .put("requestDispatchCursorAtWindowStart", dispatchCursorAtWindowStart)
                                     .putJsonArray("foregroundPackagesObservedDuringTransition", transitionEvents.map { it.getString("packageName") })
                                     .putJsonArray("foregroundEventsDuringTransition", transitionEvents)
                                     .put("requestSequenceBeforeTransition", requestSequenceBeforeTransition)
@@ -895,6 +934,7 @@ class Ticket03ForegroundPollingTest {
             launchRequestedAtElapsedRealtimeMs = launchRequestedAtElapsedRealtimeMs,
             foregroundEventObservedAtUtc = eventObservation.observedAtUtc,
             foregroundEventObservedAtElapsedRealtimeMs = eventObservation.observedAtElapsedRealtimeMs,
+            foregroundCallbackAtElapsedRealtimeMs = eventObservation.callbackAtElapsedRealtimeMs,
         )
     }
 
@@ -948,6 +988,7 @@ class Ticket03ForegroundPollingTest {
             launchRequestedAtElapsedRealtimeMs = launchRequestedAtElapsedRealtimeMs,
             foregroundEventObservedAtUtc = eventObservation.observedAtUtc,
             foregroundEventObservedAtElapsedRealtimeMs = eventObservation.observedAtElapsedRealtimeMs,
+            foregroundCallbackAtElapsedRealtimeMs = eventObservation.callbackAtElapsedRealtimeMs,
         )
     }
 
@@ -963,6 +1004,7 @@ class Ticket03ForegroundPollingTest {
             packageName = SETTINGS_PACKAGE,
             eventSequence = eventObservation.sequence,
             cursorBeforeTransition = cursor,
+            foregroundCallbackAtElapsedRealtimeMs = eventObservation.callbackAtElapsedRealtimeMs,
         )
     }
 
@@ -987,6 +1029,7 @@ class Ticket03ForegroundPollingTest {
                     sequence = event.getLong("sequence"),
                     observedAtUtc = Instant.now().toString(),
                     observedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
+                    callbackAtElapsedRealtimeMs = event.getLong("elapsedRealtimeMs"),
                     activeWindowPackage = activePackage.orEmpty(),
                 )
             }
@@ -1016,6 +1059,7 @@ class Ticket03ForegroundPollingTest {
                     observedAtUtc = Instant.now().toString(),
                     observedAtElapsedRealtimeMs = SystemClock.elapsedRealtime(),
                     activeWindowPackage = activePackage.orEmpty(),
+                    callbackAtElapsedRealtimeMs = event.getLong("elapsedRealtimeMs"),
                 )
             }
             SystemClock.sleep(POLL_INTERVAL_MS)

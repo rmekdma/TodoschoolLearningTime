@@ -81,6 +81,7 @@ internal class LearningMonitorRuntimeAdapter(
     fun serviceConnected() {
         refreshExecutionConditions()
         engine.attachServiceLease()
+        diagnostics?.serviceLeaseChanged(true)
         registerScreenReceiver()
         engine.screenOnChanged(isScreenInteractive())
         startPermissionProbe()
@@ -99,6 +100,7 @@ internal class LearningMonitorRuntimeAdapter(
         // Reading settings here keeps enabled-but-unbound distinct from a revoked setting.
         refreshExecutionConditions()
         engine.detachServiceLease()
+        diagnostics?.serviceLeaseChanged(false)
     }
 
     fun foregroundPackageChanged(packageName: String?) {

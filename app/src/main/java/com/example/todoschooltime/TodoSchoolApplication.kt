@@ -57,7 +57,7 @@ open class TodoSchoolApplication : Application() {
         learningMonitorScreenUseCases = monitorRuntime
     }
 
-    protected open fun createMonitorRepository(): MonitorRepository = LearningReportRepository()
+    protected open fun createMonitorRepository(): MonitorRepository = LearningReportRepository(learningMonitorDiagnostics)
 
     protected open fun createMonitorClock(): MonitorClock = object : MonitorClock {
         override fun today() = DateHelper.today()

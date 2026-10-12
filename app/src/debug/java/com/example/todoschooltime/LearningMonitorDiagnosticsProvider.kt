@@ -68,7 +68,26 @@ class LearningMonitorDiagnosticsProvider : ContentProvider() {
         }
         val foreground = JSONArray()
         diagnostics.foregroundEventsAfter(0L).forEach { event ->
-            foreground.put(JSONObject().put("sequence", event.sequence).put("packageName", event.packageName ?: JSONObject.NULL))
+            foreground.put(
+                JSONObject()
+                    .put("sequence", event.sequence)
+                    .put("packageName", event.packageName ?: JSONObject.NULL)
+                    .put("elapsedRealtimeMs", event.elapsedRealtimeMs),
+            )
+        }
+        val httpRequestDispatches = JSONArray()
+        diagnostics.httpRequestDispatchEventsAfter(0L).forEach { event ->
+            httpRequestDispatches.put(
+                JSONObject()
+                    .put("sequence", event.sequence)
+                    .put("path", event.path)
+                    .put("elapsedRealtimeMs", event.elapsedRealtimeMs)
+                    .put("foregroundEventSequence", event.foregroundEventSequence)
+                    .put("foregroundPackage", event.foregroundPackage ?: JSONObject.NULL)
+                    .put("foregroundEventElapsedRealtimeMs", event.foregroundEventElapsedRealtimeMs)
+                    .put("serviceLeaseAttached", event.serviceLeaseAttached)
+                    .put("serviceLeaseObservedAtElapsedRealtimeMs", event.serviceLeaseObservedAtElapsedRealtimeMs),
+            )
         }
         val notificationManager = appContextOrThrow().getSystemService(NotificationManager::class.java)
         val activeNotifications = JSONArray()
@@ -108,6 +127,8 @@ class LearningMonitorDiagnosticsProvider : ContentProvider() {
             .put("children", children)
             .put("notificationEvents", notifications)
             .put("foregroundEvents", foreground)
+            .put("httpRequestDispatchCursor", diagnostics.httpRequestDispatchCursor())
+            .put("httpRequestDispatchEvents", httpRequestDispatches)
             .put("activeNotifications", activeNotifications)
             .put("channel", channelJson)
     }

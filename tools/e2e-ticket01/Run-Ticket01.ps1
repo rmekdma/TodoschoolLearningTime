@@ -286,6 +286,25 @@ function Read-ServerRequests {
 
 function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationText) {
     if ($null -eq $Snapshot) { throw "The temporary server request log is unavailable." }
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket03/ResultSchema.psm1") -Force
+    Assert-Ticket03ScalarFields $Snapshot @{
+        runId = "string"
+        scenario = "string"
+        sequence = "integer"
+        reportCounts = "object"
+    } "server snapshot"
+    Assert-Ticket03JsonArrayFields $Snapshot @("requests", "inFlightRequests") "server snapshot"
+    Assert-Ticket03ScalarFields $Snapshot.reportCounts @{
+        hangeul = "integer"
+        math = "integer"
+        english = "integer"
+    } "server snapshot.reportCounts"
+    foreach ($serverRequest in @($Snapshot.requests)) {
+        Assert-Ticket03ServerRequestScalars $serverRequest "server snapshot request"
+    }
+    foreach ($request in @($Snapshot.inFlightRequests)) {
+        Assert-Ticket03ScalarFields $request @{ sequence = "integer"; path = "string" } "server snapshot in-flight request"
+    }
     if ($Snapshot.runId -ne $runId -or $Snapshot.scenario -ne "ticket03") {
         throw "Connected to a server with the wrong Ticket 03 run identity."
     }
@@ -296,8 +315,8 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
     $resultMatch = [regex]::Match($InstrumentationText, 'TICKET03_RESULT=(\{[^\r\n]+\})')
     if (-not $resultMatch.Success) { throw "Observer instrumentation omitted structured Ticket 03 evidence." }
     $result = $resultMatch.Groups[1].Value | ConvertFrom-Json
-    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket03/ResultSchema.psm1") -Force
     Assert-Ticket03ResultArrayShapes $result
+    Assert-Ticket03ResultScalarShapes $result
     $expectedPaths = @(
         "/v3/todoschool/report/daily/hangeul",
         "/v3/todoschool/report/daily/math",
@@ -396,13 +415,6 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
         $cyclePaths = @($poll.requestCyclePaths)
         $cycleSequences = @($poll.requestCycleSequences)
         $cycleReportPaths = @($cyclePaths | Where-Object { $_ -like "/v3/todoschool/report/daily/*" })
-        $allowedCyclePaths = @(
-            "/v3/account/signin",
-            "/v3/todohangeul/user",
-            "/v3/math/user",
-            "/v3/english/user",
-            $expectedPath
-        )
         $expectedCyclePaths = @(
             "/v3/account/signin",
             "/v3/todohangeul/user",
@@ -413,10 +425,10 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
         if ($cyclePaths.Count -ne $cycleSequences.Count -or
             ($cyclePaths -join "|") -ne ($expectedCyclePaths -join "|") -or
             $cycleReportPaths.Count -ne 1 -or
-            $cycleReportPaths[0] -ne $expectedPath -or
-            @($cyclePaths | Where-Object { $_ -notin $allowedCyclePaths }).Count -gt 0) {
+            $cycleReportPaths[0] -ne $expectedPath) {
             throw "Ticket 03 poll cycle $index included another subject report or an unexpected request origin: $($poll | ConvertTo-Json -Compress -Depth 5)"
         }
+        Assert-Ticket03DispatchCycle $poll $expectedCyclePaths $expectedPath $expectedPackages[$index] ([int64]$poll.foregroundCallbackAtElapsedRealtimeMs) "poll cycle $index"
         for ($cycleIndex = 0; $cycleIndex -lt $cyclePaths.Count; $cycleIndex++) {
             $cycleRequest = $requestBySequence[[string]$cycleSequences[$cycleIndex]]
             if (-not $cycleRequest -or $cycleRequest.path -ne $cyclePaths[$cycleIndex]) {
@@ -473,6 +485,16 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
             throw "Ticket 03 initial baseline did not leave every subscribed subject below its configured target."
         }
     }
+    $firstBaselineRequest = $serverBaseline | Sort-Object { [int64]$_.sequence } | Select-Object -First 1
+    $firstPeriodicCycleFirstSequence = [int64]$polls[0].requestCycleSequences[0]
+    $firstPeriodicCycleStart = $requestBySequence[[string]$firstPeriodicCycleFirstSequence]
+    if (-not $firstBaselineRequest -or
+        $firstBaselineRequest.path -ne "/v3/account/signin" -or
+        -not $firstPeriodicCycleStart -or
+        $firstPeriodicCycleStart.path -ne "/v3/account/signin") {
+        throw "Ticket 03 could not identify the baseline and first periodic cycle start from fixture HTTP records."
+    }
+    Assert-Ticket03IntervalRange $firstBaselineRequest.receivedAt $firstPeriodicCycleStart.receivedAt "baseline-to-first-periodic cycle"
 
     foreach ($transition in @("afterCompletion", "home", "other_app", "no_registered_children")) {
         $window = @($result.observationWindows | Where-Object { $_.transition -eq $transition })
@@ -487,6 +509,7 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
                     [int64]$entry.inFlightRequestsBefore -ne 0 -or
                     [int64]$entry.inFlightRequestsAfter -ne 0 -or
                     [int64]$entry.requestSequenceCursorAtWindowStart -ne [int64]$entry.serverSequenceBefore -or
+                    [int64]$entry.requestDispatchCursorAtWindowStart -ne [int64]$entry.requestDispatchCursorAtWindowEnd -or
                     [int64]$entry.inFlightRequestsAtWindowStart -ne 0 -or
                     -not $entry.serviceLeaseAttachedAtWindowStart -or
                     $entry.activeWindowPackageAtWindowStart -ne $entry.foregroundPackage -or
