@@ -317,6 +317,8 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                     "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
                     "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
                     "ACTION_EXPIRED" { Write-Warning "TICKET04 준비 화면 만료 [$($event.caseId)]: $($event.details)" }
+                    "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
+                    "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
                     "BOUNDARY_CAPTURED" {
                         $boundary = $event.details | ConvertFrom-Json
                         Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
