@@ -50,6 +50,7 @@ class FixtureState:
     def record(self, path: str, body_text: str, body: Any, headers: dict[str, str]) -> dict[str, Any]:
         with self.lock:
             self.sequence += 1
+            received_monotonic_ns = time.monotonic_ns()
             event = {
                 "sequence": self.sequence,
                 "receivedAt": datetime.now(timezone.utc).isoformat(),
@@ -60,11 +61,13 @@ class FixtureState:
                 "headers": headers,
                 "responseStatus": None,
                 "servedReportCount": None,
-                "serverReceivedMonotonicMs": time.monotonic_ns() // 1_000_000,
+                "serverReceivedMonotonicMs": received_monotonic_ns // 1_000_000,
+                "serverReceivedMonotonicNs": received_monotonic_ns,
                 "clientConnected": True,
                 "clientDisconnectedAt": None,
                 "clientDisconnectSignal": None,
                 "clientDisconnectElapsedMs": None,
+                "clientDisconnectMonotonicNs": None,
             }
             self.requests.append(event)
             return event
@@ -93,9 +96,11 @@ class FixtureState:
                     "servedReportCount": served_report_count,
                     "deliveryStatus": delivery_status,
                     "clientConnected": event["clientConnected"],
+                    "serverReceivedMonotonicNs": event["serverReceivedMonotonicNs"],
                     "clientDisconnectedAt": event["clientDisconnectedAt"],
                     "clientDisconnectSignal": event["clientDisconnectSignal"],
                     "clientDisconnectAfterServerReceiveMs": event.get("clientDisconnectAfterServerReceiveMs"),
+                    "clientDisconnectMonotonicNs": event.get("clientDisconnectMonotonicNs"),
                     "userId": event["body"].get("userId") if isinstance(event.get("body"), dict) else None,
                     "yyyymmdd": event["body"].get("yyyymmdd") if isinstance(event.get("body"), dict) else None,
                     "languageCode": event["body"].get("languageCode") if isinstance(event.get("body"), dict) else None,
@@ -158,11 +163,13 @@ class FixtureState:
     def mark_client_disconnected(self, event: dict[str, Any], signal: str) -> None:
         with self.lock:
             if event["clientConnected"]:
-                disconnected_elapsed_ms = time.monotonic_ns() // 1_000_000
+                disconnected_monotonic_ns = time.monotonic_ns()
+                disconnected_elapsed_ms = disconnected_monotonic_ns // 1_000_000
                 event["clientConnected"] = False
                 event["clientDisconnectedAt"] = datetime.now(timezone.utc).isoformat()
                 event["clientDisconnectSignal"] = signal
                 event["clientDisconnectElapsedMs"] = disconnected_elapsed_ms
+                event["clientDisconnectMonotonicNs"] = disconnected_monotonic_ns
                 event["clientDisconnectAfterServerReceiveMs"] = max(
                     0,
                     disconnected_elapsed_ms - event["serverReceivedMonotonicMs"],
@@ -192,9 +199,11 @@ class FixtureState:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            snapshot_monotonic_ns = time.monotonic_ns()
             return {
                 "runId": self.run_id,
                 "scenario": self.scenario,
+                "serverMonotonicNs": snapshot_monotonic_ns,
                 "sequence": self.sequence,
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
@@ -211,6 +220,8 @@ class FixtureState:
                         "path": request["path"],
                         "receivedAt": request["receivedAt"],
                         "caseId": request.get("holdCaseId"),
+                        "serverReceivedMonotonicNs": request["serverReceivedMonotonicNs"],
+                        "clientConnected": request["clientConnected"],
                     }
                     for request in self.requests
                     if request["responseStatus"] is None and request["clientConnected"]
@@ -221,10 +232,12 @@ class FixtureState:
                         "path": request["path"],
                         "receivedAt": request["receivedAt"],
                         "caseId": request.get("holdCaseId"),
+                        "serverReceivedMonotonicNs": request["serverReceivedMonotonicNs"],
                         "clientConnected": request["clientConnected"],
                         "clientDisconnectedAt": request["clientDisconnectedAt"],
                         "clientDisconnectSignal": request["clientDisconnectSignal"],
                         "clientDisconnectAfterServerReceiveMs": request.get("clientDisconnectAfterServerReceiveMs"),
+                        "clientDisconnectMonotonicNs": request.get("clientDisconnectMonotonicNs"),
                     }
                     for request in self.requests
                     if request["responseStatus"] is None

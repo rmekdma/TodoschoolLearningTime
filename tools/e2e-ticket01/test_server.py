@@ -146,6 +146,9 @@ class Ticket04FixtureServerTest(unittest.TestCase):
         client.start()
         pending = self.wait_until(lambda snapshot: len(snapshot["inFlightRequests"]) == 1)
         held = pending["inFlightRequests"][0]
+        self.assertGreater(pending["serverMonotonicNs"], 0)
+        self.assertGreater(held["serverReceivedMonotonicNs"], 0)
+        self.assertGreaterEqual(pending["serverMonotonicNs"], held["serverReceivedMonotonicNs"])
         self.assertEqual("notification-revoke", held["caseId"])
         self.assertEqual("/v3/todoschool/report/daily/hangeul", held["path"])
         self.assertIsNone(pending["requests"][0]["responseStatus"])
@@ -253,6 +256,8 @@ class Ticket04FixtureServerTest(unittest.TestCase):
         self.assertFalse(server_held["clientConnected"])
         self.assertIn(server_held["clientDisconnectSignal"], ("eof", "socket-exception", "socket-error"))
         self.assertGreaterEqual(server_held["clientDisconnectAfterServerReceiveMs"], 0)
+        self.assertGreater(server_held["clientDisconnectMonotonicNs"], server_held["serverReceivedMonotonicNs"])
+        self.assertGreaterEqual(disconnected["serverMonotonicNs"], server_held["clientDisconnectMonotonicNs"])
 
         released = self.post("/__ticket04/release-report-hold", {"caseId": "closed-client", "sequence": sequence})
         self.assertTrue(released["ok"])

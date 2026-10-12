@@ -679,6 +679,8 @@ function Get-Ticket04ServerEvidence($Snapshot) {
             clientDisconnectedAt = $_.clientDisconnectedAt
             clientDisconnectSignal = $_.clientDisconnectSignal
             clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
+            serverReceivedMonotonicNs = $_.serverReceivedMonotonicNs
+            clientDisconnectMonotonicNs = $_.clientDisconnectMonotonicNs
             yyyymmdd = $_.body.yyyymmdd
             userId = $_.body.userId
             languageCode = $_.body.languageCode
@@ -687,6 +689,7 @@ function Get-Ticket04ServerEvidence($Snapshot) {
     return [ordered]@{
         runId = $Snapshot.runId
         scenario = $Snapshot.scenario
+        serverMonotonicNs = $Snapshot.serverMonotonicNs
         reportCounts = $Snapshot.reportCounts
         requests = $requests
         releasedReportHolds = @($Snapshot.releasedReportHolds | ForEach-Object {
@@ -701,6 +704,8 @@ function Get-Ticket04ServerEvidence($Snapshot) {
                 clientDisconnectedAt = $_.clientDisconnectedAt
                 clientDisconnectSignal = $_.clientDisconnectSignal
                 clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
+                serverReceivedMonotonicNs = $_.serverReceivedMonotonicNs
+                clientDisconnectMonotonicNs = $_.clientDisconnectMonotonicNs
                 userId = $_.userId
                 yyyymmdd = $_.yyyymmdd
                 languageCode = $_.languageCode
@@ -719,7 +724,10 @@ function Get-Ticket04SourceSnapshot {
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivity.kt",
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ActionToken.kt",
         "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidence.kt",
+        "e2eobserver/src/test/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidenceTest.kt",
         "tools/e2e-ticket01/Run-Ticket01.ps1",
+        "tools/e2e-ticket01/server.py",
+        "tools/e2e-ticket01/test_server.py",
         "tools/e2e-ticket04/PermissionRecoveryEvidence.psm1",
         "tools/e2e-ticket04/Test-ResultChunks.ps1"
     )
@@ -782,7 +790,7 @@ function Save-Ticket04CaseEvidenceFromProgress($Event) {
     }
     $sourceSnapshot = Get-Ticket04SourceSnapshot
     $evidence = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = if ($caseResult.caseId -eq "accessibility-revocation") { 2 } else { 1 }
         contractVersion = 1
         caseId = [string]$caseResult.caseId
         runId = [string]$caseResult.runId
@@ -900,7 +908,17 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
         }
         $caseArtifacts = @($PriorNotificationEvidence) + @($caseArtifacts)
     }
-    $aggregateCases = @(Join-Ticket04CaseEvidence -Evidence $caseArtifacts -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)
+    $sourceCompatibilityProof = $null
+    if ($CaseMode -eq "accessibility") {
+        $sourceCompatibilityProof = Get-Content -LiteralPath (Join-Path $artifactDirectory "ticket04-source-compatibility.json") -Raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    $aggregateCases = @(Join-Ticket04CaseEvidence `
+        -Evidence $caseArtifacts `
+        -ExpectedDeviceSerial $DeviceSerial `
+        -ExpectedProductApkSha256 $prepared.debugApkSha256 `
+        -SourceCompatibilityProof $sourceCompatibilityProof `
+        -RepositoryRoot $repositoryRoot `
+        -PythonPath $pythonPath)
     $aggregate = [ordered]@{
         schemaVersion = 1
         contractVersion = 1
@@ -911,6 +929,7 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
         device = $aggregateCases[0].device
         caseIds = @($aggregateCases | ForEach-Object { $_.caseId })
         cases = $aggregateCases
+        sourceCompatibilityProof = $sourceCompatibilityProof
     }
     $resultPath = Join-Path $artifactDirectory "ticket04-result.json"
     $aggregate | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $resultPath -Encoding utf8
@@ -1405,12 +1424,20 @@ try {
                 throw "The prior notification case artifact failed strict schema, source, fixture, device, or product-binary validation."
             }
             $currentSourceSnapshot = Get-Ticket04SourceSnapshot
-            if ($ticket04PriorNotificationCaseEvidence.sourceRevision -cne $currentSourceSnapshot.revision -or
-                $ticket04PriorNotificationCaseEvidence.sourceContentSha256 -cne $currentSourceSnapshot.contentSha256 -or
-                $ticket04PriorNotificationCaseEvidence.workingTreeDirty -ne $currentSourceSnapshot.workingTreeDirty) {
-                throw "The notification evidence was captured against a different Ticket 04 source snapshot. Rerun that case before starting Accessibility; no fixture server or human step has started."
+            $ticket04SourceCompatibilityProof = New-Ticket04SourceCompatibilityProof `
+                -NotificationEvidence $ticket04PriorNotificationCaseEvidence `
+                -CurrentSourceSnapshot $currentSourceSnapshot `
+                -ExpectedProductApkSha256 $prepared.debugApkSha256 `
+                -ExpectedDeviceSerial $DeviceSerial `
+                -ExpectedApiLevel $sdkVersion `
+                -RepositoryRoot $repositoryRoot `
+                -PythonPath $pythonPath
+            $compatibilityPath = Join-Path $artifactDirectory "ticket04-source-compatibility.json"
+            if (Test-Path -LiteralPath $compatibilityPath) {
+                throw "Ticket 04 source compatibility proof is immutable and already exists: $compatibilityPath"
             }
-            Write-Host "PASS prior notification evidence artifact matches the current device, prepared product APK and exact Ticket 04 source snapshot."
+            $ticket04SourceCompatibilityProof | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $compatibilityPath -Encoding utf8
+            Write-Host "PASS prior notification evidence and current accessibility contract match the same device/product APK; the committed source diff is limited to the verified observer, fixture and validator paths."
         }
         Write-Host "PASS prepared debug, observer and observer-test APK hashes match the installed packages; no product install will occur."
     }

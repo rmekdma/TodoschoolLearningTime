@@ -311,23 +311,58 @@ class Ticket04PermissionRecoveryTest {
 
         openPermissionSettings(automation, context, permission)
         emitProgress(runId, "ACTION_REQUIRED", caseId, permission.manualInstruction)
-        val revokedState = waitForManualRevocation(context, automation, permission, dispatch.getLong("elapsedRealtimeMs"), apiBaseUrl, runId, caseId, heldSequence)
+        val revokedState = waitForManualRevocation(
+            context = context,
+            automation = automation,
+            permission = permission,
+            dispatchElapsedRealtimeMs = dispatch.getLong("elapsedRealtimeMs"),
+            apiBaseUrl = apiBaseUrl,
+            runId = runId,
+            caseId = caseId,
+            heldSequence = heldSequence,
+            expectedProductPid = productPidsBefore.singleOrNull().orEmpty(),
+        )
         val pidAtBoundary = productPids(automation)
         val samePidAtBoundary = pidAtBoundary == productPidsBefore
-        val requestAgeAtBoundary = revokedState.getLong("boundaryElapsedRealtimeMs") - dispatch.getLong("elapsedRealtimeMs")
-        val requestBoundaryClassification = Ticket04BoundaryEvidence.classify(
-            requestAgeAtBoundaryMs = requestAgeAtBoundary,
-            requestStillInFlight = revokedState.getBoolean("requestStillInFlight"),
-            clientSocketOpen = revokedState.getBoolean("clientSocketOpenAtBoundary"),
+        val requestAgeAtBoundary = revokedState.optLong(
+            "requestAgeAtBoundaryMs",
+            revokedState.getLong("boundaryElapsedRealtimeMs") - dispatch.getLong("elapsedRealtimeMs"),
         )
+        val requestBoundaryClassification = if (permission == PermissionKind.ACCESSIBILITY) {
+            revokedState.getString("requestBoundaryClassification")
+        } else {
+            Ticket04BoundaryEvidence.classify(
+                requestAgeAtBoundaryMs = requestAgeAtBoundary,
+                requestStillInFlight = revokedState.getBoolean("requestStillInFlight"),
+                clientSocketOpen = revokedState.getBoolean("clientSocketOpenAtBoundary"),
+            )
+        }
+        val boundaryDescription = when (requestBoundaryClassification) {
+            Ticket04BoundaryEvidence.CANCELLATION_CONSISTENT -> "마지막 ON 관측에서 같은 PID의 요청과 연결이 살아 있었고, OFF/lease 해제 관측까지의 짧은 구간에서 서버 연결 종료가 기록됐습니다. 이 구간은 취소와 일치하지만 인과를 단정하지 않습니다."
+            Ticket04BoundaryEvidence.LIVE_REQUEST_WITHIN_EVIDENCE_WINDOW -> "권한 OFF 시점에 진행 중인 보고 요청과 열린 연결을 확인했습니다."
+            Ticket04BoundaryEvidence.LIVE_REQUEST_OUTSIDE_EVIDENCE_WINDOW -> "권한 OFF 시점에도 요청은 진행 중이었지만 13.5초 증거 창 밖입니다. 취소 근거로 해석하지 않습니다."
+            Ticket04BoundaryEvidence.CLIENT_SOCKET_CLOSED_AT_BOUNDARY -> "권한 OFF 시점에 서버 연결은 이미 닫혀 있었습니다. 원인은 확인되지 않았습니다."
+            Ticket04BoundaryEvidence.NO_CLIENT_REQUEST_AT_BOUNDARY -> "권한 OFF 시점에는 클라이언트 요청이 진행 중이지 않았습니다. 이 결과를 취소 근거로 해석하지 않습니다."
+            else -> "요청 나이 또는 경계 상태를 확정할 수 없습니다."
+        }
+        val acknowledgementAt = awaitUserAction(
+            context = context,
+            runId = runId,
+            caseId = "$caseId-confirm-off",
+            action = "CONTINUE_AFTER_OFF",
+            buttonLabel = "권한 OFF 확인 · 계속",
+            instructions = "${permission.displayName} 권한 OFF를 확인했습니다.\n\n$boundaryDescription\n\n권한이 꺼진 상태인지 확인하고 결과 확인을 계속하려면 아래 버튼을 누르세요. 서버 응답은 이 버튼을 누르기 전까지 해제하지 않습니다.",
+        )
+        assertFalse("The permission must still be disabled when the user acknowledges the boundary", permission.isEnabled(context, automation))
+
         if (permission == PermissionKind.ACCESSIBILITY) {
             assertTrue("The AccessibilityService permission boundary changed the product process: before=$productPidsBefore atBoundary=$pidAtBoundary", samePidAtBoundary)
-            assertTrue("The held request was no longer in flight when the user revoked AccessibilityService", revokedState.getBoolean("requestStillInFlight"))
-            assertTrue("The held server response had already lost its client socket at the AccessibilityService boundary", revokedState.getBoolean("clientSocketOpenAtBoundary"))
+            val accessibilityBoundary = revokedState.getJSONObject("accessibilityBoundaryEvidence")
             assertTrue(
-                "The AccessibilityService boundary exceeded the 13.5-second evidence cutoff: age=${requestAgeAtBoundary}ms",
-                Ticket04BoundaryEvidence.isLivePreTimeoutBoundary(requestBoundaryClassification),
+                "The AccessibilityService boundary is not cancellation-consistent within a bounded live-to-OFF observation interval: $accessibilityBoundary",
+                accessibilityBoundary.getBoolean("qualifies"),
             )
+            assertEquals(Ticket04BoundaryEvidence.CANCELLATION_CONSISTENT, requestBoundaryClassification)
         }
 
         openProductMainActivity(context)
@@ -356,23 +391,6 @@ class Ticket04PermissionRecoveryTest {
         } else {
             assertFalse("The accessibility service should detach after the user disables it", pauseLease)
         }
-
-        val boundaryDescription = when (requestBoundaryClassification) {
-            Ticket04BoundaryEvidence.LIVE_REQUEST_WITHIN_EVIDENCE_WINDOW -> "권한 OFF 시점에 진행 중인 보고 요청과 열린 연결을 확인했습니다."
-            Ticket04BoundaryEvidence.LIVE_REQUEST_OUTSIDE_EVIDENCE_WINDOW -> "권한 OFF 시점에도 요청은 진행 중이었지만 13.5초 증거 창 밖입니다. 취소 근거로 해석하지 않습니다."
-            Ticket04BoundaryEvidence.CLIENT_SOCKET_CLOSED_AT_BOUNDARY -> "권한 OFF 시점에 서버 연결은 이미 닫혀 있었습니다. 원인은 확인되지 않았습니다."
-            Ticket04BoundaryEvidence.NO_CLIENT_REQUEST_AT_BOUNDARY -> "권한 OFF 시점에는 클라이언트 요청이 진행 중이지 않았습니다. 이 결과를 취소 근거로 해석하지 않습니다."
-            else -> "요청 나이 또는 경계 상태를 확정할 수 없습니다."
-        }
-        val acknowledgementAt = awaitUserAction(
-            context = context,
-            runId = runId,
-            caseId = "$caseId-confirm-off",
-            action = "CONTINUE_AFTER_OFF",
-            buttonLabel = "권한 OFF 확인 · 계속",
-            instructions = "${permission.displayName} 권한 OFF를 확인했습니다.\n\n$boundaryDescription\n\n권한이 꺼진 상태인지 확인하고 결과 확인을 계속하려면 아래 버튼을 누르세요. 서버 응답은 이 버튼을 누르기 전까지 해제하지 않습니다.",
-        )
-        assertFalse("The permission must still be disabled when the user acknowledges the boundary", permission.isEnabled(context, automation))
 
         val beforeReleaseFixture = fixtureRequest(apiBaseUrl, "GET", "/__ticket04/state")
         val stillHeld = beforeReleaseFixture.getJSONArray("serverHeldResponses").objects().singleOrNull { it.optLong("sequence") == heldSequence }
@@ -529,6 +547,7 @@ class Ticket04PermissionRecoveryTest {
             .put("requestBoundaryClassification", requestBoundaryClassification)
             .put("requestStillInFlight", revokedState.getBoolean("requestStillInFlight"))
             .put("clientSocketOpenAtPermissionBoundary", revokedState.getBoolean("clientSocketOpenAtBoundary"))
+            .putOpt("accessibilityBoundaryEvidence", revokedState.optJSONObject("accessibilityBoundaryEvidence"))
             .put("sameProductPidAtBoundary", samePidAtBoundary)
             .put("processRestartExpected", permission == PermissionKind.NOTIFICATIONS)
             .put("processRestartedAfterBoundary", productPidsBefore != pidsAfterReturn)
@@ -613,7 +632,20 @@ class Ticket04PermissionRecoveryTest {
         runId: String,
         caseId: String,
         heldSequence: Long,
+        expectedProductPid: String,
     ): JSONObject {
+        if (permission == PermissionKind.ACCESSIBILITY) {
+            return waitForAccessibilityRevocation(
+                context = context,
+                automation = automation,
+                dispatchElapsedRealtimeMs = dispatchElapsedRealtimeMs,
+                apiBaseUrl = apiBaseUrl,
+                runId = runId,
+                caseId = caseId,
+                heldSequence = heldSequence,
+                expectedProductPid = expectedProductPid,
+            )
+        }
         var lastState: JSONObject? = null
         val notificationWaitDeadline = SystemClock.elapsedRealtime() + MAX_NOTIFICATION_PERMISSION_WAIT_MS
         val waitDeadline = if (permission == PermissionKind.NOTIFICATIONS) {
@@ -688,6 +720,222 @@ class Ticket04PermissionRecoveryTest {
             )
         emitProgress(runId, "PERMISSION_WAIT_EXPIRED", caseId, boundary.toString())
         throw AssertionError("Ticket 04 $caseId did not observe the manual permission change within its bounded evidence window; no response was released. Evidence=$boundary")
+    }
+
+    private data class AccessibilityBoundaryProbe(
+        val sample: Ticket04BoundaryEvidence.AccessibilityBoundarySample,
+        val evidence: JSONObject,
+    )
+
+    private fun waitForAccessibilityRevocation(
+        context: Context,
+        automation: UiAutomation,
+        dispatchElapsedRealtimeMs: Long,
+        apiBaseUrl: String,
+        runId: String,
+        caseId: String,
+        heldSequence: Long,
+        expectedProductPid: String,
+    ): JSONObject {
+        val evidenceDeadlineNs = (dispatchElapsedRealtimeMs + MAX_BOUNDARY_REQUEST_AGE_MS) * 1_000_000L
+        var lastLiveProbe: AccessibilityBoundaryProbe? = null
+        var lastOffProbe: AccessibilityBoundaryProbe? = null
+        var firstOffDetectedElapsedRealtimeNs: Long? = null
+
+        while (true) {
+            val probe = captureAccessibilityBoundaryProbe(
+                context = context,
+                automation = automation,
+                apiBaseUrl = apiBaseUrl,
+                caseId = caseId,
+                heldSequence = heldSequence,
+                expectedProductPid = expectedProductPid,
+            )
+            val sample = probe.sample
+            if (sample.permissionEnabledBefore && sample.permissionEnabledAfter && sample.serviceLeaseAttached &&
+                sample.requestInFlight && sample.serverResponseHeld && sample.clientConnected &&
+                sample.productPid == expectedProductPid) {
+                lastLiveProbe = probe
+            }
+
+            if (!sample.permissionEnabledBefore || !sample.permissionEnabledAfter) {
+                if (firstOffDetectedElapsedRealtimeNs == null) {
+                    firstOffDetectedElapsedRealtimeNs = sample.deviceStartElapsedRealtimeNs
+                }
+                lastOffProbe = probe
+                val hasStableOff = !sample.permissionEnabledBefore && !sample.permissionEnabledAfter &&
+                    !sample.serviceLeaseAttached
+                val requestClosed = !sample.requestInFlight && !sample.clientConnected &&
+                    sample.clientDisconnectMonotonicNs != null
+                val transitionObservationExpired = SystemClock.elapsedRealtimeNanos() - firstOffDetectedElapsedRealtimeNs >=
+                    MAX_TRANSITION_OBSERVATION_MS * 1_000_000L
+                if (hasStableOff && (requestClosed || transitionObservationExpired)) {
+                    val decision = Ticket04BoundaryEvidence.classifyAccessibilityTransition(
+                        lastLive = lastLiveProbe?.sample,
+                        firstOff = sample,
+                        expectedPid = expectedProductPid,
+                    )
+                    val boundaryEvidence = JSONObject()
+                        .put("classification", decision.classification)
+                        .put("qualifies", decision.qualifies)
+                        .putOpt("requestAgeAtLastLiveMs", decision.requestAgeAtLastLiveMs)
+                        .putOpt("disconnectAgeMs", decision.disconnectAgeMs)
+                        .putOpt("transitionIntervalMs", decision.transitionIntervalMs)
+                        .put("maximumTransitionIntervalMs", MAX_TRANSITION_OBSERVATION_MS)
+                        .put("maximumFixtureRequestRttMs", Ticket04BoundaryEvidence.MAX_CLOCK_PROBE_RTT_MS)
+                        .put("readTimeoutMs", READ_TIMEOUT_MS)
+                        .put("lastLiveSample", lastLiveProbe?.evidence ?: JSONObject.NULL)
+                        .put("firstOffSample", probe.evidence)
+                    val boundary = JSONObject()
+                        .put("runId", runId)
+                        .put("caseId", caseId)
+                        .put("permission", PermissionKind.ACCESSIBILITY.name.lowercase())
+                        .put("actualPermissionEnabled", false)
+                        .put("permissionOffDetectedElapsedRealtimeNs", firstOffDetectedElapsedRealtimeNs)
+                        .put("boundaryElapsedRealtimeMs", sample.deviceEndElapsedRealtimeNs / 1_000_000L)
+                        .put("productPid", sample.productPid)
+                        .put("serviceLeaseAttached", sample.serviceLeaseAttached)
+                        .put("requestStillInFlight", sample.requestInFlight)
+                        .put("clientSocketOpenAtBoundary", sample.clientConnected)
+                        .put("requestAgeAtBoundaryMs", decision.requestAgeAtLastLiveMs ?: -1L)
+                        .put("requestBoundaryClassification", decision.classification)
+                        .put("accessibilityBoundaryEvidence", boundaryEvidence)
+                    emitProgress(runId, "BOUNDARY_CAPTURED", caseId, boundary.toString())
+                    return boundary
+                }
+            }
+
+            if (firstOffDetectedElapsedRealtimeNs == null && SystemClock.elapsedRealtimeNanos() >= evidenceDeadlineNs) {
+                val boundary = JSONObject()
+                    .put("runId", runId)
+                    .put("caseId", caseId)
+                    .put("permission", PermissionKind.ACCESSIBILITY.name.lowercase())
+                    .put("permissionOffObserved", false)
+                    .put("actualPermissionEnabledAtObservationEnd", sample.permissionEnabledAfter)
+                    .put("permissionObservationEndedElapsedRealtimeNs", sample.deviceEndElapsedRealtimeNs)
+                    .put("productPid", sample.productPid)
+                    .put("serviceLeaseAttached", sample.serviceLeaseAttached)
+                    .put("requestStillInFlightAtObservationEnd", sample.requestInFlight)
+                    .put("clientSocketOpenAtObservationEnd", sample.clientConnected)
+                    .put("classification", "accessibility-permission-off-not-captured-within-pre-timeout-evidence-window")
+                emitProgress(runId, "PERMISSION_WAIT_EXPIRED", caseId, boundary.toString())
+                throw AssertionError("Ticket 04 $caseId did not observe AccessibilityService OFF within the strict 13.5-second evidence window; no response was released. Evidence=$boundary")
+            }
+
+            if (firstOffDetectedElapsedRealtimeNs != null &&
+                SystemClock.elapsedRealtimeNanos() - firstOffDetectedElapsedRealtimeNs >= MAX_TRANSITION_OBSERVATION_MS * 1_000_000L) {
+                val finalProbe = lastOffProbe ?: probe
+                val decision = Ticket04BoundaryEvidence.classifyAccessibilityTransition(
+                    lastLive = lastLiveProbe?.sample,
+                    firstOff = finalProbe.sample,
+                    expectedPid = expectedProductPid,
+                )
+                val boundaryEvidence = JSONObject()
+                    .put("classification", decision.classification)
+                    .put("qualifies", decision.qualifies)
+                    .putOpt("requestAgeAtLastLiveMs", decision.requestAgeAtLastLiveMs)
+                    .putOpt("disconnectAgeMs", decision.disconnectAgeMs)
+                    .putOpt("transitionIntervalMs", decision.transitionIntervalMs)
+                    .put("maximumTransitionIntervalMs", MAX_TRANSITION_OBSERVATION_MS)
+                    .put("maximumFixtureRequestRttMs", Ticket04BoundaryEvidence.MAX_CLOCK_PROBE_RTT_MS)
+                    .put("readTimeoutMs", READ_TIMEOUT_MS)
+                    .put("lastLiveSample", lastLiveProbe?.evidence ?: JSONObject.NULL)
+                    .put("firstOffSample", finalProbe.evidence)
+                val boundary = JSONObject()
+                    .put("runId", runId)
+                    .put("caseId", caseId)
+                    .put("permission", PermissionKind.ACCESSIBILITY.name.lowercase())
+                    .put("actualPermissionEnabled", false)
+                    .put("permissionOffDetectedElapsedRealtimeNs", firstOffDetectedElapsedRealtimeNs)
+                    .put("boundaryElapsedRealtimeMs", finalProbe.sample.deviceEndElapsedRealtimeNs / 1_000_000L)
+                    .put("productPid", finalProbe.sample.productPid)
+                    .put("serviceLeaseAttached", finalProbe.sample.serviceLeaseAttached)
+                    .put("requestStillInFlight", finalProbe.sample.requestInFlight)
+                    .put("clientSocketOpenAtBoundary", finalProbe.sample.clientConnected)
+                    .put("requestAgeAtBoundaryMs", decision.requestAgeAtLastLiveMs ?: -1L)
+                    .put("requestBoundaryClassification", decision.classification)
+                    .put("accessibilityBoundaryEvidence", boundaryEvidence)
+                emitProgress(runId, "BOUNDARY_CAPTURED", caseId, boundary.toString())
+                return boundary
+            }
+            SystemClock.sleep(MANUAL_POLL_INTERVAL_MS)
+        }
+    }
+
+    private fun captureAccessibilityBoundaryProbe(
+        context: Context,
+        automation: UiAutomation,
+        apiBaseUrl: String,
+        caseId: String,
+        heldSequence: Long,
+        expectedProductPid: String,
+    ): AccessibilityBoundaryProbe {
+        val deviceSampleStartNs = SystemClock.elapsedRealtimeNanos()
+        val permissionBefore = PermissionKind.ACCESSIBILITY.isEnabled(context, automation)
+        val stateBefore = runCatching { readProductState(context) }.getOrNull()
+        val fixtureRequestStartNs = SystemClock.elapsedRealtimeNanos()
+        val fixture = fixtureRequest(apiBaseUrl, "GET", "/__ticket04/state")
+        val fixtureRequestEndNs = SystemClock.elapsedRealtimeNanos()
+        val permissionAfter = PermissionKind.ACCESSIBILITY.isEnabled(context, automation)
+        val stateAfter = runCatching { readProductState(context) }.getOrNull()
+        val pids = productPids(automation)
+        val deviceSampleEndNs = SystemClock.elapsedRealtimeNanos()
+        val inFlight = fixture.getJSONArray("inFlightRequests").objects().singleOrNull {
+            it.optLong("sequence") == heldSequence && it.optString("caseId") == caseId
+        }
+        val held = fixture.getJSONArray("serverHeldResponses").objects().singleOrNull {
+            it.optLong("sequence") == heldSequence && it.optString("caseId") == caseId
+        }
+        val receivedNs = held?.optLong("serverReceivedMonotonicNs", -1L) ?: -1L
+        val disconnectNsValue = held?.opt("clientDisconnectMonotonicNs")
+        val disconnectNs = if (disconnectNsValue == null || disconnectNsValue === JSONObject.NULL) {
+            null
+        } else {
+            (disconnectNsValue as Number).toLong()
+        }
+        val serverSnapshotNs = fixture.optLong("serverMonotonicNs", -1L)
+        val productPid = pids.singleOrNull().orEmpty()
+        val leaseAttached = stateAfter?.optBoolean("serviceLeaseAttached") ?: false
+        val sample = Ticket04BoundaryEvidence.AccessibilityBoundarySample(
+            caseId = caseId,
+            requestSequence = heldSequence,
+            deviceStartElapsedRealtimeNs = deviceSampleStartNs,
+            deviceEndElapsedRealtimeNs = deviceSampleEndNs,
+            permissionEnabledBefore = permissionBefore,
+            permissionEnabledAfter = permissionAfter,
+            serviceLeaseAttached = leaseAttached,
+            productPid = productPid,
+            requestInFlight = inFlight != null,
+            serverResponseHeld = held != null,
+            clientConnected = held?.optBoolean("clientConnected") ?: false,
+            fixtureRequestRttNs = fixtureRequestEndNs - fixtureRequestStartNs,
+            serverSnapshotMonotonicNs = serverSnapshotNs,
+            serverReceivedMonotonicNs = receivedNs,
+            clientDisconnectMonotonicNs = disconnectNs,
+            clientDisconnectSignal = held?.optString("clientDisconnectSignal")?.takeIf(String::isNotBlank),
+        )
+        val evidence = JSONObject()
+            .put("caseId", caseId)
+            .put("requestSequence", heldSequence)
+            .put("deviceStartElapsedRealtimeNs", deviceSampleStartNs)
+            .put("deviceEndElapsedRealtimeNs", deviceSampleEndNs)
+            .put("fixtureRequestStartElapsedRealtimeNs", fixtureRequestStartNs)
+            .put("fixtureRequestEndElapsedRealtimeNs", fixtureRequestEndNs)
+            .put("fixtureRequestRttNs", fixtureRequestEndNs - fixtureRequestStartNs)
+            .put("permissionEnabledBefore", permissionBefore)
+            .put("permissionEnabledAfter", permissionAfter)
+            .put("serviceLeaseAttachedBefore", stateBefore?.optBoolean("serviceLeaseAttached") ?: false)
+            .put("serviceLeaseAttached", leaseAttached)
+            .put("productPid", productPid)
+            .put("expectedProductPid", expectedProductPid)
+            .put("requestInFlight", inFlight != null)
+            .put("serverResponseHeld", held != null)
+            .put("clientConnected", held?.optBoolean("clientConnected") ?: false)
+            .put("serverSnapshotMonotonicNs", serverSnapshotNs)
+            .put("serverReceivedMonotonicNs", receivedNs)
+            .put("clientDisconnectMonotonicNs", disconnectNs ?: JSONObject.NULL)
+            .put("clientDisconnectSignal", held?.optString("clientDisconnectSignal") ?: "")
+        return AccessibilityBoundaryProbe(sample, evidence)
     }
 
     private fun waitForManualRestoration(context: Context, automation: UiAutomation, permission: PermissionKind) {
@@ -1138,6 +1386,7 @@ class Ticket04PermissionRecoveryTest {
         const val READ_TIMEOUT_MS = 15_000L
         const val DISCONNECT_BOUNDARY_TOLERANCE_MS = 500L
         const val MAX_BOUNDARY_REQUEST_AGE_MS = Ticket04BoundaryEvidence.PRE_TIMEOUT_EVIDENCE_WINDOW_MS
+        const val MAX_TRANSITION_OBSERVATION_MS = Ticket04BoundaryEvidence.MAX_TRANSITION_INTERVAL_MS
         const val MAX_RELEASE_REQUEST_AGE_MS = 14_500L
         const val SCREEN_WAKE_LOCK_TIMEOUT_MS = 15 * 60 * 1000L
         const val WAKE_LOCK_SETTLE_MS = 300L

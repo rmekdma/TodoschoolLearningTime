@@ -7,7 +7,7 @@ $json = [ordered]@{
     runId = $runId
     apiBaseUrl = "http://127.0.0.1:18080"
     notificationProcessRestartObserved = $true
-    accessibilitySamePidBoundaryObserved = $true
+    accessibilitySamePidBoundaryObserved = $false
     cases = @(
         [ordered]@{
             caseId = "notification-revocation"
@@ -21,20 +21,6 @@ $json = [ordered]@{
             processRestartedAfterBoundary = $true
             productPidBefore = "5054"
             productPidAtBoundary = ""
-            productPidAfterReturn = "14438"
-        }
-        [ordered]@{
-            caseId = "accessibility-revocation"
-            actualPermissionEnabledAtBoundary = $false
-            processRestartExpected = $false
-            processRestartedAfterBoundary = $false
-            requestAgeAtBoundaryMs = 12000
-            requestBoundaryClassification = "client-request-in-flight-with-open-socket-within-evidence-window"
-            requestStillInFlight = $true
-            clientSocketOpenAtPermissionBoundary = $true
-            sameProductPidAtBoundary = $true
-            productPidBefore = "14438"
-            productPidAtBoundary = "14438"
             productPidAfterReturn = "14438"
         }
     )
@@ -88,22 +74,82 @@ if (-not (Test-Ticket04CaseBoundaryEvidence -Case $notificationEvidence)) {
     throw "Ticket 04 did not accept notification-off evidence based on an observed OS process restart."
 }
 
+function New-TestAccessibilityBoundaryEvidence {
+    $receivedNs = [long]1000000000
+    $liveSnapshotNs = [long]10000000000
+    $disconnectNs = [long]10050000000
+    $offSnapshotNs = [long]10100000000
+    $live = [pscustomobject]@{
+        caseId = "accessibility-revocation"
+        requestSequence = [long]9
+        deviceStartElapsedRealtimeNs = [long]1000000000
+        deviceEndElapsedRealtimeNs = [long]1010000000
+        fixtureRequestRttNs = [long]10000000
+        permissionEnabledBefore = $true
+        permissionEnabledAfter = $true
+        serviceLeaseAttached = $true
+        productPid = "14438"
+        expectedProductPid = "14438"
+        requestInFlight = $true
+        serverResponseHeld = $true
+        clientConnected = $true
+        serverSnapshotMonotonicNs = $liveSnapshotNs
+        serverReceivedMonotonicNs = $receivedNs
+        clientDisconnectMonotonicNs = $null
+        clientDisconnectSignal = ""
+    }
+    $off = [pscustomobject]@{
+        caseId = "accessibility-revocation"
+        requestSequence = [long]9
+        deviceStartElapsedRealtimeNs = [long]1100000000
+        deviceEndElapsedRealtimeNs = [long]1110000000
+        fixtureRequestRttNs = [long]10000000
+        permissionEnabledBefore = $false
+        permissionEnabledAfter = $false
+        serviceLeaseAttached = $false
+        productPid = "14438"
+        expectedProductPid = "14438"
+        requestInFlight = $false
+        serverResponseHeld = $true
+        clientConnected = $false
+        serverSnapshotMonotonicNs = $offSnapshotNs
+        serverReceivedMonotonicNs = $receivedNs
+        clientDisconnectMonotonicNs = $disconnectNs
+        clientDisconnectSignal = "eof"
+    }
+    return [pscustomobject]@{
+        classification = "cancellation-consistent-within-observed-transition-interval"
+        qualifies = $true
+        requestAgeAtLastLiveMs = [long]9000
+        disconnectAgeMs = [long]9050
+        transitionIntervalMs = [long]90
+        maximumTransitionIntervalMs = [long]1500
+        maximumFixtureRequestRttMs = [long]500
+        readTimeoutMs = [long]15000
+        lastLiveSample = $live
+        firstOffSample = $off
+    }
+}
+
+$accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
 $accessibilityEvidence = [pscustomobject]@{
     caseId = "accessibility-revocation"
     actualPermissionEnabledAtBoundary = $false
-    requestAgeAtBoundaryMs = 12000
-    requestBoundaryClassification = "client-request-in-flight-with-open-socket-within-evidence-window"
-    requestStillInFlight = $true
-    clientSocketOpenAtPermissionBoundary = $true
+    requestAgeAtBoundaryMs = 9000
+    requestBoundaryClassification = "cancellation-consistent-within-observed-transition-interval"
+    requestStillInFlight = $false
+    clientSocketOpenAtPermissionBoundary = $false
+    accessibilityBoundaryEvidence = $accessibilityBoundaryEvidence
     sameProductPidAtBoundary = $true
     processRestartExpected = $false
     processRestartedAfterBoundary = $false
     productPidBefore = "14438"
     productPidAtBoundary = "14438"
     productPidAfterReturn = "14438"
+    serverRequestSequence = 9
 }
 if (-not (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityEvidence)) {
-    throw "Ticket 04 rejected valid same-PID in-flight Accessibility boundary evidence."
+    throw "Ticket 04 rejected valid same-PID cancellation-consistent Accessibility transition evidence."
 }
 
 $accessibilityRestartEvidence = $accessibilityEvidence.PSObject.Copy()
@@ -115,8 +161,10 @@ if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityRestartEvidence) {
 }
 
 $lateAccessibilityEvidence = $accessibilityEvidence.PSObject.Copy()
+$lateAccessibilityEvidence.accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
+$lateAccessibilityEvidence.accessibilityBoundaryEvidence.requestAgeAtLastLiveMs = 13500
+$lateAccessibilityEvidence.accessibilityBoundaryEvidence.lastLiveSample.serverSnapshotMonotonicNs = 14500000000
 $lateAccessibilityEvidence.requestAgeAtBoundaryMs = 13500
-$lateAccessibilityEvidence.requestBoundaryClassification = "client-request-in-flight-with-open-socket-outside-evidence-window"
 if (Test-Ticket04CaseBoundaryEvidence -Case $lateAccessibilityEvidence) {
     throw "Ticket 04 accepted an Accessibility boundary at the 13.5-second cutoff."
 }
@@ -125,6 +173,36 @@ $accessibilityWrongPidEvidence = $accessibilityEvidence.PSObject.Copy()
 $accessibilityWrongPidEvidence.productPidAtBoundary = "21975"
 if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityWrongPidEvidence) {
     throw "Ticket 04 accepted mismatched Accessibility PIDs at the actual permission boundary."
+}
+
+$accessibilityEofBeforeLiveEvidence = $accessibilityEvidence.PSObject.Copy()
+$accessibilityEofBeforeLiveEvidence.accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
+$accessibilityEofBeforeLiveEvidence.accessibilityBoundaryEvidence.firstOffSample.clientDisconnectMonotonicNs = 9999999999
+if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityEofBeforeLiveEvidence) {
+    throw "Ticket 04 accepted an EOF recorded before the last ON/live sample."
+}
+
+$accessibilityTimeoutEvidence = $accessibilityEvidence.PSObject.Copy()
+$accessibilityTimeoutEvidence.accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
+$accessibilityTimeoutEvidence.accessibilityBoundaryEvidence.firstOffSample.clientDisconnectMonotonicNs = 16000000000
+$accessibilityTimeoutEvidence.accessibilityBoundaryEvidence.firstOffSample.serverSnapshotMonotonicNs = 16100000000
+$accessibilityTimeoutEvidence.accessibilityBoundaryEvidence.disconnectAgeMs = 15000
+if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityTimeoutEvidence) {
+    throw "Ticket 04 accepted a close at or beyond the client read timeout."
+}
+
+$accessibilityHighRttEvidence = $accessibilityEvidence.PSObject.Copy()
+$accessibilityHighRttEvidence.accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
+$accessibilityHighRttEvidence.accessibilityBoundaryEvidence.lastLiveSample.fixtureRequestRttNs = 500000001
+if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityHighRttEvidence) {
+    throw "Ticket 04 accepted a high-RTT live clock probe."
+}
+
+$accessibilityWideIntervalEvidence = $accessibilityEvidence.PSObject.Copy()
+$accessibilityWideIntervalEvidence.accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
+$accessibilityWideIntervalEvidence.accessibilityBoundaryEvidence.firstOffSample.deviceStartElapsedRealtimeNs = 2510000011
+if (Test-Ticket04CaseBoundaryEvidence -Case $accessibilityWideIntervalEvidence) {
+    throw "Ticket 04 accepted an unbounded permission transition observation interval."
 }
 
 $notificationLiveLateEvidence = $notificationEvidence.PSObject.Copy()
@@ -185,16 +263,17 @@ $accessibilityCaseResult = [pscustomobject]@{
     runId = "fedcba9876543210fedcba9876543210"
     caseId = "accessibility-revocation"
     actualPermissionEnabledAtBoundary = $false
-    requestAgeAtBoundaryMs = 8000
-    requestBoundaryClassification = "client-request-in-flight-with-open-socket-within-evidence-window"
-    requestStillInFlight = $true
-    clientSocketOpenAtPermissionBoundary = $true
+    requestAgeAtBoundaryMs = 9000
+    requestBoundaryClassification = "cancellation-consistent-within-observed-transition-interval"
+    requestStillInFlight = $false
+    clientSocketOpenAtPermissionBoundary = $false
+    accessibilityBoundaryEvidence = New-TestAccessibilityBoundaryEvidence
     sameProductPidAtBoundary = $true
     processRestartExpected = $false
     processRestartedAfterBoundary = $false
-    productPidBefore = "26127"
-    productPidAtBoundary = "26127"
-    productPidAfterReturn = "26127"
+    productPidBefore = "14438"
+    productPidAtBoundary = "14438"
+    productPidAfterReturn = "14438"
     heldResponseStatus = 401
     permissionPauseUiObserved = $true
     authenticationPauseAfterRelease = $false
@@ -228,7 +307,7 @@ function New-Ticket04CaseArtifact($CaseResult, [string]$CaseId, [string]$CaseRun
         serverHeldResponseCount = 0
     }
     return [pscustomobject]@{
-        schemaVersion = 1
+        schemaVersion = if ($CaseId -eq "accessibility-revocation") { 2 } else { 1 }
         contractVersion = 1
         caseId = $CaseId
         runId = $CaseRunId
@@ -246,8 +325,10 @@ function New-Ticket04CaseArtifact($CaseResult, [string]$CaseId, [string]$CaseRun
     }
 }
 
-if (-not (Test-Ticket04CaseResult -Case $notificationCaseResult) -or -not (Test-Ticket04CaseResult -Case $accessibilityCaseResult)) {
-    throw "Ticket 04 rejected a complete case result even though the notification and Accessibility cases satisfy their independent contracts."
+$notificationCaseResultValid = Test-Ticket04CaseResult -Case $notificationCaseResult
+$accessibilityCaseResultValid = Test-Ticket04CaseResult -Case $accessibilityCaseResult
+if (-not $notificationCaseResultValid -or -not $accessibilityCaseResultValid) {
+    throw "Ticket 04 case-result validation failed (notification=$notificationCaseResultValid, accessibility=$accessibilityCaseResultValid)."
 }
 $notificationCaseArtifact = New-Ticket04CaseArtifact $notificationCaseResult "notification-revocation" $notificationCaseResult.runId 5 200 "write-failed"
 $accessibilityCaseArtifact = New-Ticket04CaseArtifact $accessibilityCaseResult "accessibility-revocation" $accessibilityCaseResult.runId 9 401 "write-failed"
