@@ -336,11 +336,22 @@ import sys
 root, revision, paths_json = sys.argv[1:4]
 parts = []
 for path in json.loads(paths_json):
-    result = subprocess.run(
-        ["git", "-C", root, "show", revision + ":" + path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "show", revision + ":" + path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except Exception as error:
+        print(json.dumps({
+            "error": "git-show-launch-failed",
+            "revision": revision,
+            "path": path,
+            "exceptionType": type(error).__name__,
+            "errno": getattr(error, "errno", None),
+            "winerror": getattr(error, "winerror", None),
+        }))
+        sys.exit(1)
     if result.returncode != 0:
         print(json.dumps({
             "error": "git-show-failed",
@@ -355,10 +366,13 @@ print(hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest())
 '@
     $output = & $PythonPath -c $script $RepositoryRoot $Revision $pathsJson 2>$null
     if ($LASTEXITCODE -ne 0) {
-        $failureDetail = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'git-show-failed' } | Select-Object -Last 1)
+        $failureDetail = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'git-show-(?:launch-)?failed' } | Select-Object -Last 1)
         if ($failureDetail.Count -gt 0) {
             $failure = $failureDetail[0] | ConvertFrom-Json -ErrorAction SilentlyContinue
-            if ($failure.error -ceq "git-show-failed" -and $failure.revision -ceq $Revision -and $failure.path -match '^[A-Za-z0-9_./-]+$') {
+            if ($failure.error -in @("git-show-failed", "git-show-launch-failed") -and $failure.revision -ceq $Revision -and $failure.path -match '^[A-Za-z0-9_./-]+$') {
+                if ($failure.error -ceq "git-show-launch-failed") {
+                    throw "Could not hash the Ticket 04 source snapshot at revision '$Revision': git could not start for '$($failure.path)' ($($failure.exceptionType), winerror $($failure.winerror))."
+                }
                 throw "Could not hash the Ticket 04 source snapshot at revision '$Revision': git show failed for '$($failure.path)' (exit $($failure.exitCode))."
             }
         }
