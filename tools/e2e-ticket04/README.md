@@ -8,15 +8,15 @@ First rebuild and refresh only the observer APKs. The runner verifies that the p
 .\tools\e2e-ticket01\Run-Ticket01.ps1 -Scenario ticket04 -RefreshObserver
 ```
 
-When the device is ready for the human steps, run:
+When the device is ready for the human steps, run the notification case first:
 
 ```powershell
-.\tools\e2e-ticket01\Run-Ticket01.ps1 -Scenario ticket04 -RunPrepared
+.\tools\e2e-ticket01\Run-Ticket01.ps1 -Scenario ticket04 -RunPrepared -Ticket04Case notification
 ```
 
 The runner starts a fake loopback API only. It never calls the TodoSchool API, changes a permission through ADB, or force-stops the product app. The observer keeps the already-awake screen on with its bounded 15-minute wake lock.
 
-For each case, the **학습 감시 E2E 검사** screen first displays a **시험 시작** button, before the held report request starts. Press it only when ready. The observer then starts one real product report request against the held fixture response and opens the relevant Android Settings page after the server confirms that request is pending.
+For each case, the **학습 감시 E2E 검사** screen first displays a **시험 시작** button, before the held report request starts. Press it only when ready. The observer then starts one real product report request against the held fixture response and opens the relevant Android Settings page after the server confirms that request is pending. Each completed case is validated and saved immediately as `ticket04-case-evidence-<caseId>.json`, alongside that run's server evidence. A one-case run never reports a two-case PASS.
 
 For the notification case, turn off the product app's notifications. The observer waits up to five minutes for the real permission change; this wait does not change the permission automatically. It records the request age, whether the client request and socket were still active, and the process IDs separately. If the request ended before notification access was turned off, the test makes no cancellation claim and still checks the OS process restart, registration retention, and silent recovery.
 
@@ -29,5 +29,13 @@ The 13.5-second cutoff leaves margin before the product's 15-second read timeout
 When asked, restore the permission yourself in Android Settings. The test verifies the full silent baseline, registration and progress preservation, then a new completion for the same child. It repeats the process for the other permission. If the runner stops with a permission still off, restore it manually before ending the session.
 
 The per-case result records permission state, request sequence and age, an explicit request-boundary classification, in-flight/socket state, PID before/boundary/after returning, process expectation, acknowledgement and release times, disconnect evidence, preserved registration and subject state, silent recovery baseline, and later completion. Same-PID, in-flight, socket-open evidence is mandatory only for Accessibility OFF. Notification OFF requires an observed process restart with registration and silent recovery preserved; its request state is recorded without claiming same-process cancellation. Its new process may begin with pending subject vectors because its prior in-memory baseline was lost; the test compares that new-process state only before and after release of the old held response. Accessibility compares against its same-process baseline before and after release. The stale success/error side-effect guards remain backed by the product engine unit tests. If HTTP cancellation prevents a callback from being delivered, that delivery remains unobserved and is not forced.
+
+After the notification run has restored its permission and finished, retain the printed JSON path. Run Accessibility separately with that exact artifact path:
+
+```powershell
+.\tools\e2e-ticket01\Run-Ticket01.ps1 -Scenario ticket04 -RunPrepared -Ticket04Case accessibility -Ticket04NotificationEvidencePath "<notification-case-json-path>"
+```
+
+The strict aggregate accepts the two case artifacts only when both pass, have distinct case IDs, and share the same source snapshot, product APK hash, device, Android API, application ID, and evidence contract. The Accessibility run writes `ticket04-result.json` only after this check passes. If the source snapshot or product APK changes between runs, do not edit the old case artifact; rerun the notification case against the current prepared build.
 
 The observer result and selected, redacted fixture evidence are written under `build/e2e-ticket04/<runId>/`. Raw fixture request bodies and authorization headers are not copied into the Ticket 04 summary artifact.

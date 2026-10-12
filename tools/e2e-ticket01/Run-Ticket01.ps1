@@ -7,7 +7,10 @@ param(
     [switch]$DeviceOnly,
     [switch]$PrepareDevice,
     [switch]$RunPrepared,
-    [switch]$RefreshObserver
+    [switch]$RefreshObserver,
+    [ValidateSet("both", "notification", "accessibility")]
+    [string]$Ticket04Case = "both",
+    [string]$Ticket04NotificationEvidencePath
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +34,18 @@ if ($usesExternalObserver -and $DeviceOnly -and -not $PrepareDevice -and -not $R
 if ($usesExternalObserver -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
     $RunPrepared = $true
 }
+if ($Scenario -ne "ticket04" -and ($Ticket04Case -ne "both" -or $Ticket04NotificationEvidencePath)) {
+    throw "-Ticket04Case and -Ticket04NotificationEvidencePath are only available for Scenario ticket04."
+}
+if ($Scenario -eq "ticket04" -and ($PrepareDevice -or $RefreshObserver) -and ($Ticket04Case -ne "both" -or $Ticket04NotificationEvidencePath)) {
+    throw "Ticket 04 case selection applies only to -RunPrepared; preparation and observer refresh do not run cases."
+}
+if ($Scenario -eq "ticket04" -and $Ticket04Case -eq "accessibility" -and -not $Ticket04NotificationEvidencePath) {
+    throw "Accessibility-only Ticket 04 runs require a validated notification case artifact for strict aggregation."
+}
+if ($Ticket04Case -ne "accessibility" -and $Ticket04NotificationEvidencePath) {
+    throw "-Ticket04NotificationEvidencePath is only used when -Ticket04Case accessibility is selected."
+}
 if (($PrepareDevice -or $RunPrepared -or $RefreshObserver) -and -not $usesExternalObserver) {
     throw "-PrepareDevice, -RunPrepared, and -RefreshObserver are reserved for observer-based scenarios."
 }
@@ -52,6 +67,7 @@ $observerApplicationId = "com.example.todoschooltime.e2eobserver"
 $observerTestApplicationId = "$observerApplicationId.test"
 $observerAccessibilityLabel = "토도 학습 감시 · 로컬 테스트"
 $runId = [Guid]::NewGuid().ToString("N")
+$ticket04PriorNotificationCaseEvidence = $null
 $artifactDirectory = Join-Path $repositoryRoot "build\e2e-$Scenario\$runId"
 New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
 
@@ -179,7 +195,7 @@ function Get-DeviceMonitorState {
     }
 }
 
-function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass, [string]$ResultLogTag, [int]$TimeoutMinutes) {
+function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass, [string]$ResultLogTag, [int]$TimeoutMinutes, [string]$Ticket04CaseMode = "both") {
     $before = Get-DeviceMonitorState
     $beforePath = Join-Path $artifactDirectory "product-service-before-observer.txt"
     $before.accessibilityDump | Set-Content -LiteralPath $beforePath -Encoding utf8
@@ -190,7 +206,8 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $stdoutPath = Join-Path $artifactDirectory "observer-instrumentation.stdout.txt"
     $stderrPath = Join-Path $artifactDirectory "observer-instrumentation.stderr.txt"
     $samplePath = Join-Path $artifactDirectory "observer-lifecycle-samples.json"
-    $argumentText = "-s $DeviceSerial shell am instrument -w -r -e apiBaseUrl $ApiBaseUrl -e runId $RunId -e class $TestClass $InstrumentationComponent"
+    $ticket04CaseArgument = if ($Scenario -eq "ticket04") { "-e caseMode $Ticket04CaseMode" } else { "" }
+    $argumentText = "-s $DeviceSerial shell am instrument -w -r -e apiBaseUrl $ApiBaseUrl -e runId $RunId $ticket04CaseArgument -e class $TestClass $InstrumentationComponent"
     $process = Start-Process -FilePath $adbPath -ArgumentList $argumentText -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $samples = [System.Collections.Generic.List[object]]::new()
@@ -229,9 +246,11 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                                 }
                                 "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
                                 "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
+                                "CASE_RESULT" { Save-Ticket04CaseEvidenceFromProgress $event }
                                 default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
                             }
                         } catch {
+                            if ($event.event -eq "CASE_RESULT") { throw }
                             Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
                         }
                     }
@@ -277,9 +296,11 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                         $boundary = $event.details | ConvertFrom-Json
                         Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
                     }
+                    "CASE_RESULT" { Save-Ticket04CaseEvidenceFromProgress $event }
                     default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
                 }
             } catch {
+                if ($event.event -eq "CASE_RESULT") { throw }
                 Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
             }
         }
@@ -677,7 +698,111 @@ function Get-Ticket04ServerEvidence($Snapshot) {
     }
 }
 
-function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationText) {
+function Get-Ticket04SourceSnapshot {
+    $sourceRelativePaths = @(
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04PermissionRecoveryTest.kt",
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04AccessibilitySettingsNavigator.kt",
+        "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket04AccessibilitySettingsNavigationTest.kt",
+        "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ControlActivity.kt",
+        "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04ActionToken.kt",
+        "e2eobserver/src/main/java/com/example/todoschooltime/e2eobserver/Ticket04BoundaryEvidence.kt",
+        "tools/e2e-ticket01/Run-Ticket01.ps1",
+        "tools/e2e-ticket04/PermissionRecoveryEvidence.psm1",
+        "tools/e2e-ticket04/Test-ResultChunks.ps1"
+    )
+    $sourcePaths = @($sourceRelativePaths | ForEach-Object { Join-Path $repositoryRoot $_ })
+    foreach ($sourcePath in $sourcePaths) {
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            throw "A Ticket 04 evidence source file is missing: $sourcePath"
+        }
+    }
+    $sourceHashMaterial = ($sourceRelativePaths | ForEach-Object {
+        $absolutePath = Join-Path $repositoryRoot $_
+        "$_=$((Get-FileHash -LiteralPath $absolutePath -Algorithm SHA256).Hash.ToLowerInvariant())"
+    }) -join "`n"
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $sourceContentSha256 = [BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($sourceHashMaterial))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
+    $revisionOutput = & git -C $repositoryRoot rev-parse HEAD 2>$null
+    $revisionExitCode = $LASTEXITCODE
+    $sourceRevision = (@($revisionOutput) | Select-Object -First 1).Trim()
+    if ($revisionExitCode -ne 0 -or $sourceRevision -notmatch '^[0-9a-f]{7,40}$') {
+        throw "Could not record the source revision for Ticket 04 case evidence."
+    }
+    $dirtyPaths = @(& git -C $repositoryRoot status --porcelain -- $sourceRelativePaths 2>$null)
+    return [pscustomobject]@{
+        revision = $sourceRevision
+        contentSha256 = $sourceContentSha256
+        workingTreeDirty = ($dirtyPaths.Count -gt 0)
+    }
+}
+
+function Save-Ticket04CaseEvidenceFromProgress($Event) {
+    if ($Event.event -cne "CASE_RESULT") { return }
+    $caseResult = [string]$Event.details | ConvertFrom-Json -ErrorAction Stop
+    if ($caseResult.runId -cne $runId -or $caseResult.caseId -cne $Event.caseId -or
+        -not (Test-Ticket04CaseResult -Case $caseResult)) {
+        throw "Ticket 04 case result failed its identity or case-level checks: caseId='$($Event.caseId)' runId='$($Event.runId)'"
+    }
+
+    $snapshot = Read-ServerRequests
+    if ($null -eq $snapshot -or $snapshot.runId -cne $runId -or $snapshot.scenario -cne "ticket04") {
+        throw "Ticket 04 case result has no matching loopback fixture snapshot: caseId='$($Event.caseId)'"
+    }
+    $fixtureEvidence = Get-Ticket04ServerEvidence $snapshot
+    $caseHolds = @($fixtureEvidence.releasedReportHolds | Where-Object { $_.caseId -ceq $caseResult.caseId })
+    if ($caseHolds.Count -ne 1 -or
+        [int]$caseHolds[0].responseStatus -ne [int]$caseResult.heldResponseStatus -or
+        [string]$caseHolds[0].deliveryStatus -cne [string]$caseResult.serverResponseWrite -or
+        [int64]$caseHolds[0].sequence -ne [int64]$caseResult.serverRequestSequence -or
+        [int]$fixtureEvidence.inFlightRequestCount -ne 0 -or
+        [int]$fixtureEvidence.serverHeldResponseCount -ne 0) {
+        throw "Ticket 04 case result does not match a completed fixture release: caseId='$($Event.caseId)'"
+    }
+
+    $casePath = Join-Path $artifactDirectory "ticket04-case-evidence-$($caseResult.caseId).json"
+    if (Test-Path -LiteralPath $casePath) {
+        throw "Ticket 04 case evidence is immutable and already exists for this run: $casePath"
+    }
+    $sourceSnapshot = Get-Ticket04SourceSnapshot
+    $evidence = [ordered]@{
+        schemaVersion = 1
+        contractVersion = 1
+        caseId = [string]$caseResult.caseId
+        runId = [string]$caseResult.runId
+        sourceRevision = $sourceSnapshot.revision
+        sourceContentSha256 = $sourceSnapshot.contentSha256
+        workingTreeDirty = $sourceSnapshot.workingTreeDirty
+        device = [ordered]@{
+            serial = $DeviceSerial
+            model = $model
+            apiLevel = [int]$sdkVersion
+        }
+        applicationId = $debugApplicationId
+        productApkSha256 = [string]$prepared.debugApkSha256
+        observerApkSha256 = [string]$prepared.observerApkSha256
+        observerTestApkSha256 = [string]$prepared.observerTestApkSha256
+        fixture = $fixtureEvidence
+        caseResult = $caseResult
+        validation = [ordered]@{
+            status = "passed"
+            checks = @("case-specific boundary and recovery result", "matching explicitly released fixture response", "no in-flight or held response at case completion")
+        }
+    }
+    if (-not (Test-Ticket04CaseEvidence -Evidence ([pscustomobject]$evidence) -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)) {
+        throw "Ticket 04 case evidence failed its immutable artifact schema check: caseId='$($Event.caseId)'"
+    }
+
+    $temporaryPath = "$casePath.tmp"
+    $evidence | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $temporaryPath -Encoding utf8
+    Move-Item -LiteralPath $temporaryPath -Destination $casePath
+    Write-Host "Ticket 04 완료 case JSON 저장: $casePath"
+}
+
+function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationText, [string]$CaseMode, $PriorNotificationEvidence) {
     if ($null -eq $Snapshot) { throw "The Ticket 04 loopback fixture state is unavailable." }
     if ($Snapshot.runId -ne $runId -or $Snapshot.scenario -ne "ticket04") {
         throw "Connected to a server with the wrong Ticket 04 run identity."
@@ -685,79 +810,100 @@ function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationTe
     if (@($Snapshot.inFlightRequests).Count -ne 0 -or @($Snapshot.serverHeldResponses).Count -ne 0) {
         throw "Ticket 04 ended with an HTTP client in flight or a fixture response still held."
     }
-    if (@($Snapshot.releasedReportHolds).Count -ne 2) {
-        throw "Ticket 04 must preserve exactly two explicitly released held-report records across setup resets."
-    }
 
     $resultMatch = [regex]::Match($InstrumentationText, 'TICKET04_RESULT=(\{[^\r\n]+\})')
     if (-not $resultMatch.Success) { throw "Ticket 04 observer instrumentation omitted its structured evidence." }
     $result = $resultMatch.Groups[1].Value | ConvertFrom-Json
-    if ($result.runId -ne $runId -or $result.apiBaseUrl -ne $apiBaseUrl -or
-        -not $result.notificationProcessRestartObserved -or -not $result.accessibilitySamePidBoundaryObserved -or
-        -not $result.registrationPreserved -or
-        -not $result.silentChannelPrepared -or $result.actualTodoApiCalled -or
-        $result.callbackDeliveryObservation -notmatch 'unobserved' -or
-        $result.cases.Count -ne 2) {
+    if ($result.runId -ne $runId -or $result.caseMode -cne $CaseMode -or $result.apiBaseUrl -ne $apiBaseUrl -or
+        [int]$result.deviceApi -ne $sdkVersion -or
+        -not $result.registrationPreserved -or -not $result.silentChannelPrepared -or $result.actualTodoApiCalled -or
+        $result.productAlertDeliveryTested -or
+        $result.callbackDeliveryObservation -notmatch 'unobserved') {
         throw "Ticket 04 top-level observer evidence did not meet its identity or preservation requirements."
     }
 
-    $expected = @{
-        "notification-revocation" = 200
-        "accessibility-revocation" = 401
+    $expectedCaseIds = switch ($CaseMode) {
+        "notification" { @("notification-revocation"); break }
+        "accessibility" { @("accessibility-revocation"); break }
+        "both" { @("notification-revocation", "accessibility-revocation"); break }
+        default { throw "Unsupported Ticket 04 case mode: $CaseMode" }
     }
+    if (@($result.cases).Count -ne $expectedCaseIds.Count) {
+        throw "Ticket 04 returned $(@($result.cases).Count) cases for '$CaseMode'; expected $($expectedCaseIds.Count)."
+    }
+    $expectsNotification = "notification-revocation" -in $expectedCaseIds
+    $expectsAccessibility = "accessibility-revocation" -in $expectedCaseIds
+    if ([bool]$result.notificationProcessRestartObserved -ne $expectsNotification -or
+        [bool]$result.accessibilitySamePidBoundaryObserved -ne $expectsAccessibility) {
+        throw "Ticket 04 top-level case gates do not match the selected case results."
+    }
+    $caseById = @{}
     foreach ($case in @($result.cases)) {
-        if (-not $expected.ContainsKey([string]$case.caseId)) { throw "Ticket 04 returned an unexpected case: $($case.caseId)" }
-        $isNotificationCase = $case.caseId -eq "notification-revocation"
-        $caseHasRequiredBoundaryEvidence = Test-Ticket04CaseBoundaryEvidence -Case $case
-        $expectedStateComparison = if ($isNotificationCase) {
-            "unchanged-after-release-in-restarted-process"
-        } else {
-            "unchanged-after-release-in-same-process"
+        $caseId = [string]$case.caseId
+        if ($caseId -notin $expectedCaseIds -or $caseById.ContainsKey($caseId)) {
+            throw "Ticket 04 returned an unexpected or duplicate case: $caseId"
         }
-        if ([int]$case.heldResponseStatus -ne $expected[[string]$case.caseId] -or
-            -not $caseHasRequiredBoundaryEvidence -or
-            $case.actualPermissionEnabledAtBoundary -or -not $case.permissionPauseUiObserved -or
-            $case.staleCompletionRequests -ne 0 -or $case.authenticationPauseAfterRelease -or
-            -not $case.registeredChildrenPreserved -or -not $case.serviceLeaseAtDispatch -or
-            $case.serviceLeaseAtPause -ne $isNotificationCase -or
-            $case.subjectStateComparison -cne $expectedStateComparison -or
-            -not $case.restoredServiceLease -or -not $case.recoverySilentBaseline -or
-            $case.laterCompletionCount -ne 1 -or
-            $case.userAcknowledgementElapsedRealtimeMs -le $case.permissionBoundaryElapsedRealtimeMs -or
-            $case.responseReleaseElapsedRealtimeMs -le $case.userAcknowledgementElapsedRealtimeMs) {
+        if (-not (Test-Ticket04CaseResult -Case $case)) {
             throw "Ticket 04 failed its permission-specific boundary, process, stale-response, silent-recovery or later-completion assertions: $($case | ConvertTo-Json -Depth 8 -Compress)"
         }
-        if ($case.connectionCloseClassification -notin @(
-            "client-still-connected-at-explicit-release; response-delivery-outcome-will-be-observed",
-            "client-connection-closed-after-permission-boundary-within-15s-window; cancellation-consistent, cause-unconfirmed",
-            "late-client-connection-close; timeout-or-other-close-ambiguous",
-            "client-connection-closed-before-permission-boundary-or-boundary-order-ambiguous",
-            "client-still-connected-near-or-after-read-timeout; outcome-ambiguous"
-        )) {
-            throw "Ticket 04 returned an unknown client connection classification: $($case.connectionCloseClassification)"
-        }
-        [void]$expected.Remove([string]$case.caseId)
-    }
-    if ($expected.Count -ne 0) { throw "Ticket 04 omitted required permission cases: $($expected.Keys -join ', ')" }
-
-    foreach ($case in @($result.cases)) {
-        $heldRequest = @($Snapshot.releasedReportHolds | Where-Object { $_.caseId -eq $case.caseId })
+        $caseById[$caseId] = $case
+        $heldRequest = @($Snapshot.releasedReportHolds | Where-Object { $_.caseId -eq $caseId })
         if ($heldRequest.Count -ne 1 -or
             $heldRequest[0].responseStatus -ne $case.heldResponseStatus -or
             $heldRequest[0].deliveryStatus -ne $case.serverResponseWrite -or
             $heldRequest[0].sequence -ne $case.serverRequestSequence) {
-            throw "Fixture evidence did not match the explicitly released $($case.caseId) response."
+            throw "Fixture evidence did not match the explicitly released $caseId response."
         }
     }
+
+    $caseArtifacts = @()
+    foreach ($caseId in $expectedCaseIds) {
+        if (-not $caseById.ContainsKey($caseId)) { throw "Ticket 04 omitted required case: $caseId" }
+        $caseArtifactPath = Join-Path $artifactDirectory "ticket04-case-evidence-$caseId.json"
+        if (-not (Test-Path -LiteralPath $caseArtifactPath)) { throw "Ticket 04 omitted its immutable case evidence artifact: $caseArtifactPath" }
+        $caseArtifact = Get-Content -LiteralPath $caseArtifactPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        if (-not (Test-Ticket04CaseEvidence -Evidence $caseArtifact -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256) -or
+            $caseArtifact.runId -cne $runId -or $caseArtifact.caseId -cne $caseId) {
+            throw "Ticket 04 case evidence artifact failed strict validation: $caseArtifactPath"
+        }
+        $caseArtifacts += $caseArtifact
+    }
+
     $serverEvidencePath = Join-Path $artifactDirectory "ticket04-server-evidence.json"
     (Get-Ticket04ServerEvidence $Snapshot) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $serverEvidencePath -Encoding utf8
+    if ($CaseMode -eq "notification") {
+        $casePath = Join-Path $artifactDirectory "ticket04-case-evidence-notification-revocation.json"
+        $notificationCase = $caseById["notification-revocation"]
+        Write-Host "PASS Ticket 04 notification case: OFF caused the observed process restart, with registration preserved and silent recovery verified. Accessibility remains untested; this result is not a two-case PASS."
+        Write-Host "Notification request at OFF: $($notificationCase.requestBoundaryClassification), age=$($notificationCase.requestAgeAtBoundaryMs)ms; in-flight cancellation was not established and is not an acceptance gate for this case."
+        Write-Host "Immutable notification evidence: $casePath"
+        Write-Host "Fixture evidence (selected fields): $serverEvidencePath"
+        return
+    }
+
+    if ($CaseMode -eq "accessibility") {
+        if (-not (Test-Ticket04CaseEvidence -Evidence $PriorNotificationEvidence -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)) {
+            throw "The prior notification case artifact failed strict schema, fixture, device, source and product-binary validation."
+        }
+        $caseArtifacts = @($PriorNotificationEvidence) + @($caseArtifacts)
+    }
+    $aggregateCases = @(Join-Ticket04CaseEvidence -Evidence $caseArtifacts -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)
+    $aggregate = [ordered]@{
+        schemaVersion = 1
+        contractVersion = 1
+        status = "passed"
+        completedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+        applicationId = $debugApplicationId
+        productApkSha256 = [string]$prepared.debugApkSha256
+        device = $aggregateCases[0].device
+        caseIds = @($aggregateCases | ForEach-Object { $_.caseId })
+        cases = $aggregateCases
+    }
     $resultPath = Join-Path $artifactDirectory "ticket04-result.json"
-    $result | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $resultPath -Encoding utf8
-    $notificationCase = @($result.cases | Where-Object { $_.caseId -eq "notification-revocation" })[0]
-    Write-Host "PASS Ticket 04: notification OFF restarted the process with registration preserved; Accessibility OFF captured a same-PID, in-flight, socket-open request and preserved that process state; explicit acknowledgement preceded release; restored monitoring was silent before later completion."
-    Write-Host "Notification request at OFF: $($notificationCase.requestBoundaryClassification), age=$($notificationCase.requestAgeAtBoundaryMs)ms; no same-process cancellation claim is made."
+    $aggregate | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $resultPath -Encoding utf8
+    Write-Host "PASS Ticket 04: the notification and Accessibility cases each passed their own immutable evidence gates on the same product APK, device, source contract and fixture schema."
     Write-Host "Fixture evidence (selected fields): $serverEvidencePath"
-    Write-Host "Observer evidence: $resultPath"
+    Write-Host "Strict two-case aggregate evidence: $resultPath"
 }
 
 function Assert-ServerRoundTrip($Snapshot) {
@@ -1238,6 +1384,21 @@ try {
         Assert-InstalledApkEquals $debugApplicationId $debugApk "installed-debug.apk" | Out-Null
         Assert-InstalledApkEquals $observerApplicationId $observerApk "installed-observer.apk" | Out-Null
         Assert-InstalledApkEquals $observerTestApplicationId $observerTestApk "installed-observer-test.apk" | Out-Null
+        if ($Scenario -eq "ticket04" -and $Ticket04Case -eq "accessibility") {
+            $resolvedPriorEvidencePath = (Resolve-Path -LiteralPath $Ticket04NotificationEvidencePath -ErrorAction Stop).Path
+            $ticket04PriorNotificationCaseEvidence = Get-Content -LiteralPath $resolvedPriorEvidencePath -Raw | ConvertFrom-Json -ErrorAction Stop
+            if ($ticket04PriorNotificationCaseEvidence.caseId -cne "notification-revocation" -or
+                -not (Test-Ticket04CaseEvidence -Evidence $ticket04PriorNotificationCaseEvidence -ExpectedDeviceSerial $DeviceSerial -ExpectedProductApkSha256 $prepared.debugApkSha256)) {
+                throw "The prior notification case artifact failed strict schema, source, fixture, device, or product-binary validation."
+            }
+            $currentSourceSnapshot = Get-Ticket04SourceSnapshot
+            if ($ticket04PriorNotificationCaseEvidence.sourceRevision -cne $currentSourceSnapshot.revision -or
+                $ticket04PriorNotificationCaseEvidence.sourceContentSha256 -cne $currentSourceSnapshot.contentSha256 -or
+                $ticket04PriorNotificationCaseEvidence.workingTreeDirty -ne $currentSourceSnapshot.workingTreeDirty) {
+                throw "The notification evidence was captured against a different Ticket 04 source snapshot. Rerun that case before starting Accessibility; no fixture server or human step has started."
+            }
+            Write-Host "PASS prior notification evidence artifact matches the current device, prepared product APK and exact Ticket 04 source snapshot."
+        }
         Write-Host "PASS prepared debug, observer and observer-test APK hashes match the installed packages; no product install will occur."
     }
 
@@ -1312,7 +1473,7 @@ try {
     } elseif ($Scenario -eq "ticket04") {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.Ticket04PermissionRecoveryTest"
-        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket04Result" 45
+        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket04Result" 45 $Ticket04Case
         $instrumentationOutput = @($instrumentationText -split "`r?`n")
     } else {
         Invoke-SelectedAdb @("install", "-r", $debugApk) | Out-Null
@@ -1354,7 +1515,7 @@ try {
     } elseif ($Scenario -eq "ticket03") {
         Assert-Ticket03ForegroundPolling $snapshot $instrumentationText
     } elseif ($Scenario -eq "ticket04") {
-        Assert-Ticket04PermissionRecovery $snapshot $instrumentationText
+        Assert-Ticket04PermissionRecovery $snapshot $instrumentationText $Ticket04Case $ticket04PriorNotificationCaseEvidence
     } else {
         Assert-ServerRoundTrip $snapshot
         Save-AppScreenshot
@@ -1368,8 +1529,10 @@ try {
     if (-not $debugPackageAfter) { throw "The isolated debug app was not installed." }
 
     $apiDescription = if ($sdkVersion -eq 35) { "Android 15" } elseif ($sdkVersion -eq 33) { "Android 13 substitute" } else { "API $sdkVersion" }
-    if ($Scenario -eq "ticket04") {
-        Write-Host "PASS $Scenario on $apiDescription after manual permission revocation and restoration."
+    if ($Scenario -eq "ticket04" -and $Ticket04Case -eq "notification") {
+        Write-Host "PASS Ticket 04 notification case only on $apiDescription. Accessibility was not run; no two-case aggregate is reported."
+    } elseif ($Scenario -eq "ticket04") {
+        Write-Host "PASS Ticket 04 two-case aggregate on $apiDescription after manual permission revocation and restoration."
     } else {
         Write-Host "PASS $Scenario on $apiDescription. No notification or accessibility permissions were changed."
     }

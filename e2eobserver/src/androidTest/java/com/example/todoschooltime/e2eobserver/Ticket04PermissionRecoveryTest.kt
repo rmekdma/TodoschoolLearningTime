@@ -40,6 +40,8 @@ class Ticket04PermissionRecoveryTest {
             ?: throw AssertionError("Missing apiBaseUrl instrumentation argument")
         val runId = arguments.getString(ARG_RUN_ID)
             ?: throw AssertionError("Missing runId instrumentation argument")
+        val caseMode = arguments.getString(ARG_CASE_MODE, CASE_MODE_BOTH)
+        assertTrue("Unsupported Ticket 04 case mode: $caseMode", caseMode in setOf(CASE_MODE_BOTH, CASE_MODE_NOTIFICATION, CASE_MODE_ACCESSIBILITY))
         assertTrue("Ticket 04 requires its loopback-only fixture", apiBaseUrl.startsWith(LOOPBACK_PREFIX))
         val seoulDate = seoulDateNumber()
         val observerContext = instrumentation.targetContext
@@ -72,54 +74,63 @@ class Ticket04PermissionRecoveryTest {
             context = observerContext,
             apiBaseUrl = apiBaseUrl,
             runId = runId,
+            reportCounts = if (caseMode == CASE_MODE_ACCESSIBILITY) ACCESSIBILITY_INITIAL_COUNTS else INITIAL_COUNTS,
         )
         val initialState = readProductState(observerContext)
         val hangeulId = onlyChildNotification(initialState).getInt("id")
-        assertExpectedSubject(initialState, HANGEUL_SUBJECT, "BELOW_TARGET", 2, 6)
+        val initialHangeulCount = if (caseMode == CASE_MODE_ACCESSIBILITY) 6 else 2
+        val initialHangeulStatus = if (caseMode == CASE_MODE_ACCESSIBILITY) "COMPLETE" else "BELOW_TARGET"
+        assertExpectedSubject(initialState, HANGEUL_SUBJECT, initialHangeulStatus, initialHangeulCount, 6)
         assertExpectedSubject(initialState, MATH_SUBJECT, "COMPLETE", 5, 5)
         assertExpectedSubject(initialState, ENGLISH_SUBJECT, "BELOW_TARGET", 7, 8)
 
-        val notificationCase = runPermissionCase(
-            instrumentation = instrumentation,
-            automation = automation,
-            context = observerContext,
-            apiBaseUrl = apiBaseUrl,
-            runId = runId,
-            seoulDate = seoulDate,
-            caseId = "notification-revocation",
-            permission = PermissionKind.NOTIFICATIONS,
-            subjectName = HANGEUL_SUBJECT,
-            subjectPath = HANGEUL_REPORT_PATH,
-            subjectPackage = HANGEUL_APP_PACKAGE,
-            expectedBeforeCount = 2,
-            heldResponseStatus = 200,
-            heldResponseCount = 6,
-            recoveryCounts = mapOf("hangeul" to 2, "math" to 5, "english" to 7),
-            followUpCount = 6,
-            followUpTarget = 6,
-            notificationId = hangeulId,
-        )
+        var notificationCase: JSONObject? = null
+        if (caseMode != CASE_MODE_ACCESSIBILITY) {
+            notificationCase = runPermissionCase(
+                instrumentation = instrumentation,
+                automation = automation,
+                context = observerContext,
+                apiBaseUrl = apiBaseUrl,
+                runId = runId,
+                seoulDate = seoulDate,
+                caseId = "notification-revocation",
+                permission = PermissionKind.NOTIFICATIONS,
+                subjectName = HANGEUL_SUBJECT,
+                subjectPath = HANGEUL_REPORT_PATH,
+                subjectPackage = HANGEUL_APP_PACKAGE,
+                expectedBeforeCount = 2,
+                heldResponseStatus = 200,
+                heldResponseCount = 6,
+                recoveryCounts = INITIAL_COUNTS,
+                followUpCount = 6,
+                followUpTarget = 6,
+                notificationId = hangeulId,
+            )
+        }
 
-        val accessibilityCase = runPermissionCase(
-            instrumentation = instrumentation,
-            automation = automation,
-            context = observerContext,
-            apiBaseUrl = apiBaseUrl,
-            runId = runId,
-            seoulDate = seoulDate,
-            caseId = "accessibility-revocation",
-            permission = PermissionKind.ACCESSIBILITY,
-            subjectName = ENGLISH_SUBJECT,
-            subjectPath = ENGLISH_REPORT_PATH,
-            subjectPackage = ENGLISH_APP_PACKAGE,
-            expectedBeforeCount = 7,
-            heldResponseStatus = 401,
-            heldResponseCount = null,
-            recoveryCounts = mapOf("hangeul" to 6, "math" to 5, "english" to 7),
-            followUpCount = 8,
-            followUpTarget = 8,
-            notificationId = hangeulId,
-        )
+        var accessibilityCase: JSONObject? = null
+        if (caseMode != CASE_MODE_NOTIFICATION) {
+            accessibilityCase = runPermissionCase(
+                instrumentation = instrumentation,
+                automation = automation,
+                context = observerContext,
+                apiBaseUrl = apiBaseUrl,
+                runId = runId,
+                seoulDate = seoulDate,
+                caseId = "accessibility-revocation",
+                permission = PermissionKind.ACCESSIBILITY,
+                subjectName = ENGLISH_SUBJECT,
+                subjectPath = ENGLISH_REPORT_PATH,
+                subjectPackage = ENGLISH_APP_PACKAGE,
+                expectedBeforeCount = 7,
+                heldResponseStatus = 401,
+                heldResponseCount = null,
+                recoveryCounts = ACCESSIBILITY_INITIAL_COUNTS,
+                followUpCount = 8,
+                followUpTarget = 8,
+                notificationId = hangeulId,
+            )
+        }
 
         assertEquals(seoulDate, seoulDateNumber())
         val finalState = readProductState(observerContext)
@@ -127,21 +138,26 @@ class Ticket04PermissionRecoveryTest {
         assertEquals("Ticket 04 must preserve the registration", setOf(CHILD_NAME), finalState.getJSONArray("registeredChildren").strings().toSet())
         assertFalse("Ticket 04 may not leave an authentication pause", screenTexts(automation).any { it.contains("다시 로그인 필요") })
 
+        val cases = JSONArray().apply {
+            notificationCase?.let(::put)
+            accessibilityCase?.let(::put)
+        }
         emitResult(
             JSONObject()
                 .put("runId", runId)
+                .put("caseMode", caseMode)
                 .put("apiBaseUrl", apiBaseUrl)
                 .put("deviceApi", android.os.Build.VERSION.SDK_INT)
                 .put("seoulDate", seoulDate)
-                .put("notificationProcessRestartObserved", notificationCase.getBoolean("processRestartedAfterBoundary"))
-                .put("accessibilitySamePidBoundaryObserved", accessibilityCase.getBoolean("sameProductPidAtBoundary"))
+                .put("notificationProcessRestartObserved", notificationCase?.optBoolean("processRestartedAfterBoundary") ?: false)
+                .put("accessibilitySamePidBoundaryObserved", accessibilityCase?.optBoolean("sameProductPidAtBoundary") ?: false)
                 .put("registrationPreserved", true)
                 .put("silentChannelPrepared", true)
                 .put("productAlertDeliveryTested", false)
                 .put("actualTodoApiCalled", false)
                 .put("callbackDeliveryObservation", "unobserved; HTTP cancellation or read timeout may prevent delivery, and the cause is not inferred")
                 .put("engineStaleOutcomeUnitTest", "lateBaselineSuccessFailureAndAuthenticationDenialCannotChangeRecoveredState")
-                .put("cases", JSONArray().put(notificationCase).put(accessibilityCase))
+                .put("cases", cases)
         )
     }
 
@@ -150,6 +166,7 @@ class Ticket04PermissionRecoveryTest {
         context: Context,
         apiBaseUrl: String,
         runId: String,
+        reportCounts: Map<String, Int>,
     ) {
         val state = waitForProductState(context, SETUP_TIMEOUT_MS) {
             it.optString("accountId") == ACCOUNT_ID && it.getBoolean("serviceLeaseAttached")
@@ -169,15 +186,17 @@ class Ticket04PermissionRecoveryTest {
             apiBaseUrl,
             "POST",
             "/__ticket04/set-report-counts",
-            JSONObject().put("reports", JSONObject().put("hangeul", 2).put("math", 5).put("english", 7)),
+            JSONObject().put("reports", JSONObject().put("hangeul", reportCounts.getValue("hangeul")).put("math", reportCounts.getValue("math")).put("english", reportCounts.getValue("english"))),
         ).also { assertEquals(runId, it.getString("runId")) }
         fixtureRequest(apiBaseUrl, "POST", "/__ticket04/reset-requests", JSONObject())
         val notificationCursor = lastSequence(readProductState(context).getJSONArray("notificationEvents"))
         clickDescription(automation, "$CHILD_NAME 감시 등록")
+        val expectedHangeulCount = reportCounts.getValue("hangeul")
+        val expectedHangeulStatus = if (expectedHangeulCount >= TARGET_COUNTS.getValue(HANGEUL_SUBJECT)) "COMPLETE" else "BELOW_TARGET"
         val baseline = waitForProductState(context, RECOVERY_TIMEOUT_MS) { snapshot ->
             snapshot.getJSONArray("registeredChildren").strings().contains(CHILD_NAME) &&
                 snapshot.getBoolean("serviceLeaseAttached") &&
-                subject(snapshot, HANGEUL_SUBJECT).let { it.optString("status") == "BELOW_TARGET" && it.optInt("activityCount", -1) == 2 && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(HANGEUL_SUBJECT) } &&
+                subject(snapshot, HANGEUL_SUBJECT).let { it.optString("status") == expectedHangeulStatus && it.optInt("activityCount", -1) == expectedHangeulCount && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(HANGEUL_SUBJECT) } &&
                 subject(snapshot, MATH_SUBJECT).let { it.optString("status") == "COMPLETE" && it.optInt("activityCount", -1) == 5 && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(MATH_SUBJECT) } &&
                 subject(snapshot, ENGLISH_SUBJECT).let { it.optString("status") == "BELOW_TARGET" && it.optInt("activityCount", -1) == 7 && it.optInt("targetCount", -1) == TARGET_COUNTS.getValue(ENGLISH_SUBJECT) }
         }
@@ -495,6 +514,7 @@ class Ticket04PermissionRecoveryTest {
         assertTrue(activeNotifications.single().optString("bigText").contains("✔ $subjectName 완료 $followUpCount/$followUpTarget"))
 
         val result = JSONObject()
+            .put("runId", runId)
             .put("caseId", caseId)
             .put("buttonClickedElapsedRealtimeMs", startClickedAt)
             .put("permission", permission.name.lowercase())
@@ -541,6 +561,7 @@ class Ticket04PermissionRecoveryTest {
             .put("laterCompletionSubject", subjectName)
             .put("laterCompletionCount", completionEvents.size)
             .put("laterCompletionNotificationId", completionEvents.single().getInt("notificationId"))
+        emitProgress(runId, "CASE_RESULT", caseId, result.toString())
         return result
     }
 
@@ -686,19 +707,12 @@ class Ticket04PermissionRecoveryTest {
                 waitForNode(automation, SETTINGS_PAGE_TIMEOUT_MS) { it.text?.toString()?.contains("토도 학습시간") == true || it.text?.toString()?.contains("TodoSchool") == true }
             }
             PermissionKind.ACCESSIBILITY -> {
-                context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                val serviceLabel = context.packageManager.getServiceInfo(ComponentName(PRODUCT_PACKAGE, PRODUCT_SERVICE_CLASS), 0).loadLabel(context.packageManager).toString()
-                if (findNodeOrNull(automation, ACCESSIBILITY_PAGE_TIMEOUT_MS) { it.text?.toString() == serviceLabel } == null) {
-                    val installedApps = findNodeOrNull(automation, ACCESSIBILITY_PAGE_TIMEOUT_MS) {
-                        it.isClickable && (it.text?.toString() in setOf("Installed apps", "설치된 앱", "설치된 서비스"))
-                    }
-                    installedApps?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                }
-                val serviceRow = waitForNode(automation, ACCESSIBILITY_PAGE_TIMEOUT_MS) {
-                    it.text?.toString() == serviceLabel && it.isClickable
-                }
-                assertTrue("Could not open the product's Accessibility settings page", serviceRow.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-                waitForNode(automation, ACCESSIBILITY_PAGE_TIMEOUT_MS) { it.text?.toString() == serviceLabel }
+                Ticket04AccessibilitySettingsNavigator.openServiceSettingsPage(
+                    automation = automation,
+                    context = context,
+                    productPackage = PRODUCT_PACKAGE,
+                    serviceClass = PRODUCT_SERVICE_CLASS,
+                )
             }
         }
     }
@@ -1080,6 +1094,10 @@ class Ticket04PermissionRecoveryTest {
         const val LOOPBACK_PREFIX = "http://127.0.0.1:"
         const val ARG_API_BASE_URL = "apiBaseUrl"
         const val ARG_RUN_ID = "runId"
+        const val ARG_CASE_MODE = "caseMode"
+        const val CASE_MODE_BOTH = "both"
+        const val CASE_MODE_NOTIFICATION = "notification"
+        const val CASE_MODE_ACCESSIBILITY = "accessibility"
         const val RESULT_LOG_TAG = "Ticket04Result"
         const val RESULT_CHUNK_SIZE = 3000
         const val PROGRESS_LOG_TAG = "Ticket04Progress"
@@ -1103,7 +1121,6 @@ class Ticket04PermissionRecoveryTest {
         const val SETUP_TIMEOUT_MS = 45_000L
         const val LOGIN_FORM_TIMEOUT_MS = 8_000L
         const val SETTINGS_PAGE_TIMEOUT_MS = 5_000L
-        const val ACCESSIBILITY_PAGE_TIMEOUT_MS = 8_000L
         const val PAUSE_UI_TIMEOUT_MS = 1_500L
         const val REGULAR_POLL_TIMEOUT_MS = 180_000L
         const val RECOVERY_TIMEOUT_MS = 120_000L
@@ -1114,6 +1131,8 @@ class Ticket04PermissionRecoveryTest {
         const val MANUAL_POLL_INTERVAL_MS = 80L
         const val NOTIFICATION_PERMISSION_POLL_INTERVAL_MS = 250L
         const val PRODUCT_STATE_SAMPLE_INTERVAL_MS = 1_000L
+        val INITIAL_COUNTS = mapOf("hangeul" to 2, "math" to 5, "english" to 7)
+        val ACCESSIBILITY_INITIAL_COUNTS = mapOf("hangeul" to 6, "math" to 5, "english" to 7)
         const val USER_START_TIMEOUT_MS = 30 * 60 * 1000L
         const val MAX_NOTIFICATION_PERMISSION_WAIT_MS = 5 * 60 * 1000L
         const val READ_TIMEOUT_MS = 15_000L
