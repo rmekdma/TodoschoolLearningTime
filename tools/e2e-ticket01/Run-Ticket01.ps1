@@ -133,8 +133,16 @@ if ($connectedDevices -notcontains $DeviceSerial) {
 }
 
 function Invoke-SelectedAdb([string[]]$Arguments) {
-    $output = & $adbPath -s $DeviceSerial @Arguments 2>&1
-    $exitCode = $LASTEXITCODE
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # adb pull writes its successful transfer summary to stderr on some
+        # platform-tools releases; capture it without treating exit 0 as fatal.
+        $ErrorActionPreference = "Continue"
+        $output = & $adbPath -s $DeviceSerial @Arguments 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($exitCode -ne 0) {
         throw "adb -s $DeviceSerial $($Arguments -join ' ') failed ($exitCode): $($output -join "`n")"
     }

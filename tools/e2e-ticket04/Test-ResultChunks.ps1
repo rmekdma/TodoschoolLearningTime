@@ -368,3 +368,40 @@ if (Test-Ticket04CaseEvidence -Evidence $failedValidationRejected) { throw "Tick
 Write-Host "PASS Ticket 04 case-level result validation, immutable artifact schema, strict two-case aggregation, and incomplete/duplicate/mismatched-binary negatives."
 
 Write-Host "PASS Ticket 04 result chunks and permission-specific boundary gates, including inconsistent-state and Accessibility restart/cutoff negatives."
+
+$runnerPath = Join-Path $PSScriptRoot "../e2e-ticket01/Run-Ticket01.ps1"
+$runnerTokens = $null
+$runnerParseErrors = $null
+$runnerAst = [System.Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$runnerTokens, [ref]$runnerParseErrors)
+if ($runnerParseErrors.Count -gt 0) { throw "Ticket 04 could not parse the shared adb runner before testing stderr handling." }
+$adbFunctionAst = $runnerAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq "Invoke-SelectedAdb"
+}, $true)
+if ($null -eq $adbFunctionAst) { throw "Ticket 04 could not find the shared Invoke-SelectedAdb helper to fixture-test." }
+
+$fixtureAdbPath = Join-Path $env:TEMP ("ticket04-fake-adb-{0}.cmd" -f [Guid]::NewGuid().ToString("N"))
+@'
+@echo off
+echo fixture stdout
+echo fixture transfer progress 1>&2
+if "%3"=="fail" exit /b 17
+exit /b 0
+'@ | Set-Content -LiteralPath $fixtureAdbPath -Encoding ascii
+try {
+    Invoke-Expression $adbFunctionAst.Extent.Text
+    $adbPath = $fixtureAdbPath
+    $DeviceSerial = "ticket04-fixture-device"
+    $successOutput = @(Invoke-SelectedAdb @("pass"))
+    $successText = ($successOutput | ForEach-Object { [string]$_ }) -join "`n"
+    if ($successText -notmatch "fixture stdout" -or $successText -notmatch "fixture transfer progress") {
+        throw "Ticket 04 adb helper did not accept and retain the stderr progress text from an exit-zero command."
+    }
+    $nonzeroRejected = $false
+    try { Invoke-SelectedAdb @("fail") | Out-Null }
+    catch { $nonzeroRejected = $_.Exception.Message -match 'failed \(17\)' }
+    if (-not $nonzeroRejected) { throw "Ticket 04 adb helper did not reject a command that wrote progress text and exited 17." }
+} finally {
+    if (Test-Path -LiteralPath $fixtureAdbPath) { Remove-Item -LiteralPath $fixtureAdbPath -Force }
+}
+Write-Host "PASS shared adb helper accepts exit-zero stderr progress and rejects a fixture command with exit 17."
