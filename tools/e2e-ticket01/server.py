@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import select
+import socket
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -33,11 +36,16 @@ class FixtureState:
         self.lock = threading.Lock()
         self.sequence = 0
         self.requests: list[dict[str, Any]] = []
+        self.released_report_holds: list[dict[str, Any]] = []
+        self.armed_report_hold: dict[str, Any] | None = None
+        self.active_report_hold: dict[str, Any] | None = None
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
             if scenario == "ticket03"
             else {subject: details[3] for subject, details in SUBJECTS.items()}
         )
+        if scenario == "ticket04":
+            self.report_counts = {"hangeul": 2, "math": 5, "english": 7}
 
     def record(self, path: str, body_text: str, body: Any, headers: dict[str, str]) -> dict[str, Any]:
         with self.lock:
@@ -52,14 +60,119 @@ class FixtureState:
                 "headers": headers,
                 "responseStatus": None,
                 "servedReportCount": None,
+                "serverReceivedMonotonicMs": time.monotonic_ns() // 1_000_000,
+                "clientConnected": True,
+                "clientDisconnectedAt": None,
+                "clientDisconnectSignal": None,
+                "clientDisconnectElapsedMs": None,
             }
             self.requests.append(event)
             return event
 
-    def complete(self, event: dict[str, Any], status: int, served_report_count: int | None = None) -> None:
+    def complete(
+        self,
+        event: dict[str, Any],
+        status: int,
+        served_report_count: int | None = None,
+        delivery_status: str = "written",
+    ) -> None:
         with self.lock:
             event["responseStatus"] = status
             event["servedReportCount"] = served_report_count
+            event["deliveryStatus"] = delivery_status
+            case_id = event.get("holdCaseId")
+            if case_id is not None and not any(
+                hold["caseId"] == case_id and hold["sequence"] == event["sequence"]
+                for hold in self.released_report_holds
+            ):
+                self.released_report_holds.append({
+                    "sequence": event["sequence"],
+                    "caseId": case_id,
+                    "path": event["path"],
+                    "responseStatus": status,
+                    "servedReportCount": served_report_count,
+                    "deliveryStatus": delivery_status,
+                    "clientConnected": event["clientConnected"],
+                    "clientDisconnectedAt": event["clientDisconnectedAt"],
+                    "clientDisconnectSignal": event["clientDisconnectSignal"],
+                    "clientDisconnectAfterServerReceiveMs": event.get("clientDisconnectAfterServerReceiveMs"),
+                    "userId": event["body"].get("userId") if isinstance(event.get("body"), dict) else None,
+                    "yyyymmdd": event["body"].get("yyyymmdd") if isinstance(event.get("body"), dict) else None,
+                    "languageCode": event["body"].get("languageCode") if isinstance(event.get("body"), dict) else None,
+                })
+
+    def arm_report_hold(
+        self,
+        case_id: str,
+        path: str,
+        response_status: int,
+        response_count: int | None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            if self.scenario != "ticket04":
+                raise ValueError("report holds are available only in Ticket 04")
+            if self.armed_report_hold is not None or self.active_report_hold is not None:
+                raise ValueError("a report hold is already armed or in flight")
+            if not case_id or len(case_id) > 80:
+                raise ValueError("caseId must be a non-empty string of at most 80 characters")
+            if path not in REPORT_PATHS:
+                raise ValueError("path must be one of the supported report paths")
+            if response_status not in (200, 401, 403):
+                raise ValueError("responseStatus must be 200, 401, or 403")
+            if response_count is not None and (isinstance(response_count, bool) or not 0 <= response_count <= 100):
+                raise ValueError("responseCount must be an integer from 0 to 100")
+            if response_status != 200 and response_count is not None:
+                raise ValueError("responseCount is only valid for a successful report response")
+            self.armed_report_hold = {
+                "caseId": case_id,
+                "path": path,
+                "responseStatus": response_status,
+                "responseCount": response_count,
+                "release": threading.Event(),
+            }
+            return {key: value for key, value in self.armed_report_hold.items() if key != "release"}
+
+    def hold_for_report(self, path: str, event: dict[str, Any]) -> dict[str, Any] | None:
+        with self.lock:
+            if self.armed_report_hold is None or self.armed_report_hold["path"] != path:
+                return None
+            hold = self.armed_report_hold
+            self.armed_report_hold = None
+            self.active_report_hold = {**hold, "sequence": event["sequence"]}
+            event["holdCaseId"] = hold["caseId"]
+            return self.active_report_hold
+
+    def release_report_hold(self, case_id: str, sequence: int) -> dict[str, Any]:
+        with self.lock:
+            hold = self.active_report_hold
+            if hold is None or hold["caseId"] != case_id or hold["sequence"] != sequence:
+                raise ValueError("caseId and sequence must identify the currently held report")
+            hold["release"].set()
+            return {"caseId": case_id, "sequence": sequence, "releaseRequested": True}
+
+    def finish_report_hold(self, sequence: int) -> None:
+        with self.lock:
+            if self.active_report_hold is not None and self.active_report_hold["sequence"] == sequence:
+                self.active_report_hold = None
+
+    def mark_client_disconnected(self, event: dict[str, Any], signal: str) -> None:
+        with self.lock:
+            if event["clientConnected"]:
+                disconnected_elapsed_ms = time.monotonic_ns() // 1_000_000
+                event["clientConnected"] = False
+                event["clientDisconnectedAt"] = datetime.now(timezone.utc).isoformat()
+                event["clientDisconnectSignal"] = signal
+                event["clientDisconnectElapsedMs"] = disconnected_elapsed_ms
+                event["clientDisconnectAfterServerReceiveMs"] = max(
+                    0,
+                    disconnected_elapsed_ms - event["serverReceivedMonotonicMs"],
+                )
+
+    def release_pending_for_shutdown(self) -> None:
+        with self.lock:
+            for hold in (self.armed_report_hold, self.active_report_hold):
+                if hold is not None:
+                    hold["release"].set()
 
     def report_count(self, subject: str) -> int:
         with self.lock:
@@ -72,6 +185,8 @@ class FixtureState:
 
     def reset_requests(self) -> None:
         with self.lock:
+            if self.armed_report_hold is not None or self.active_report_hold is not None:
+                raise ValueError("cannot reset request history while a report hold is armed or in flight")
             self.sequence = 0
             self.requests.clear()
 
@@ -83,8 +198,34 @@ class FixtureState:
                 "sequence": self.sequence,
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
+                "releasedReportHolds": [dict(hold) for hold in self.released_report_holds],
+                "armedReportHold": None if self.armed_report_hold is None else {
+                    key: value for key, value in self.armed_report_hold.items() if key != "release"
+                },
+                "activeReportHold": None if self.active_report_hold is None else {
+                    key: value for key, value in self.active_report_hold.items() if key != "release"
+                },
                 "inFlightRequests": [
-                    {"sequence": request["sequence"], "path": request["path"]}
+                    {
+                        "sequence": request["sequence"],
+                        "path": request["path"],
+                        "receivedAt": request["receivedAt"],
+                        "caseId": request.get("holdCaseId"),
+                    }
+                    for request in self.requests
+                    if request["responseStatus"] is None and request["clientConnected"]
+                ],
+                "serverHeldResponses": [
+                    {
+                        "sequence": request["sequence"],
+                        "path": request["path"],
+                        "receivedAt": request["receivedAt"],
+                        "caseId": request.get("holdCaseId"),
+                        "clientConnected": request["clientConnected"],
+                        "clientDisconnectedAt": request["clientDisconnectedAt"],
+                        "clientDisconnectSignal": request["clientDisconnectSignal"],
+                        "clientDisconnectAfterServerReceiveMs": request.get("clientDisconnectAfterServerReceiveMs"),
+                    }
                     for request in self.requests
                     if request["responseStatus"] is None
                 ],
@@ -142,6 +283,12 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
             if self.path == "/__ticket03/state" and state.scenario == "ticket03":
                 self._send_json(200, state.snapshot())
                 return
+            if self.path == "/__ticket04/health" and state.scenario == "ticket04":
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
+                return
+            if self.path == "/__ticket04/state" and state.scenario == "ticket04":
+                self._send_json(200, state.snapshot())
+                return
             self._send_json(404, {"error": "unknown path"})
 
         def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -185,6 +332,63 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 return
 
             if state.scenario == "ticket03" and self.path == "/__ticket03/set-report-counts":
+                reports = body.get("reports") if isinstance(body, dict) else None
+                if not isinstance(reports, dict) or not reports:
+                    self._send_json(400, {"error": "reports must be a non-empty object"})
+                    return
+                valid_updates: dict[str, int] = {}
+                for subject, count in reports.items():
+                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
+                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
+                        return
+                    valid_updates[subject] = count
+                report_counts, after_sequence = state.set_report_counts(valid_updates)
+                self._send_json(200, {
+                    "ok": True,
+                    "runId": state.run_id,
+                    "reportCounts": report_counts,
+                    "afterRequestSequence": after_sequence,
+                })
+                return
+
+            if state.scenario == "ticket04" and self.path == "/__ticket04/arm-report-hold":
+                try:
+                    hold = state.arm_report_hold(
+                        case_id=body.get("caseId") if isinstance(body, dict) else "",
+                        path=body.get("path") if isinstance(body, dict) else "",
+                        response_status=body.get("responseStatus") if isinstance(body, dict) else None,
+                        response_count=body.get("responseCount") if isinstance(body, dict) else None,
+                    )
+                except (TypeError, ValueError) as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, **hold})
+                return
+
+            if state.scenario == "ticket04" and self.path == "/__ticket04/release-report-hold":
+                case_id = body.get("caseId") if isinstance(body, dict) else None
+                sequence = body.get("sequence") if isinstance(body, dict) else None
+                if not isinstance(case_id, str) or isinstance(sequence, bool) or not isinstance(sequence, int):
+                    self._send_json(400, {"error": "caseId and integer sequence are required"})
+                    return
+                try:
+                    released = state.release_report_hold(case_id, sequence)
+                except ValueError as error:
+                    self._send_json(409, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, **released})
+                return
+
+            if state.scenario == "ticket04" and self.path == "/__ticket04/reset-requests":
+                try:
+                    state.reset_requests()
+                except ValueError as error:
+                    self._send_json(409, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id})
+                return
+
+            if state.scenario == "ticket04" and self.path == "/__ticket04/set-report-counts":
                 reports = body.get("reports") if isinstance(body, dict) else None
                 if not isinstance(reports, dict) or not reports:
                     self._send_json(400, {"error": "reports must be a non-empty object"})
@@ -250,6 +454,34 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     state.complete(event, 400)
                     self._send_json(400, {"error": "unexpected report request body"})
                     return
+                hold = state.hold_for_report(self.path, event)
+                if hold is not None:
+                    while not hold["release"].wait(0.05):
+                        try:
+                            readable, _, exceptional = select.select([self.connection], [], [self.connection], 0)
+                            if exceptional:
+                                state.mark_client_disconnected(event, "socket-exception")
+                            elif readable and self.connection.recv(1, socket.MSG_PEEK) == b"":
+                                state.mark_client_disconnected(event, "eof")
+                        except OSError:
+                            state.mark_client_disconnected(event, "socket-error")
+                    response_status = hold["responseStatus"]
+                    response_count = hold["responseCount"]
+                    if response_status == 200:
+                        count = state.report_count(subject) if response_count is None else response_count
+                        payload = envelope(report_data(count, seconds, expected_array))
+                    else:
+                        count = None
+                        payload = {"error": f"ticket04 held HTTP {response_status}"}
+                    try:
+                        self._send_json(response_status, payload)
+                    except OSError:
+                        state.complete(event, response_status, served_report_count=count, delivery_status="write-failed")
+                    else:
+                        state.complete(event, response_status, served_report_count=count, delivery_status="written")
+                    finally:
+                        state.finish_report_hold(event["sequence"])
+                    return
                 count = state.report_count(subject)
                 state.complete(event, 200, served_report_count=count)
                 self._send_json(200, envelope(report_data(count, seconds, expected_array)))
@@ -266,7 +498,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03"), default="ticket01")
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")

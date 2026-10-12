@@ -2,7 +2,7 @@
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot "config.json"),
     [string]$DeviceSerial,
-    [ValidateSet("ticket01", "ticket02", "ticket03")]
+    [ValidateSet("ticket01", "ticket02", "ticket03", "ticket04")]
     [string]$Scenario = "ticket01",
     [switch]$DeviceOnly,
     [switch]$PrepareDevice,
@@ -12,7 +12,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$usesExternalObserver = $Scenario -in @("ticket02", "ticket03")
+$usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04")
 $configExample = Join-Path $PSScriptRoot "config.example.json"
 $configFile = if (Test-Path -LiteralPath $ConfigPath) { $ConfigPath } else { $configExample }
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
@@ -191,6 +191,8 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $process = Start-Process -FilePath $adbPath -ArgumentList $argumentText -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $samples = [System.Collections.Generic.List[object]]::new()
+    $ticket04ProgressLines = [System.Collections.Generic.List[string]]::new()
+    $ticket04ProgressPath = Join-Path $artifactDirectory "ticket04-user-actions.log"
     $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
     $failure = $null
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
@@ -204,7 +206,37 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
             crashed = $state.crashed
         }
         [void]$samples.Add($sample)
-        if ($state.pid -ne $before.pid -or -not $state.bound -or $state.crashed) {
+        if ($Scenario -eq "ticket04") {
+            $progressOutput = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket04Progress:I", "*:S"))
+            $matchingProgress = @($progressOutput | Where-Object { $_ -match [regex]::Escape($RunId) -and $_ -match "TICKET04_PROGRESS=" })
+            if ($matchingProgress.Count -gt $ticket04ProgressLines.Count) {
+                foreach ($line in $matchingProgress | Select-Object -Skip $ticket04ProgressLines.Count) {
+                    [void]$ticket04ProgressLines.Add([string]$line)
+                    $marker = [regex]::Match([string]$line, 'TICKET04_PROGRESS=(\{.*\})')
+                    if ($marker.Success) {
+                        try {
+                            $event = $marker.Groups[1].Value | ConvertFrom-Json
+                            switch ($event.event) {
+                                "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
+                                "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
+                                "BOUNDARY_CAPTURED" {
+                                    $boundary = $event.details | ConvertFrom-Json
+                                    Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
+                                }
+                                "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
+                                "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
+                                default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
+                            }
+                        } catch {
+                            Write-Host "TICKET04 진행 로그를 표시할 수 없습니다: $line"
+                        }
+                    }
+                }
+                $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
+            }
+        }
+        $lifecycleChanged = $state.pid -ne $before.pid -or $state.crashed -or ($Scenario -ne "ticket04" -and -not $state.bound)
+        if ($lifecycleChanged) {
             $failure = "The observed product lifecycle changed during external instrumentation: beforePID='$($before.pid)', currentPID='$($state.pid)', bound=$($state.bound), crashed=$($state.crashed)."
             break
         }
@@ -227,17 +259,31 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     if ($process.ExitCode -ne 0) {
         throw "External observer adb process exited with code $($process.ExitCode). See $stdoutPath and $stderrPath"
     }
-    $stdout = Get-Content -LiteralPath $stdoutPath -Raw
-    $stderr = Get-Content -LiteralPath $stderrPath -Raw
+    if ($Scenario -eq "ticket04") {
+        $stdout = (& rg --no-heading -e 'OK \(1 test\)' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' $stdoutPath 2>$null) -join "`n"
+        $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
+    } else {
+        $stdout = Get-Content -LiteralPath $stdoutPath -Raw
+        $stderr = Get-Content -LiteralPath $stderrPath -Raw
+    }
     $observerResultLogLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "${ResultLogTag}:I", "*:S"))
     $observerResultLog = $observerResultLogLines | Out-String
     if ($Scenario -eq "ticket03") {
         $observerResultLog | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-result-logcat.txt") -Encoding utf8
     }
-    $resultMarker = if ($Scenario -eq "ticket03") { "TICKET03_RESULT=" } else { "TICKET02_RESULT=" }
+    $resultMarker = switch ($Scenario) {
+        "ticket03" { "TICKET03_RESULT="; break }
+        "ticket04" { "TICKET04_RESULT="; break }
+        default { "TICKET02_RESULT=" }
+    }
     if ($Scenario -eq "ticket03") {
         Import-Module (Join-Path $PSScriptRoot "../e2e-ticket03/ResultChunks.psm1") -Force
         $structuredJson = Join-Ticket03ResultChunks -LogLines $observerResultLogLines -RunId $RunId
+        $structuredResult = "$resultMarker$structuredJson"
+    }
+    elseif ($Scenario -eq "ticket04") {
+        Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/ResultChunks.psm1") -Force
+        $structuredJson = Join-Ticket04ResultChunks -LogLines $observerResultLogLines -RunId $RunId
         $structuredResult = "$resultMarker$structuredJson"
     }
     else {
@@ -275,6 +321,7 @@ function Read-ServerRequests {
         $statePath = switch ($Scenario) {
             "ticket02" { "/__ticket02/state"; break }
             "ticket03" { "/__ticket03/state"; break }
+            "ticket04" { "/__ticket04/state"; break }
             default { "/__ticket01/requests" }
         }
         return Invoke-RestMethod -Uri "$apiBaseUrl$statePath" -Method Get -TimeoutSec 3
@@ -547,6 +594,141 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
     Write-Host "PASS Ticket 03: six one-minute reports followed the real foreground subject; completion, Home, Settings, and zero-registration windows had no periodic requests."
     Write-Host "Request evidence: $requestPath"
     Write-Host "Android evidence: $resultPath"
+}
+
+function Get-Ticket04ServerEvidence($Snapshot) {
+    $requests = @($Snapshot.requests | ForEach-Object {
+        [ordered]@{
+            sequence = $_.sequence
+            path = $_.path
+            holdCaseId = $_.holdCaseId
+            responseStatus = $_.responseStatus
+            servedReportCount = $_.servedReportCount
+            deliveryStatus = $_.deliveryStatus
+            clientDisconnectedAt = $_.clientDisconnectedAt
+            clientDisconnectSignal = $_.clientDisconnectSignal
+            clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
+            yyyymmdd = $_.body.yyyymmdd
+            userId = $_.body.userId
+            languageCode = $_.body.languageCode
+        }
+    })
+    return [ordered]@{
+        runId = $Snapshot.runId
+        scenario = $Snapshot.scenario
+        reportCounts = $Snapshot.reportCounts
+        requests = $requests
+        releasedReportHolds = @($Snapshot.releasedReportHolds | ForEach-Object {
+            [ordered]@{
+                sequence = $_.sequence
+                caseId = $_.caseId
+                path = $_.path
+                responseStatus = $_.responseStatus
+                servedReportCount = $_.servedReportCount
+                deliveryStatus = $_.deliveryStatus
+                clientConnected = $_.clientConnected
+                clientDisconnectedAt = $_.clientDisconnectedAt
+                clientDisconnectSignal = $_.clientDisconnectSignal
+                clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
+                userId = $_.userId
+                yyyymmdd = $_.yyyymmdd
+                languageCode = $_.languageCode
+            }
+        })
+        inFlightRequestCount = @($Snapshot.inFlightRequests).Count
+        serverHeldResponseCount = @($Snapshot.serverHeldResponses).Count
+    }
+}
+
+function Assert-Ticket04PermissionRecovery($Snapshot, [string]$InstrumentationText) {
+    if ($null -eq $Snapshot) { throw "The Ticket 04 loopback fixture state is unavailable." }
+    if ($Snapshot.runId -ne $runId -or $Snapshot.scenario -ne "ticket04") {
+        throw "Connected to a server with the wrong Ticket 04 run identity."
+    }
+    if (@($Snapshot.inFlightRequests).Count -ne 0 -or @($Snapshot.serverHeldResponses).Count -ne 0) {
+        throw "Ticket 04 ended with an HTTP client in flight or a fixture response still held."
+    }
+    if (@($Snapshot.releasedReportHolds).Count -ne 2) {
+        throw "Ticket 04 must preserve exactly two explicitly released held-report records across setup resets."
+    }
+
+    $resultMatch = [regex]::Match($InstrumentationText, 'TICKET04_RESULT=(\{[^\r\n]+\})')
+    if (-not $resultMatch.Success) { throw "Ticket 04 observer instrumentation omitted its structured evidence." }
+    $result = $resultMatch.Groups[1].Value | ConvertFrom-Json
+    if ($result.runId -ne $runId -or $result.apiBaseUrl -ne $apiBaseUrl -or
+        -not $result.notificationProcessRestartObserved -or -not $result.accessibilitySamePidBoundaryObserved -or
+        -not $result.registrationPreserved -or
+        -not $result.silentChannelPrepared -or $result.actualTodoApiCalled -or
+        $result.callbackDeliveryObservation -notmatch 'unobserved' -or
+        $result.cases.Count -ne 2) {
+        throw "Ticket 04 top-level observer evidence did not meet its identity or preservation requirements."
+    }
+
+    $expected = @{
+        "notification-revocation" = 200
+        "accessibility-revocation" = 401
+    }
+    foreach ($case in @($result.cases)) {
+        if (-not $expected.ContainsKey([string]$case.caseId)) { throw "Ticket 04 returned an unexpected case: $($case.caseId)" }
+        $isNotificationCase = $case.caseId -eq "notification-revocation"
+        $caseHasRequiredBoundaryEvidence = if ($isNotificationCase) {
+            $case.processRestartExpected -and $case.processRestartedAfterBoundary -and
+                $case.productPidAfterReturn -ne $case.productPidBefore -and
+                $case.requestBoundaryClassification -in @(
+                    "no-client-request-at-permission-boundary",
+                    "client-socket-closed-at-permission-boundary",
+                    "client-request-in-flight-with-open-socket-within-evidence-window",
+                    "client-request-in-flight-with-open-socket-outside-evidence-window"
+                ) -and [int64]$case.requestAgeAtBoundaryMs -ge 0
+        } else {
+            -not $case.processRestartExpected -and $case.requestStillInFlight -and
+                $case.clientSocketOpenAtPermissionBoundary -and $case.sameProductPidAtBoundary -and
+                -not $case.processRestartedAfterBoundary -and $case.productPidAfterReturn -eq $case.productPidBefore -and
+                $case.requestBoundaryClassification -eq "client-request-in-flight-with-open-socket-within-evidence-window" -and
+                [int64]$case.requestAgeAtBoundaryMs -ge 0 -and [int64]$case.requestAgeAtBoundaryMs -lt 13500
+        }
+        if ([int]$case.heldResponseStatus -ne $expected[[string]$case.caseId] -or
+            -not $caseHasRequiredBoundaryEvidence -or
+            $case.actualPermissionEnabledAtBoundary -or -not $case.permissionPauseUiObserved -or
+            $case.staleCompletionRequests -ne 0 -or $case.authenticationPauseAfterRelease -or
+            -not $case.registeredChildrenPreserved -or -not $case.subjectStateUnchangedAfterRelease -or
+            -not $case.restoredServiceLease -or -not $case.recoverySilentBaseline -or
+            $case.laterCompletionCount -ne 1 -or
+            $case.userAcknowledgementElapsedRealtimeMs -le $case.permissionBoundaryElapsedRealtimeMs -or
+            $case.responseReleaseElapsedRealtimeMs -le $case.userAcknowledgementElapsedRealtimeMs) {
+            throw "Ticket 04 failed its permission-specific boundary, process, stale-response, silent-recovery or later-completion assertions: $($case | ConvertTo-Json -Depth 8 -Compress)"
+        }
+        if ($case.connectionCloseClassification -notin @(
+            "client-still-connected-at-explicit-release; response-delivery-outcome-will-be-observed",
+            "client-connection-closed-after-permission-boundary-within-15s-window; cancellation-consistent, cause-unconfirmed",
+            "late-client-connection-close; timeout-or-other-close-ambiguous",
+            "client-connection-closed-before-permission-boundary-or-boundary-order-ambiguous",
+            "client-still-connected-near-or-after-read-timeout; outcome-ambiguous"
+        )) {
+            throw "Ticket 04 returned an unknown client connection classification: $($case.connectionCloseClassification)"
+        }
+        [void]$expected.Remove([string]$case.caseId)
+    }
+    if ($expected.Count -ne 0) { throw "Ticket 04 omitted required permission cases: $($expected.Keys -join ', ')" }
+
+    foreach ($case in @($result.cases)) {
+        $heldRequest = @($Snapshot.releasedReportHolds | Where-Object { $_.caseId -eq $case.caseId })
+        if ($heldRequest.Count -ne 1 -or
+            $heldRequest[0].responseStatus -ne $case.heldResponseStatus -or
+            $heldRequest[0].deliveryStatus -ne $case.serverResponseWrite -or
+            $heldRequest[0].sequence -ne $case.serverRequestSequence) {
+            throw "Fixture evidence did not match the explicitly released $($case.caseId) response."
+        }
+    }
+    $serverEvidencePath = Join-Path $artifactDirectory "ticket04-server-evidence.json"
+    (Get-Ticket04ServerEvidence $Snapshot) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $serverEvidencePath -Encoding utf8
+    $resultPath = Join-Path $artifactDirectory "ticket04-result.json"
+    $result | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath $resultPath -Encoding utf8
+    $notificationCase = @($result.cases | Where-Object { $_.caseId -eq "notification-revocation" })[0]
+    Write-Host "PASS Ticket 04: notification OFF restarted the process with registration preserved; Accessibility OFF captured a same-PID, in-flight, socket-open request; explicit acknowledgement preceded release; restored monitoring was silent before later completion."
+    Write-Host "Notification request at OFF: $($notificationCase.requestBoundaryClassification), age=$($notificationCase.requestAgeAtBoundaryMs)ms; no same-process cancellation claim is made."
+    Write-Host "Fixture evidence (selected fields): $serverEvidencePath"
+    Write-Host "Observer evidence: $resultPath"
 }
 
 function Assert-ServerRoundTrip($Snapshot) {
@@ -1053,6 +1235,7 @@ try {
             $healthPath = switch ($Scenario) {
                 "ticket02" { "/__ticket02/health"; break }
                 "ticket03" { "/__ticket03/health"; break }
+                "ticket04" { "/__ticket04/health"; break }
                 default { "/__ticket01/health" }
             }
             $health = Invoke-RestMethod -Uri "$apiBaseUrl$healthPath" -TimeoutSec 2
@@ -1097,6 +1280,11 @@ try {
         $testClass = "com.example.todoschooltime.e2eobserver.Ticket03ForegroundPollingTest"
         $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket03E2E" 22
         $instrumentationOutput = @($instrumentationText -split "`r?`n")
+    } elseif ($Scenario -eq "ticket04") {
+        $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
+        $testClass = "com.example.todoschooltime.e2eobserver.Ticket04PermissionRecoveryTest"
+        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket04Result" 45
+        $instrumentationOutput = @($instrumentationText -split "`r?`n")
     } else {
         Invoke-SelectedAdb @("install", "-r", $debugApk) | Out-Null
         Invoke-SelectedAdb @("install", "-r", $testApk) | Out-Null
@@ -1117,18 +1305,27 @@ try {
         $testDescription = switch ($Scenario) {
             "ticket02" { "Ticket 02 external observer test"; break }
             "ticket03" { "Ticket 03 foreground-polling observer test"; break }
+            "ticket04" { "Ticket 04 permission-recovery observer test"; break }
             default { "Ticket 01 server-screen test" }
         }
         throw "$testDescription did not report one passing test. See $instrumentationLog"
     }
 
     $snapshot = Read-ServerRequests
-    $snapshotPath = Join-Path $artifactDirectory "server-requests.json"
-    if ($null -ne $snapshot) { $snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $snapshotPath -Encoding utf8 }
+    if ($null -ne $snapshot) {
+        if ($Scenario -eq "ticket04") {
+            (Get-Ticket04ServerEvidence $snapshot) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDirectory "ticket04-server-evidence.json") -Encoding utf8
+        } else {
+            $snapshotPath = Join-Path $artifactDirectory "server-requests.json"
+            $snapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $snapshotPath -Encoding utf8
+        }
+    }
     if ($Scenario -eq "ticket02") {
         Assert-Ticket02BaselineCompletion $snapshot $instrumentationText
     } elseif ($Scenario -eq "ticket03") {
         Assert-Ticket03ForegroundPolling $snapshot $instrumentationText
+    } elseif ($Scenario -eq "ticket04") {
+        Assert-Ticket04PermissionRecovery $snapshot $instrumentationText
     } else {
         Assert-ServerRoundTrip $snapshot
         Save-AppScreenshot
@@ -1142,7 +1339,11 @@ try {
     if (-not $debugPackageAfter) { throw "The isolated debug app was not installed." }
 
     $apiDescription = if ($sdkVersion -eq 35) { "Android 15" } elseif ($sdkVersion -eq 33) { "Android 13 substitute" } else { "API $sdkVersion" }
-    Write-Host "PASS $Scenario on $apiDescription. No notification or accessibility permissions were changed."
+    if ($Scenario -eq "ticket04") {
+        Write-Host "PASS $Scenario on $apiDescription after manual permission revocation and restoration."
+    } else {
+        Write-Host "PASS $Scenario on $apiDescription. No notification or accessibility permissions were changed."
+    }
     Write-Host "Artifacts: $artifactDirectory"
 } catch {
     $_ | Out-String | Set-Content -LiteralPath (Join-Path $artifactDirectory "failure.txt") -Encoding utf8
@@ -1152,7 +1353,11 @@ try {
     if ($serverStarted) {
         $finalSnapshot = Read-ServerRequests
         if ($null -ne $finalSnapshot) {
-            $finalSnapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $artifactDirectory "server-requests-final.json") -Encoding utf8
+            if ($Scenario -eq "ticket04") {
+                (Get-Ticket04ServerEvidence $finalSnapshot) | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $artifactDirectory "ticket04-server-evidence-final.json") -Encoding utf8
+            } else {
+                $finalSnapshot | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath (Join-Path $artifactDirectory "server-requests-final.json") -Encoding utf8
+            }
         }
     }
     if ($reverseOwned) {
