@@ -326,19 +326,25 @@ function Get-Ticket04SourceContentHashAtRevision {
         [Parameter(Mandatory = $true)][string]$PythonPath,
         [Parameter(Mandatory = $true)][string]$Version
     )
-    $pathsJson = ConvertTo-Json -InputObject @(Get-Ticket04SourcePaths $Version) -Compress
+    $paths = @(Get-Ticket04SourcePaths $Version)
+    $gitPath = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $script = @'
+import base64
 import hashlib
 import json
 import subprocess
 import sys
 
-root, revision, paths_json = sys.argv[1:4]
+payload = json.loads(base64.b64decode(sys.argv[1]).decode("utf-8"))
+root = payload["root"]
+revision = payload["revision"]
+git_path = payload["gitPath"]
+paths = payload["paths"]
 parts = []
-for path in json.loads(paths_json):
+for path in paths:
     try:
         result = subprocess.run(
-            ["git", "-C", root, "show", revision + ":" + path],
+            [git_path, "-C", root, "show", revision + ":" + path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -364,7 +370,16 @@ for path in json.loads(paths_json):
     parts.append(path + "=" + hashlib.sha256(content).hexdigest())
 print(hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest())
 '@
-    $output = & $PythonPath -c $script $RepositoryRoot $Revision $pathsJson 2>$null
+    $scriptBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
+    $payloadJson = ConvertTo-Json -InputObject ([ordered]@{
+        root = $RepositoryRoot
+        revision = $Revision
+        gitPath = $gitPath
+        paths = $paths
+    }) -Compress
+    $payloadBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payloadJson))
+    $bootstrap = "exec(compile(__import__('base64').b64decode('$scriptBase64'), '<ticket04-source-hash>', 'exec'))"
+    $output = & $PythonPath -c $bootstrap $payloadBase64 2>$null
     if ($LASTEXITCODE -ne 0) {
         $failureDetail = @($output | ForEach-Object { [string]$_ } | Where-Object { $_ -match 'git-show-(?:launch-)?failed' } | Select-Object -Last 1)
         if ($failureDetail.Count -gt 0) {
