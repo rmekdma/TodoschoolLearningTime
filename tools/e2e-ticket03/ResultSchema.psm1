@@ -16,6 +16,38 @@ function Assert-Ticket03JsonArrayFields {
     }
 }
 
+function Assert-Ticket03PrimitiveArrayElementTypes {
+    param(
+        [Parameter(Mandatory = $true)]$Value,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Fields,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    foreach ($field in $Fields.Keys) {
+        $property = $Value.PSObject.Properties[[string]$field]
+        if ($null -eq $property -or $property.Value -isnot [System.Array]) {
+            throw "Ticket 03 $Context field '$field' must be an actual JSON array before validating its elements."
+        }
+        $expectedType = [string]$Fields[$field]
+        for ($index = 0; $index -lt $property.Value.Count; $index++) {
+            $element = $property.Value[$index]
+            $valid = switch ($expectedType) {
+                "string" { $element -is [string] }
+                "integer" {
+                    $element -is [byte] -or $element -is [sbyte] -or
+                    $element -is [int16] -or $element -is [uint16] -or
+                    $element -is [int32] -or $element -is [uint32] -or
+                    $element -is [int64] -or $element -is [uint64]
+                }
+                default { throw "Ticket 03 $Context schema has unsupported primitive array type '$expectedType' for '$field'." }
+            }
+            if (-not $valid) {
+                throw "Ticket 03 $Context field '$field' element[$index] must have JSON type '$expectedType'."
+            }
+        }
+    }
+}
+
 function Assert-Ticket03ScalarFields {
     param(
         [Parameter(Mandatory = $true)]$Value,
@@ -413,6 +445,22 @@ function Assert-Ticket03IntervalRange {
     }
 }
 
+function Assert-Ticket03CycleStartInterval {
+    param(
+        [Parameter(Mandatory = $true)]$EarlierStartRequest,
+        [Parameter(Mandatory = $true)]$LaterStartRequest,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+
+    if ($EarlierStartRequest.path -ne "/v3/account/signin" -or
+        $LaterStartRequest.path -ne "/v3/account/signin" -or
+        $null -eq $EarlierStartRequest.receivedAt -or
+        $null -eq $LaterStartRequest.receivedAt) {
+        throw "Ticket 03 $Context requires server-recorded sign-in requests as both cycle starts."
+    }
+    Assert-Ticket03IntervalRange $EarlierStartRequest.receivedAt $LaterStartRequest.receivedAt $Context
+}
+
 function Assert-Ticket03ResultArrayShapes {
     param([Parameter(Mandatory = $true)]$Result)
 
@@ -424,8 +472,17 @@ function Assert-Ticket03ResultArrayShapes {
         "foregroundPackagesObservedAtReport", "foregroundEventsObservedAtApply",
         "foregroundPackagesObservedAtApply", "requestCycleSequences", "requestCyclePaths"
     )
+    $pollPrimitiveArrays = @{
+        foregroundPackagesObservedDuringTransition = "string"
+        requestsDuringTransitionSequences = "integer"
+        foregroundPackagesObservedAtReport = "string"
+        foregroundPackagesObservedAtApply = "string"
+        requestCycleSequences = "integer"
+        requestCyclePaths = "string"
+    }
     for ($index = 0; $index -lt $Result.pollRequests.Count; $index++) {
         Assert-Ticket03JsonArrayFields $Result.pollRequests[$index] $pollFields "pollRequests[$index]"
+        Assert-Ticket03PrimitiveArrayElementTypes $Result.pollRequests[$index] $pollPrimitiveArrays "pollRequests[$index]"
     }
 
     $windowFields = @(
@@ -433,12 +490,19 @@ function Assert-Ticket03ResultArrayShapes {
         "requestsDuringTransition", "requestsDuringTransitionSequences",
         "foregroundEventsObservedDuringWindow", "foregroundPackagesObservedDuringWindow"
     )
+    $windowPrimitiveArrays = @{
+        foregroundPackagesObservedDuringTransition = "string"
+        requestsDuringTransitionSequences = "integer"
+        foregroundPackagesObservedDuringWindow = "string"
+    }
     for ($index = 0; $index -lt $Result.observationWindows.Count; $index++) {
         $entry = $Result.observationWindows[$index]
         if ($null -ne $entry.PSObject.Properties["requestPath"]) {
             Assert-Ticket03JsonArrayFields $entry $pollFields "observationWindows[$index] poll record"
+            Assert-Ticket03PrimitiveArrayElementTypes $entry $pollPrimitiveArrays "observationWindows[$index] poll record"
         } else {
             Assert-Ticket03JsonArrayFields $entry $windowFields "observationWindows[$index] no-poll window"
+            Assert-Ticket03PrimitiveArrayElementTypes $entry $windowPrimitiveArrays "observationWindows[$index] no-poll window"
         }
     }
 
@@ -447,4 +511,4 @@ function Assert-Ticket03ResultArrayShapes {
     }
 }
 
-Export-ModuleMember -Function Assert-Ticket03JsonArrayFields, Assert-Ticket03ScalarFields, Assert-Ticket03ServerRequestScalars, Assert-Ticket03ResultArrayShapes, Assert-Ticket03ResultScalarShapes, Assert-Ticket03IntervalRange, Assert-Ticket03DispatchCycle
+Export-ModuleMember -Function Assert-Ticket03JsonArrayFields, Assert-Ticket03PrimitiveArrayElementTypes, Assert-Ticket03ScalarFields, Assert-Ticket03ServerRequestScalars, Assert-Ticket03ResultArrayShapes, Assert-Ticket03ResultScalarShapes, Assert-Ticket03IntervalRange, Assert-Ticket03CycleStartInterval, Assert-Ticket03DispatchCycle

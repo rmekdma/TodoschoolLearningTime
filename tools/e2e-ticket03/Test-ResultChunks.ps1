@@ -59,28 +59,28 @@ $validSchemaFixture = [ordered]@{
     pollRequests = @(
         [ordered]@{
             requestPath = "/v3/todoschool/report/daily/hangeul"
-            foregroundPackagesObservedDuringTransition = @()
+            foregroundPackagesObservedDuringTransition = @("com.enuma.todohangeul")
             foregroundEventsDuringTransition = @()
             httpRequestDispatchEventsDuringCycle = @()
             requestsVisibleAtForegroundEventObservation = @()
-            requestsDuringTransitionSequences = @()
+            requestsDuringTransitionSequences = @(11, 12)
             requestsDuringTransition = @()
             foregroundEventsObservedAtReport = @()
             foregroundPackagesObservedAtReport = @("com.enuma.todohangeul")
             foregroundEventsObservedAtApply = @()
-            foregroundPackagesObservedAtApply = @()
+            foregroundPackagesObservedAtApply = @("com.enuma.todohangeul")
             requestCycleSequences = @(1, 2, 3, 4, 5)
             requestCyclePaths = @("/v3/account/signin", "/v3/todoschool/report/daily/hangeul")
         }
     )
     observationWindows = @(
         [ordered]@{
-            foregroundPackagesObservedDuringTransition = @()
+            foregroundPackagesObservedDuringTransition = @("com.android.settings")
             foregroundEventsDuringTransition = @()
             requestsDuringTransition = @()
-            requestsDuringTransitionSequences = @()
+            requestsDuringTransitionSequences = @(20, 21)
             foregroundEventsObservedDuringWindow = @()
-            foregroundPackagesObservedDuringWindow = @()
+            foregroundPackagesObservedDuringWindow = @("com.android.settings")
         }
     )
     foregroundEvents = @()
@@ -110,6 +110,34 @@ $stringifiedWindowArrayRejected = $false
 try { Assert-Ticket03ResultArrayShapes $malformedObservationWindow }
 catch { $stringifiedWindowArrayRejected = $_.Exception.Message -match 'observationWindows\[0\].*poll record.*requestsDuringTransitionSequences.*actual JSON array' }
 if (-not $stringifiedWindowArrayRejected) { throw "A stringified transition array in the observationWindows poll variant was accepted." }
+
+$stringCycleSequencesRejected = $false
+$stringCycleSequencesFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$stringCycleSequencesFixture.pollRequests[0].requestCycleSequences = @("1", "2", "3", "4", "5")
+try { Assert-Ticket03ResultArrayShapes $stringCycleSequencesFixture }
+catch { $stringCycleSequencesRejected = $_.Exception.Message -match "pollRequests\[0\].*requestCycleSequences.*\[0\].*integer" }
+if (-not $stringCycleSequencesRejected) { throw "String elements in a numeric requestCycleSequences array were accepted." }
+
+$nullTransitionSequenceRejected = $false
+$nullTransitionSequenceFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$nullTransitionSequenceFixture.observationWindows[1].requestsDuringTransitionSequences = @($null)
+try { Assert-Ticket03ResultArrayShapes $nullTransitionSequenceFixture }
+catch { $nullTransitionSequenceRejected = $_.Exception.Message -match "observationWindows\[1\].*requestsDuringTransitionSequences.*\[0\].*integer" }
+if (-not $nullTransitionSequenceRejected) { throw "A null element in requestsDuringTransitionSequences was accepted." }
+
+$numberPackageRejected = $false
+$numberPackageFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$numberPackageFixture.pollRequests[0].foregroundPackagesObservedDuringTransition = @(17)
+try { Assert-Ticket03ResultArrayShapes $numberPackageFixture }
+catch { $numberPackageRejected = $_.Exception.Message -match "foregroundPackagesObservedDuringTransition.*\[0\].*string" }
+if (-not $numberPackageRejected) { throw "A numeric foreground package array element was accepted." }
+
+$nullCyclePathRejected = $false
+$nullCyclePathFixture = $validSchemaFixture | ConvertTo-Json -Depth 8 -Compress | ConvertFrom-Json
+$nullCyclePathFixture.pollRequests[0].requestCyclePaths = @("/v3/account/signin", $null)
+try { Assert-Ticket03ResultArrayShapes $nullCyclePathFixture }
+catch { $nullCyclePathRejected = $_.Exception.Message -match "requestCyclePaths.*\[1\].*string" }
+if (-not $nullCyclePathRejected) { throw "A null request path array element was accepted." }
 
 $pollScalarFixture = [ordered]@{
     subject = "한글"
@@ -272,4 +300,17 @@ try { Assert-Ticket03IntervalRange "2026-10-12T00:00:00Z" "2026-10-12T00:00:57.9
 catch { $tooEarlyFirstCycleRejected = $_.Exception.Message -like "*interval was outside the configured cadence range*" }
 if (-not $tooEarlyFirstCycleRejected) { throw "A too-early first periodic cycle was accepted." }
 
-Write-Output "PASS result chunk/schema validation (complete UTF-8 payload, strict arrays/scalars, malformed types rejected, baseline cadence checked)"
+$slowCycleFixture = [ordered]@{
+    earlierCycleStart = [ordered]@{ path = "/v3/account/signin"; receivedAt = "2026-10-12T00:00:00Z" }
+    earlierReport = [ordered]@{ path = "/v3/todoschool/report/daily/hangeul"; receivedAt = "2026-10-12T00:00:40Z" }
+    laterCycleStart = [ordered]@{ path = "/v3/account/signin"; receivedAt = "2026-10-12T00:00:50Z" }
+    laterReport = [ordered]@{ path = "/v3/todoschool/report/daily/math"; receivedAt = "2026-10-12T00:01:40Z" }
+} | ConvertTo-Json -Depth 4 -Compress | ConvertFrom-Json
+Assert-Ticket03IntervalRange $slowCycleFixture.earlierReport.receivedAt $slowCycleFixture.laterReport.receivedAt "slow catalog/report end-time fixture"
+$slowCycleStartRejected = $false
+try {
+    Assert-Ticket03CycleStartInterval $slowCycleFixture.earlierCycleStart $slowCycleFixture.laterCycleStart "slow catalog/report cycle-start fixture"
+} catch { $slowCycleStartRejected = $_.Exception.Message -like "*interval was outside the configured cadence range*" }
+if (-not $slowCycleStartRejected) { throw "A 50-second cycle-start gap was hidden by slow catalog/report requests and accepted." }
+
+Write-Output "PASS result chunk/schema validation (complete UTF-8 payload, strict arrays/scalars, malformed types rejected, cycle-start cadence checked)"

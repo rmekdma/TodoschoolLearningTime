@@ -357,7 +357,7 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
 
     $requestBySequence = @{}
     foreach ($request in @($Snapshot.requests)) { $requestBySequence[[string]$request.sequence] = $request }
-    $lastReceivedAt = $null
+    $lastPeriodicCycleStartRequest = $null
     $reportUserIds = @{
         "/v3/todoschool/report/daily/hangeul" = "ticket01-hangeul"
         "/v3/todoschool/report/daily/math" = "ticket01-math"
@@ -428,6 +428,15 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
             $cycleReportPaths[0] -ne $expectedPath) {
             throw "Ticket 03 poll cycle $index included another subject report or an unexpected request origin: $($poll | ConvertTo-Json -Compress -Depth 5)"
         }
+        $cycleStartSequence = [int64]$cycleSequences[0]
+        $cycleStartRequest = $requestBySequence[[string]$cycleStartSequence]
+        if (-not $cycleStartRequest -or $cycleStartRequest.path -ne "/v3/account/signin") {
+            throw "Ticket 03 poll cycle $index does not start with its server-recorded sign-in request."
+        }
+        if ($lastPeriodicCycleStartRequest) {
+            Assert-Ticket03CycleStartInterval $lastPeriodicCycleStartRequest $cycleStartRequest "periodic cycle $index cadence"
+        }
+        $lastPeriodicCycleStartRequest = $cycleStartRequest
         Assert-Ticket03DispatchCycle $poll $expectedCyclePaths $expectedPath $expectedPackages[$index] ([int64]$poll.foregroundCallbackAtElapsedRealtimeMs) "poll cycle $index"
         for ($cycleIndex = 0; $cycleIndex -lt $cyclePaths.Count; $cycleIndex++) {
             $cycleRequest = $requestBySequence[[string]$cycleSequences[$cycleIndex]]
@@ -448,14 +457,6 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
         if ([int]$request.body.yyyymmdd -ne $expectedSeoulDate -or $request.body.languageCode -ne "ko") {
             throw "Ticket 03 request $($request.sequence) used a non-Seoul date or language."
         }
-        $receivedAt = [DateTimeOffset]::Parse($request.receivedAt)
-        if ($lastReceivedAt) {
-            $gap = ($receivedAt - $lastReceivedAt).TotalMilliseconds
-            if ($gap -lt 58000 -or $gap -gt 180000) {
-                throw "Ticket 03 poll requests were not separated by the configured one-minute cadence: $gap ms."
-            }
-        }
-        $lastReceivedAt = $receivedAt
     }
 
     $expectedBaselinePaths = @(
@@ -494,7 +495,7 @@ function Assert-Ticket03ForegroundPolling($Snapshot, [string]$InstrumentationTex
         $firstPeriodicCycleStart.path -ne "/v3/account/signin") {
         throw "Ticket 03 could not identify the baseline and first periodic cycle start from fixture HTTP records."
     }
-    Assert-Ticket03IntervalRange $firstBaselineRequest.receivedAt $firstPeriodicCycleStart.receivedAt "baseline-to-first-periodic cycle"
+    Assert-Ticket03CycleStartInterval $firstBaselineRequest $firstPeriodicCycleStart "baseline-to-first-periodic cycle"
 
     foreach ($transition in @("afterCompletion", "home", "other_app", "no_registered_children")) {
         $window = @($result.observationWindows | Where-Object { $_.transition -eq $transition })
