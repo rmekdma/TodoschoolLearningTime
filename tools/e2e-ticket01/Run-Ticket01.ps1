@@ -16,6 +16,7 @@ param(
 $ErrorActionPreference = "Stop"
 if ($Scenario -eq "ticket04") {
     Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/PermissionRecoveryEvidence.psm1") -Force
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/HostLifecycle.psm1") -Force
 }
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04")
@@ -180,7 +181,12 @@ function Assert-InstalledApkEquals([string]$PackageName, [string]$LocalApk, [str
 }
 
 function Get-DeviceMonitorState {
-    $pidText = (Invoke-SelectedAdb @("shell", "pidof", $debugApplicationId) | Out-String).Trim()
+    if ($Scenario -eq "ticket04") {
+        $pidofOutput = & $adbPath -s $DeviceSerial shell pidof $debugApplicationId 2>&1
+        $pidText = Resolve-Ticket04PidofResult -ExitCode $LASTEXITCODE -Output @($pidofOutput) -PackageName $debugApplicationId
+    } else {
+        $pidText = (Invoke-SelectedAdb @("shell", "pidof", $debugApplicationId) | Out-String).Trim()
+    }
     $dump = (Invoke-SelectedAdb @("shell", "dumpsys", "accessibility") | Out-String)
     $boundStart = $dump.IndexOf("Bound services:", [StringComparison]::Ordinal)
     $enabledStart = $dump.IndexOf("Enabled services:", [StringComparison]::Ordinal)
@@ -258,8 +264,15 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
                 $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
             }
         }
-        $lifecycleChanged = $state.crashed -or
-            ($Scenario -ne "ticket04" -and ($state.pid -ne $before.pid -or -not $state.bound))
+        if ($Scenario -eq "ticket04") {
+            $lifecycleChanged = -not (Test-Ticket04HostLifecycleSample `
+                -CaseMode $Ticket04CaseMode `
+                -InitialPid $before.pid `
+                -ObservedPid $state.pid `
+                -Crashed $state.crashed)
+        } else {
+            $lifecycleChanged = $state.crashed -or $state.pid -ne $before.pid -or -not $state.bound
+        }
         if ($Scenario -eq "ticket04" -and $state.pid -ne $previousSamplePid) {
             Write-Host "TICKET04 product lifecycle transition observed: priorSamplePID='$previousSamplePid', currentPID='$($state.pid)', bound=$($state.bound); the permission-specific result gate will decide whether it is expected."
         }
