@@ -8,13 +8,13 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
-import android.view.accessibility.AccessibilityNodeInfo
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.ByteArrayOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -46,37 +46,43 @@ class Ticket01ServerScreenRoundTripTest {
             UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES,
         )
         val activity = openApp(instrumentation)
-        activity.runOnUiThread {
-            activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        }
+        try {
+            instrumentation.runOnMainSync {
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
 
-        val emailField = findNodeOrNull(automation, LOGIN_FORM_TIMEOUT_MS) {
-            it.className == "android.widget.EditText" &&
-                (it.hintText?.toString() == "토도스쿨 이메일" || it.text?.toString() == "토도스쿨 이메일")
-        }
-        if (emailField != null) {
-            setField(automation, "토도스쿨 이메일", TEST_EMAIL)
-            setField(automation, "토도스쿨 비밀번호", TEST_PASSWORD)
-            clickText(automation, "확인")
-        }
+            val emailField = findNodeOrNull(automation, LOGIN_FORM_TIMEOUT_MS) {
+                it.className == "android.widget.EditText" &&
+                    (it.hintText?.toString() == "토도스쿨 이메일" || it.text?.toString() == "토도스쿨 이메일")
+            }
+            if (emailField != null) {
+                setField(automation, "토도스쿨 이메일", TEST_EMAIL)
+                setField(automation, "토도스쿨 비밀번호", TEST_PASSWORD)
+                clickText(automation, "확인")
+            }
 
-        val child = findNodeOrNull(automation, TIMEOUT_MS) {
-            it.text?.toString()?.contains("테스트 아이") == true
-        }
-        if (child == null) {
-            val screenshotPath = saveScreenshot(automation, instrumentation, expectedRunId)
-            throw AssertionError(
-                "Timed out waiting for the test child on the real app screen. " +
-                    "Visible text: ${visibleText(automation)}; screenshot=$screenshotPath",
+            val child = findNodeOrNull(automation, TIMEOUT_MS) {
+                it.text?.toString()?.contains("테스트 아이") == true
+            }
+            if (child == null) {
+                val screenshotPath = saveScreenshot(automation, instrumentation, expectedRunId)
+                throw AssertionError(
+                    "Timed out waiting for the test child on the real app screen. " +
+                        "Visible text: ${visibleText(automation)}; screenshot=$screenshotPath",
+                )
+            }
+            val status = waitForText(automation, "한글 (2/6)", TIMEOUT_MS)
+            assertTrue("The displayed card must contain the server's math count: $status", status.contains("✔ 수학 (5/5)"))
+            assertTrue("The displayed card must contain the server's English count: $status", status.contains("영어 (7/8)"))
+            assertNotNull(
+                "The server-backed screen should have a visible screenshot",
+                saveScreenshot(automation, instrumentation, expectedRunId),
             )
+        } finally {
+            instrumentation.runOnMainSync {
+                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
         }
-        val status = waitForText(automation, "한글 (2/6)", TIMEOUT_MS)
-        assertTrue("The displayed card must contain the server's math count: $status", status.contains("✔ 수학 (5/5)"))
-        assertTrue("The displayed card must contain the server's English count: $status", status.contains("영어 (7/8)"))
-        assertNotNull(
-            "The server-backed screen should have a visible screenshot",
-            saveScreenshot(automation, instrumentation, expectedRunId),
-        )
     }
 
     private fun openApp(instrumentation: Instrumentation): MainActivity {
