@@ -375,5 +375,99 @@ class Ticket05FixtureServerTest(unittest.TestCase):
         )
 
 
+class Ticket06FixtureServerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = server.FixtureState("ticket06-run", "ticket06")
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.state))
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def tearDown(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+
+    def get(self, path: str) -> dict:
+        with urlopen(f"{self.base_url}{path}", timeout=3) as response:
+            return json.loads(response.read())
+
+    def post(self, path: str, body: dict) -> dict:
+        request = Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            return json.loads(response.read())
+
+    def test_ticket06_state_and_controls_survive_a_client_reconnect(self) -> None:
+        self.assertEqual(
+            {"ok": True, "runId": "ticket06-run", "scenario": "ticket06"},
+            self.get("/__ticket06/health"),
+        )
+        changed = self.post("/__ticket06/set-report-counts", {"reports": {"hangeul": 6}})
+        self.assertEqual({"hangeul": 6, "math": 5, "english": 7}, changed["reportCounts"])
+
+        signin = self.post("/v3/account/signin", {"email": "ticket01@example.test", "password": "not-a-real-password"})
+        self.assertTrue(signin["result"])
+        first_state = self.get("/__ticket06/state")
+        self.assertEqual("ticket06-run", first_state["runId"])
+        self.assertEqual("ticket06", first_state["scenario"])
+        self.assertEqual(1, first_state["sequence"])
+        self.assertFalse(first_state["ticket06PreRemovalPreferencesCaptured"])
+        self.assertFalse(first_state["ticket06PreRebootPreferencesCaptured"])
+        acknowledged = self.post("/__ticket06/ack-pre-removal-preferences", {"runId": "ticket06-run"})
+        self.assertEqual({"ok": True, "runId": "ticket06-run", "readyForTaskRemoval": True}, acknowledged)
+        self.assertTrue(self.get("/__ticket06/state")["ticket06PreRemovalPreferencesCaptured"])
+        self.assertEqual(400, self.post_status("/__ticket06/ack-pre-removal-preferences", {"runId": "another-run"}))
+
+        reboot_acknowledged = self.post("/__ticket06/ack-pre-reboot-preferences", {"runId": "ticket06-run"})
+        self.assertEqual({"ok": True, "runId": "ticket06-run", "readyForReboot": True}, reboot_acknowledged)
+        self.assertTrue(self.get("/__ticket06/state")["ticket06PreRebootPreferencesCaptured"])
+        self.assertEqual(400, self.post_status("/__ticket06/ack-pre-reboot-preferences", {"runId": "another-run"}))
+
+        self.assertTrue(self.post("/__ticket06/reset-requests", {})["ok"])
+        after_reset = self.get("/__ticket06/state")
+        self.assertEqual(0, after_reset["sequence"])
+        self.assertEqual([], after_reset["requests"])
+        self.assertFalse(after_reset["ticket06PreRemovalPreferencesCaptured"])
+        self.assertFalse(after_reset["ticket06PreRebootPreferencesCaptured"])
+        self.assertEqual({"hangeul": 6, "math": 5, "english": 7}, after_reset["reportCounts"])
+
+    def test_ticket06_controls_reject_invalid_counts_and_other_scenarios(self) -> None:
+        self.assertEqual(400, self.post_status("/__ticket06/set-report-counts", {"reports": {"math": True}}))
+        self.assertEqual(400, self.post_status("/__ticket06/set-report-counts", {"reports": {"unknown": 1}}))
+        ticket05 = server.FixtureState("ticket05-run", "ticket05")
+        other_httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(ticket05))
+        other_thread = threading.Thread(target=other_httpd.serve_forever, daemon=True)
+        other_thread.start()
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(f"http://127.0.0.1:{other_httpd.server_port}/__ticket06/state", timeout=3)
+            self.assertEqual(404, error.exception.code)
+            error.exception.close()
+        finally:
+            other_httpd.shutdown()
+            other_httpd.server_close()
+            other_thread.join(timeout=2)
+
+    def post_status(self, path: str, body: dict) -> int:
+        request = Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            urlopen(request, timeout=3)
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            return status
+        return 200
+
+
 if __name__ == "__main__":
     unittest.main()

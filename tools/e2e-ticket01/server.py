@@ -40,6 +40,8 @@ class FixtureState:
         self.armed_report_hold: dict[str, Any] | None = None
         self.active_report_hold: dict[str, Any] | None = None
         self.armed_report_response: dict[str, Any] | None = None
+        self.ticket06_pre_removal_preferences_captured = False
+        self.ticket06_pre_reboot_preferences_captured = False
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
             if scenario == "ticket03"
@@ -226,6 +228,25 @@ class FixtureState:
                 raise ValueError("cannot reset request history while a response is armed or in flight")
             self.sequence = 0
             self.requests.clear()
+            if self.scenario == "ticket06":
+                self.ticket06_pre_removal_preferences_captured = False
+                self.ticket06_pre_reboot_preferences_captured = False
+
+    def acknowledge_ticket06_pre_removal_preferences(self, run_id: str) -> None:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 stage acknowledgements are available only in Ticket 06")
+            if run_id != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            self.ticket06_pre_removal_preferences_captured = True
+
+    def acknowledge_ticket06_pre_reboot_preferences(self, run_id: str) -> None:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 stage acknowledgements are available only in Ticket 06")
+            if run_id != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            self.ticket06_pre_reboot_preferences_captured = True
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -235,6 +256,8 @@ class FixtureState:
                 "scenario": self.scenario,
                 "serverMonotonicNs": snapshot_monotonic_ns,
                 "sequence": self.sequence,
+                "ticket06PreRemovalPreferencesCaptured": self.ticket06_pre_removal_preferences_captured,
+                "ticket06PreRebootPreferencesCaptured": self.ticket06_pre_reboot_preferences_captured,
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
                 "releasedReportHolds": [dict(hold) for hold in self.released_report_holds],
@@ -337,6 +360,12 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
                 return
             if self.path == "/__ticket05/state" and state.scenario == "ticket05":
+                self._send_json(200, state.snapshot())
+                return
+            if self.path == "/__ticket06/health" and state.scenario == "ticket06":
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
+                return
+            if self.path == "/__ticket06/state" and state.scenario == "ticket06":
                 self._send_json(200, state.snapshot())
                 return
             self._send_json(404, {"error": "unknown path"})
@@ -487,6 +516,51 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 })
                 return
 
+            if state.scenario == "ticket06" and self.path == "/__ticket06/reset-requests":
+                state.reset_requests()
+                self._send_json(200, {"ok": True, "runId": state.run_id})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/set-report-counts":
+                reports = body.get("reports") if isinstance(body, dict) else None
+                if not isinstance(reports, dict) or not reports:
+                    self._send_json(400, {"error": "reports must be a non-empty object"})
+                    return
+                valid_updates: dict[str, int] = {}
+                for subject, count in reports.items():
+                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
+                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
+                        return
+                    valid_updates[subject] = count
+                report_counts, after_sequence = state.set_report_counts(valid_updates)
+                self._send_json(200, {
+                    "ok": True,
+                    "runId": state.run_id,
+                    "reportCounts": report_counts,
+                    "afterRequestSequence": after_sequence,
+                })
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/ack-pre-removal-preferences":
+                run_id = body.get("runId") if isinstance(body, dict) else None
+                try:
+                    state.acknowledge_ticket06_pre_removal_preferences(run_id)
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "readyForTaskRemoval": True})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/ack-pre-reboot-preferences":
+                run_id = body.get("runId") if isinstance(body, dict) else None
+                try:
+                    state.acknowledge_ticket06_pre_reboot_preferences(run_id)
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "readyForReboot": True})
+                return
+
             if state.scenario == "ticket05" and self.path == "/__ticket05/arm-report-response":
                 try:
                     armed = state.arm_report_response(
@@ -596,7 +670,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04", "ticket05"), default="ticket01")
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04", "ticket05", "ticket06"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")
