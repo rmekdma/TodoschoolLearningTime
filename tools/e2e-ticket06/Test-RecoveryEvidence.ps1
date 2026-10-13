@@ -2,6 +2,55 @@
 Import-Module (Join-Path $PSScriptRoot "RecoveryEvidence.psm1") -Force
 
 $runId = "0123456789abcdef0123456789abcdef"
+$runnerPath = Join-Path $PSScriptRoot "Run-Ticket06.ps1"
+$runnerAst = [System.Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$null, [ref]$null)
+$modeGuardAst = $runnerAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq "Resolve-Ticket06ExecutionMode"
+}, $true)
+if ($null -eq $modeGuardAst) { throw "Ticket 06 runner is missing its preflight execution mode guard." }
+Invoke-Expression $modeGuardAst.Extent.Text
+
+$preparedMode = Resolve-Ticket06ExecutionMode -RunPrepared -RefreshObserver:$false
+$refreshMode = Resolve-Ticket06ExecutionMode -RunPrepared:$false -RefreshObserver
+if ($preparedMode -cne "run-prepared" -or $refreshMode -cne "refresh-observer") {
+    throw "Ticket 06 did not accept each explicit execution mode independently."
+}
+foreach ($invalidMode in @(
+    [pscustomobject]@{ name = "neither"; arguments = @("-ConfigPath", "build/e2e-ticket06/no-such-config.json") },
+    [pscustomobject]@{ name = "both"; arguments = @("-ConfigPath", "build/e2e-ticket06/no-such-config.json", "-RunPrepared", "-RefreshObserver") }
+)) {
+    $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
+    $artifactRoot = Join-Path $repositoryRoot "build/e2e-ticket06"
+    $beforeRunDirectories = @(
+        Get-ChildItem -LiteralPath $artifactRoot -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name |
+            Sort-Object
+    )
+    $powershellPath = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $childArguments = @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $runnerPath) + $invalidMode.arguments
+    $childOutput = @()
+    try {
+        $childOutput = @(& $powershellPath @childArguments 2>&1)
+    } catch {
+        $childOutput += $_
+    }
+    $childExitCode = $LASTEXITCODE
+    $childText = (@($childOutput | ForEach-Object { [string]$_ }) -join "`n")
+    if ($childExitCode -eq 0 -or -not $childText.Contains("Choose exactly one of -RunPrepared or -RefreshObserver.")) {
+        throw "Ticket 06 runner did not reject the $($invalidMode.name) mode before reading its deliberately missing config."
+    }
+    $afterRunDirectories = @(
+        Get-ChildItem -LiteralPath $artifactRoot -Directory -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty Name |
+            Sort-Object
+    )
+    if (($beforeRunDirectories -join "`n") -cne ($afterRunDirectories -join "`n")) {
+        throw "Ticket 06 runner created artifacts while rejecting the $($invalidMode.name) mode."
+    }
+}
+
 $preferenceSelectors = Get-Ticket06PreferenceSelectors -AccountKey 'dGlja2V0MDEtZmFrZS1hY2NvdW50' -ChildName '테스트 아이'
 if ($preferenceSelectors.registrationPattern -cne 'registrations.dGlja2V0MDEtZmFrZS1hY2NvdW50' -or
     $preferenceSelectors.intervalPattern -cne 'interval.dGlja2V0MDEtZmFrZS1hY2NvdW50' -or

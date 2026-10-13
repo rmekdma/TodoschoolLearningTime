@@ -9,10 +9,25 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-if ($RunPrepared -and $RefreshObserver) { throw "Choose either -RunPrepared or -RefreshObserver." }
+function Resolve-Ticket06ExecutionMode {
+    [CmdletBinding()]
+    param(
+        [switch]$RunPrepared,
+        [switch]$RefreshObserver
+    )
+
+    if ([bool]$RunPrepared -eq [bool]$RefreshObserver) {
+        throw "Choose exactly one of -RunPrepared or -RefreshObserver."
+    }
+    if ($RefreshObserver) { return "refresh-observer" }
+    return "run-prepared"
+}
+
+# Fail closed before resolving paths, reading configuration, starting the fixture, or invoking ADB.
+$executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-if ($RefreshObserver) {
+if ($executionMode -eq "refresh-observer") {
     $refreshRunner = Join-Path $PSScriptRoot "../e2e-ticket05/Run-Ticket05.ps1"
     $refreshArguments = @{ RefreshObserver = $true }
     if ($ConfigPath) { $refreshArguments.ConfigPath = $ConfigPath }
