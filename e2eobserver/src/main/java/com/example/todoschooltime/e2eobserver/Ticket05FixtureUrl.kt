@@ -7,8 +7,8 @@ import java.net.URISyntaxException
 object Ticket05FixtureUrl {
     private const val ALLOWED_SCHEME = "http"
     private const val ALLOWED_HOST = "127.0.0.1"
-    private const val ALLOWED_PORT = 18765
-    private const val ALLOWED_AUTHORITY = "$ALLOWED_HOST:$ALLOWED_PORT"
+    private const val MIN_ALLOWED_PORT = 1024
+    private const val MAX_ALLOWED_PORT = 65535
 
     fun requireAllowed(value: String): String {
         val uri = try {
@@ -20,14 +20,13 @@ object Ticket05FixtureUrl {
         require(
             uri.scheme == ALLOWED_SCHEME &&
                 uri.host == ALLOWED_HOST &&
-                uri.port == ALLOWED_PORT &&
-                uri.rawAuthority == ALLOWED_AUTHORITY &&
+                uri.port in MIN_ALLOWED_PORT..MAX_ALLOWED_PORT &&
                 uri.rawUserInfo == null &&
                 uri.rawPath.isNullOrEmpty() &&
                 uri.rawQuery == null &&
                 uri.rawFragment == null,
         ) {
-            "Ticket 05 fixture URL must be exactly http://127.0.0.1:18765 without credentials, path, query, or fragment"
+            "Ticket 05 fixture URL must use http://127.0.0.1 with a port from 1024 through 65535 and no credentials, path, query, or fragment"
         }
         return value
     }

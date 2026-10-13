@@ -6,10 +6,17 @@ import org.junit.Test
 
 class Ticket05FixtureUrlTest {
     @Test
-    fun acceptsOnlyTheConfiguredLoopbackFixtureBaseUrl() {
-        val fixtureUrl = "http://127.0.0.1:18765"
+    fun acceptsLoopbackFixturePortsWithinTheRunnerRange() {
+        val fixtureUrls = listOf(
+            "http://127.0.0.1:1024",
+            "http://127.0.0.1:18765",
+            "http://127.0.0.1:18766",
+            "http://127.0.0.1:65535",
+        )
 
-        assertEquals(fixtureUrl, Ticket05FixtureUrl.requireAllowed(fixtureUrl))
+        fixtureUrls.forEach { url ->
+            assertEquals(url, Ticket05FixtureUrl.requireAllowed(url))
+        }
     }
 
     @Test
@@ -18,7 +25,11 @@ class Ticket05FixtureUrlTest {
             "http://127.0.0.1:18765@evil.example",
             "http://evil.example:18765",
             "https://127.0.0.1:18765",
-            "http://127.0.0.1:18766",
+            "http://127.0.0.1",
+            "http://127.0.0.1:-1",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:1023",
+            "http://127.0.0.1:65536",
             "http://user@127.0.0.1:18765",
             "http://127.0.0.1:18765/fixture",
             "http://127.0.0.1:18765?redirect=evil.example",
