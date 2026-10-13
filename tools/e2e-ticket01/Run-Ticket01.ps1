@@ -401,7 +401,8 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
         $stdout = (& rg --no-heading -n -C 2 -e 'OK \(1 test\)' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' -e 'INSTRUMENTATION_STATUS: stack=' -e 'at com\.example\.todoschooltime\.e2eobserver\.Ticket04PermissionRecoveryTest' $stdoutPath 2>$null) -join "`n"
         $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
     } elseif ($Scenario -eq "ticket05") {
-        $stdout = (& rg --no-heading -n -C 2 -e 'OK \(1 test\)' -e 'INSTRUMENTATION_CODE: -1' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' -e 'INSTRUMENTATION_STATUS: stack=' -e 'at com\.example\.todoschooltime\.e2eobserver\.Ticket05HttpAuthRecoveryTest' $stdoutPath 2>$null) -join "`n"
+        Import-Module (Join-Path $PSScriptRoot "../e2e-ticket05/InstrumentationOutcome.psm1") -Force
+        $stdout = @(Get-Ticket05InstrumentationOutput -Lines @(Get-Content -LiteralPath $stdoutPath)) -join "`n"
         $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
     } else {
         $stdout = Get-Content -LiteralPath $stdoutPath -Raw

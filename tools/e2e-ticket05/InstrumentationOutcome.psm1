@@ -1,3 +1,27 @@
+function Get-Ticket05InstrumentationOutput {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string[]]$Lines)
+
+    $patterns = @(
+        'OK \(1 test\)',
+        'INSTRUMENTATION_CODE:',
+        'INSTRUMENTATION_STATUS_CODE:',
+        'FAILURES!!!',
+        'INSTRUMENTATION_FAILED',
+        'INSTRUMENTATION_STATUS: class=.*Ticket05HttpAuthRecoveryTest',
+        'INSTRUMENTATION_STATUS: stack=',
+        'at com\.example\.todoschooltime\.e2eobserver\.Ticket05HttpAuthRecoveryTest'
+    )
+    foreach ($line in $Lines) {
+        foreach ($pattern in $patterns) {
+            if ($line -match $pattern) {
+                $line
+                break
+            }
+        }
+    }
+}
+
 function Assert-Ticket05InstrumentationOutcome {
     [CmdletBinding()]
     param(
@@ -46,4 +70,4 @@ function Assert-Ticket05InstrumentationOutcome {
     }
 }
 
-Export-ModuleMember -Function Assert-Ticket05InstrumentationOutcome
+Export-ModuleMember -Function Get-Ticket05InstrumentationOutput, Assert-Ticket05InstrumentationOutcome

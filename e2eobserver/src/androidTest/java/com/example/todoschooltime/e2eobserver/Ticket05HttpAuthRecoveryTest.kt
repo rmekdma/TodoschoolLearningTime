@@ -33,7 +33,7 @@ class Ticket05HttpAuthRecoveryTest {
             ?: throw AssertionError("Missing apiBaseUrl instrumentation argument")
         val runId = arguments.getString(ARG_RUN_ID)
             ?: throw AssertionError("Missing runId instrumentation argument")
-        assertTrue("Ticket 05 requires a loopback-only API fixture", apiBaseUrl.startsWith(LOOPBACK_PREFIX))
+        assertEquals(apiBaseUrl, Ticket05FixtureUrl.requireAllowed(apiBaseUrl))
 
         val powerManager = instrumentation.targetContext.getSystemService(PowerManager::class.java)
         val wakeLock = powerManager.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "Ticket05:HttpAuthRecovery")
@@ -936,7 +936,6 @@ class Ticket05HttpAuthRecoveryTest {
         const val TARGET_HANGEUL = 6
         const val TARGET_MATH = 5
         const val TARGET_ENGLISH = 8
-        const val LOOPBACK_PREFIX = "http://127.0.0.1:"
         const val EDIT_TEXT = "android.widget.EditText"
         const val TIMEOUT_MS = 30_000L
         const val POLL_TIMEOUT_MS = 125_000L

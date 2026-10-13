@@ -1,11 +1,14 @@
+$ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "InstrumentationOutcome.psm1") -Force
 
 $runId = "0123456789abcdef0123456789abcdef"
-$goodOutput = @"
-INSTRUMENTATION_STATUS: class=com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest
-OK (1 test)
-INSTRUMENTATION_CODE: -1
-"@
+$goodOutputLines = @(
+    "INSTRUMENTATION_STATUS_CODE: 0",
+    "INSTRUMENTATION_STATUS: class=com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest",
+    "OK (1 test)",
+    "INSTRUMENTATION_CODE: -1"
+)
+$goodOutput = @(Get-Ticket05InstrumentationOutput -Lines $goodOutputLines) -join "`n"
 $goodResult = '{"runId":"0123456789abcdef0123456789abcdef","scenario":"ticket05"}'
 
 function Assert-Rejected {
@@ -26,6 +29,20 @@ $goodStatus = [pscustomobject]@{ runId = $runId; nativeExitCode = 0 }
 Assert-Rejected { Assert-Ticket05InstrumentationOutcome $goodStatus $null "OK (1 test)" $goodResult $runId } "an incomplete instrumentation summary"
 Assert-Rejected { Assert-Ticket05InstrumentationOutcome $goodStatus 2 $goodOutput $goodResult $runId } "a launcher/native exit-code disagreement"
 Assert-Rejected { Assert-Ticket05InstrumentationOutcome $goodStatus 0 $goodOutput '{"runId":"0123456789abcdef0123456789abcdef","scenario":"ticket04"}' $runId } "a structured result from another scenario"
+
+$conflictingOutputLines = @(
+    "INSTRUMENTATION_STATUS_CODE: -2",
+    "INSTRUMENTATION_STATUS: class=com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest",
+    "OK (1 test)",
+    "INSTRUMENTATION_CODE: -1"
+)
+$filteredConflictingOutput = @(Get-Ticket05InstrumentationOutput -Lines $conflictingOutputLines) -join "`n"
+if ($filteredConflictingOutput -notmatch 'INSTRUMENTATION_STATUS_CODE:\s*-2') {
+    throw "The production Ticket 05 output filter dropped the instrumentation failure status code."
+}
+Assert-Rejected {
+    Assert-Ticket05InstrumentationOutcome $goodStatus 0 $filteredConflictingOutput $goodResult $runId
+} "a negative instrumentation status code followed by an OK marker"
 
 $accepted = Assert-Ticket05InstrumentationOutcome $goodStatus $null $goodOutput $goodResult $runId
 if ($accepted.nativeTransportExitCode -ne 0 -or $accepted.launcherProcessExitCodeObserved -or
