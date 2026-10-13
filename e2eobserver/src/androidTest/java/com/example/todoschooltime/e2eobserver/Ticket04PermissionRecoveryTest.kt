@@ -725,19 +725,31 @@ class Ticket04PermissionRecoveryTest {
         preferences.edit()
             .remove(Ticket04ControlActivity.KEY_CLICKED_TOKEN)
             .remove(Ticket04ControlActivity.KEY_CLICKED_AT)
+            .remove(Ticket04ControlActivity.KEY_DISPLAYED_TOKEN)
+            .remove(Ticket04ControlActivity.KEY_DISPLAYED_BUTTON_LABEL)
+            .remove(Ticket04ControlActivity.KEY_DISPLAYED_AT)
             .putString(Ticket04ControlActivity.KEY_ACTIVE_TOKEN, token)
+            .putString(Ticket04ControlActivity.KEY_ACTIVE_INSTRUCTIONS, instructions)
+            .putString(Ticket04ControlActivity.KEY_ACTIVE_BUTTON_LABEL, buttonLabel)
+            .putBoolean(Ticket04ControlActivity.KEY_ACTIVE_KEEP_VISIBLE_AFTER_CLICK, keepVisibleAfterClick)
+            .putString(Ticket04ControlActivity.KEY_ACTIVE_PENDING_INSTRUCTIONS, pendingInstructions)
             .commit()
+        try {
+            Ticket04ControlActivity.launchVisibleUserAction(
+                instrumentation = InstrumentationRegistry.getInstrumentation(),
+                expectedToken = token,
+                expectedButtonLabel = buttonLabel,
+            )
+        } catch (error: Throwable) {
+            emitProgress(
+                runId,
+                "ACTION_SCREEN_PRESENTATION_FAILED",
+                caseId,
+                JSONObject().put("action", action).put("error", error.message.orEmpty()).toString(),
+            )
+            throw error
+        }
         emitProgress(runId, "WAITING_FOR_USER_ACTION", caseId, "$action: $instructions")
-        context.startActivity(
-            Intent(context, Ticket04ControlActivity::class.java)
-                .putExtra(Ticket04ControlActivity.EXTRA_CASE_ID, caseId)
-                .putExtra(Ticket04ControlActivity.EXTRA_TOKEN, token)
-                .putExtra(Ticket04ControlActivity.EXTRA_INSTRUCTIONS, instructions)
-                .putExtra(Ticket04ControlActivity.EXTRA_BUTTON_LABEL, buttonLabel)
-                .putExtra(Ticket04ControlActivity.EXTRA_KEEP_VISIBLE_AFTER_CLICK, keepVisibleAfterClick)
-                .putExtra(Ticket04ControlActivity.EXTRA_PENDING_INSTRUCTIONS, pendingInstructions)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
         val deadline = SystemClock.elapsedRealtime() + USER_ACTION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             if (expectedSeoulDate != null && seoulDateNumber() != expectedSeoulDate) {
