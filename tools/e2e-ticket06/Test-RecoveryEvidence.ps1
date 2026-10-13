@@ -315,56 +315,74 @@ $bootEvidence = Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $
 if (-not $bootEvidence.pass -or $bootEvidence.rebootCount -ne 1 -or $bootEvidence.taskRemovalCase -ne "not-run-in-reboot-case") {
     throw "Valid reboot-only Ticket 06 evidence did not remain independent from task-removal evidence."
 }
+function Copy-Ticket06TestObject($Value) {
+    return ConvertTo-Json -InputObject $Value -Depth 16 | ConvertFrom-Json
+}
+function Assert-Ticket06BootRejected([string]$Name, $Seed, $Candidate, [string]$ExpectedMessage) {
+    try {
+        $seedResult = Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $Seed.preparation -PostReboot $Seed.postReboot -HostState $Seed.hostState
+        if (-not $seedResult.pass) { throw "The $Name negative-case seed did not return pass=true." }
+    } catch {
+        throw "The $Name negative-case seed is invalid: $($_.Exception.Message)"
+    }
 
-$missingManagerResult = $bootPost | ConvertTo-Json -Depth 10 | ConvertFrom-Json
-$missingManagerResult.laterCompletion = [pscustomobject]@{
+    $actualMessage = $null
+    try {
+        Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $Candidate.preparation -PostReboot $Candidate.postReboot -HostState $Candidate.hostState | Out-Null
+    } catch { $actualMessage = $_.Exception.Message }
+    if ($null -eq $actualMessage) { throw "Ticket 06 reboot validator accepted $Name." }
+    if ($actualMessage.IndexOf($ExpectedMessage, [StringComparison]::Ordinal) -lt 0) {
+        throw "Ticket 06 reboot validator rejected $Name for an unrelated reason: $actualMessage"
+    }
+}
+$bootValidSeed = [pscustomobject]@{
+    preparation = Copy-Ticket06TestObject $bootPreparation
+    postReboot = Copy-Ticket06TestObject $bootPost
+    hostState = Copy-Ticket06TestObject $bootHost
+}
+
+$missingManagerCandidate = Copy-Ticket06TestObject $bootValidSeed
+$missingManagerCandidate.postReboot.laterCompletion = [pscustomobject]@{
     subject = "한글"
     completionAlertRequested = $true
     notificationIdReused = $true
     activeNotificationId = 1
     completionCycleSigninElapsedRealtimeMs = 160000
 }
-$missingManagerRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $missingManagerResult -HostState $bootHost | Out-Null }
-catch { $missingManagerRejected = $true }
-if (-not $missingManagerRejected) { throw "Ticket 06 accepted later completion evidence that omitted the producer's notificationManagerCallReturned key." }
+$missingManagerExpected = "later newly achieved subject updated its existing notification"
+Assert-Ticket06BootRejected "later completion with a missing producer field" $bootValidSeed $missingManagerCandidate $missingManagerExpected
 
-$falseManagerResult = $bootPost | ConvertTo-Json -Depth 10 | ConvertFrom-Json
-$falseManagerResult.laterCompletion.notificationManagerCallReturned = $false
-$falseManagerResult.laterCompletion | Add-Member -NotePropertyName managerCallReturned -NotePropertyValue $true -Force
-$falseManagerRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $falseManagerResult -HostState $bootHost | Out-Null }
-catch { $falseManagerRejected = $true }
-if (-not $falseManagerRejected) { throw "Ticket 06 accepted a false producer result because a stale managerCallReturned alias was true." }
+$falseManagerCandidate = Copy-Ticket06TestObject $bootValidSeed
+$falseManagerCandidate.postReboot.laterCompletion.notificationManagerCallReturned = $false
+$falseManagerCandidate.postReboot.laterCompletion | Add-Member -NotePropertyName managerCallReturned -NotePropertyValue $true -Force
+Assert-Ticket06BootRejected "later completion with a false producer field and stale alias" $bootValidSeed $falseManagerCandidate $missingManagerExpected
 
-$bootPost.productActivityLaunchedByController = $true
-$manualBootActivityRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $bootPost -HostState $bootHost | Out-Null }
-catch { $manualBootActivityRejected = $true }
-if (-not $manualBootActivityRejected) { throw "Ticket 06 reboot-only evidence accepted a manually opened product Activity." }
+$manualActivityCandidate = Copy-Ticket06TestObject $bootValidSeed
+$manualActivityCandidate.postReboot.productActivityLaunchedByController = $true
+Assert-Ticket06BootRejected "manual product Activity launch" $bootValidSeed $manualActivityCandidate "must explicitly record silent baselines"
 
-$bootPost = $post | ConvertTo-Json -Depth 10 | ConvertFrom-Json
-$bootPost.baseline | Add-Member -NotePropertyName fixtureRequestStartSequence -NotePropertyValue 20 -Force
-$bootPost.baseline | Add-Member -NotePropertyName requestPaths -NotePropertyValue @(
-    "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
-    "/v3/todoschool/report/daily/hangeul", "/v3/todoschool/report/daily/math", "/v3/todoschool/report/daily/english"
-) -Force
-$earlyBootCycleRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $bootPost -HostState $bootHost | Out-Null }
-catch { $earlyBootCycleRejected = $true }
-if (-not $earlyBootCycleRejected) { throw "Ticket 06 reboot-only evidence accepted a cycle that did not follow the pre-reboot fixture cursor." }
+$earlyCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
+$earlyCycleCandidate.postReboot.baseline.fixtureRequestStartSequence = 20
+Assert-Ticket06BootRejected "post-boot cycle before the pre-reboot fixture cursor" $bootValidSeed $earlyCycleCandidate "did not follow the pre-reboot fixture cursor"
 
 $taskRemovalRemainsSeparate = $bootEvidence | Get-Member -Name taskRemovalMechanism -ErrorAction SilentlyContinue
 if ($null -ne $taskRemovalRemainsSeparate) { throw "Ticket 06 reboot-only summary falsely claimed a task-removal mechanism." }
 
-function Copy-Ticket06TestObject($Value) {
-    return ConvertTo-Json -InputObject $Value -Depth 16 | ConvertFrom-Json
-}
-function Assert-Ticket06TaskRejected([string]$Name, $Candidate) {
-    $rejected = $false
+function Assert-Ticket06TaskRejected([string]$Name, $Seed, $Candidate, [string]$ExpectedMessage) {
+    try {
+        $seedResult = Assert-Ticket06TaskRemovalEvidence -RunId $runId -Evidence $Seed
+        if (-not $seedResult.pass) { throw "The $Name negative-case seed did not return pass=true." }
+    } catch {
+        throw "The $Name negative-case seed is invalid: $($_.Exception.Message)"
+    }
+
+    $actualMessage = $null
     try { Assert-Ticket06TaskRemovalEvidence -RunId $runId -Evidence $Candidate | Out-Null }
-    catch { $rejected = $true }
-    if (-not $rejected) { throw "Ticket 06 task-removal validator accepted $Name." }
+    catch { $actualMessage = $_.Exception.Message }
+    if ($null -eq $actualMessage) { throw "Ticket 06 task-removal validator accepted $Name." }
+    if ($actualMessage.IndexOf($ExpectedMessage, [StringComparison]::Ordinal) -lt 0) {
+        throw "Ticket 06 task-removal validator rejected $Name for an unrelated reason: $actualMessage"
+    }
 }
 function Set-Ticket06TestPropertyByPath($Root, [string]$Path, [string]$Mutation) {
     $segments = $Path.Split('.')
@@ -388,13 +406,6 @@ function Set-Ticket06TestPropertyByPath($Root, [string]$Path, [string]$Mutation)
         default { throw "Unknown test mutation: $Mutation" }
     }
 }
-function Assert-Ticket06BootRejected([string]$Name, $Preparation, $PostReboot, $HostState) {
-    $rejected = $false
-    try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $Preparation -PostReboot $PostReboot -HostState $HostState | Out-Null }
-    catch { $rejected = $true }
-    if (-not $rejected) { throw "Ticket 06 reboot validator accepted $Name." }
-}
-
 $requiredFalseTaskProperties = @(
     [pscustomobject]@{ path = "taskRemoval.taskRemoval.forceStopUsed"; name = "task.forceStopUsed" },
     [pscustomobject]@{ path = "taskRemoval.baseline.completionAlertRequested"; name = "task-removal baseline completionAlertRequested" },
@@ -407,7 +418,7 @@ foreach ($field in $requiredFalseTaskProperties) {
     foreach ($mutation in $invalidFalseMutations) {
         $candidate = Copy-Ticket06TestObject $taskEvidence
         Set-Ticket06TestPropertyByPath -Root $candidate -Path $field.path -Mutation $mutation
-        Assert-Ticket06TaskRejected "$($field.name)=$mutation" $candidate
+        Assert-Ticket06TaskRejected "$($field.name)=$mutation" $taskEvidence $candidate "must explicitly record no force-stop"
     }
 }
 
@@ -419,16 +430,14 @@ $requiredFalseBootProperties = @(
 )
 foreach ($field in $requiredFalseBootProperties) {
     foreach ($mutation in $invalidFalseMutations) {
-        $candidatePreparation = Copy-Ticket06TestObject $bootPreparation
-        $candidatePostReboot = Copy-Ticket06TestObject $bootPost
-        $candidateHostState = Copy-Ticket06TestObject $bootHost
+        $candidate = Copy-Ticket06TestObject $bootValidSeed
         $candidateRoot = switch ($field.root) {
-            "preparation" { $candidatePreparation }
-            "postReboot" { $candidatePostReboot }
-            "hostState" { $candidateHostState }
+            "preparation" { $candidate.preparation }
+            "postReboot" { $candidate.postReboot }
+            "hostState" { $candidate.hostState }
         }
         Set-Ticket06TestPropertyByPath -Root $candidateRoot -Path $field.path -Mutation $mutation
-        Assert-Ticket06BootRejected "$($field.name)=$mutation" $candidatePreparation $candidatePostReboot $candidateHostState
+        Assert-Ticket06BootRejected "$($field.name)=$mutation" $bootValidSeed $candidate "must explicitly record silent baselines"
     }
 }
 
@@ -444,59 +453,59 @@ if (-not $fallbackEvidence.pass) { throw "Ticket 06 rejected a bounded targeted 
 
 $unobservedFallback = Copy-Ticket06TestObject $recentsFallback
 $unobservedFallback.taskRemoval.taskRemoval.recentsSwipePerformed = $false
-Assert-Ticket06TaskRejected "a command failure without a targeted Recents dismissal" $unobservedFallback
+Assert-Ticket06TaskRejected "a command failure without a targeted Recents dismissal" $recentsFallback $unobservedFallback "does not prove removal of only the observed debug task"
 
 $wrongTaskComponent = Copy-Ticket06TestObject $taskEvidence
 $wrongTaskComponent.taskRemoval.taskRemoval.taskComponent = "com.enuma.todoenglish/org.cocos2dx.cpp.MainActivity"
-Assert-Ticket06TaskRejected "a task outside the isolated product MainActivity" $wrongTaskComponent
+Assert-Ticket06TaskRejected "a task outside the isolated product MainActivity" $taskEvidence $wrongTaskComponent "does not prove removal of only the observed debug task"
 
 $unobservedCardFallback = Copy-Ticket06TestObject $recentsFallback
 $unobservedCardFallback.taskRemoval.taskRemoval.recentsViewLabelObserved = $false
-Assert-Ticket06TaskRejected "a swipe without a visible exact product card label" $unobservedCardFallback
+Assert-Ticket06TaskRejected "a swipe without a visible exact product card label" $recentsFallback $unobservedCardFallback "does not prove removal of only the observed debug task"
 
 $wrongWindowFallback = Copy-Ticket06TestObject $recentsFallback
 $wrongWindowFallback.taskRemoval.taskRemoval.recentsLabelWindowPackage = "com.example.todoschooltime.debug"
-Assert-Ticket06TaskRejected "a card label from the active product window" $wrongWindowFallback
+Assert-Ticket06TaskRejected "a card label from the active product window" $recentsFallback $wrongWindowFallback "does not prove removal of only the observed debug task"
 
 $changedOtherTask = Copy-Ticket06TestObject $recentsFallback
 $changedOtherTask.taskRemoval.taskRemoval.otherTaskIdsAfterRemoval = @(1220, 1221)
-Assert-Ticket06TaskRejected "a gesture that changed another recent task" $changedOtherTask
+Assert-Ticket06TaskRejected "a gesture that changed another recent task" $recentsFallback $changedOtherTask "does not prove removal of only the observed debug task"
 
 $wrongTaskScenario = Copy-Ticket06TestObject $taskEvidence
 $wrongTaskScenario.taskRemoval.scenario = "ticket05"
-Assert-Ticket06TaskRejected "a foreign observer scenario" $wrongTaskScenario
+Assert-Ticket06TaskRejected "a foreign observer scenario" $taskEvidence $wrongTaskScenario "observer result has the wrong run ID, scenario, or phase"
 
 $unexpectedTaskReboot = Copy-Ticket06TestObject $taskEvidence
 $unexpectedTaskReboot.executionScope.rebootPerformed = $true
-Assert-Ticket06TaskRejected "a reboot inside the task-removal case" $unexpectedTaskReboot
+Assert-Ticket06TaskRejected "a reboot inside the task-removal case" $taskEvidence $unexpectedTaskReboot "must explicitly record no force-stop"
 
 $taskForceStop = Copy-Ticket06TestObject $taskEvidence
 $taskForceStop.executionScope.forceStopUsed = $true
-Assert-Ticket06TaskRejected "force-stop usage" $taskForceStop
+Assert-Ticket06TaskRejected "force-stop usage" $taskEvidence $taskForceStop "must explicitly record no force-stop"
 
 $detachedTaskService = Copy-Ticket06TestObject $taskEvidence
 $detachedTaskService.serviceState.afterTaskRemoval.bound = $false
-Assert-Ticket06TaskRejected "a detached monitor service after task removal" $detachedTaskService
+Assert-Ticket06TaskRejected "a detached monitor service after task removal" $taskEvidence $detachedTaskService "did not keep the actual monitor service bound with its lease attached"
 
 $changedTaskPreference = Copy-Ticket06TestObject $taskEvidence
 $changedTaskPreference.preferences.intervalAfterTaskRemoval = '<string name="interval.key">2</string>'
-Assert-Ticket06TaskRejected "changed saved preferences after task removal" $changedTaskPreference
+Assert-Ticket06TaskRejected "changed saved preferences after task removal" $taskEvidence $changedTaskPreference "did not preserve the exact filtered app-owned preference rows"
 
 $incompleteTaskFixture = Copy-Ticket06TestObject $taskEvidence
 $incompleteTaskFixture.fixture.requests = @($incompleteTaskFixture.fixture.requests | Select-Object -First 8)
-Assert-Ticket06TaskRejected "an incomplete post-removal fixture cycle" $incompleteTaskFixture
+Assert-Ticket06TaskRejected "an incomplete post-removal fixture cycle" $taskEvidence $incompleteTaskFixture "does not prove a full post-removal local API cycle"
 
 $unanchoredTaskFixture = Copy-Ticket06TestObject $taskEvidence
 $unanchoredTaskFixture.fixture.requests[7].sequence = 9
-Assert-Ticket06TaskRejected "a fixture cycle that does not begin immediately after the completed baseline" $unanchoredTaskFixture
+Assert-Ticket06TaskRejected "a fixture cycle that does not begin immediately after the completed baseline" $taskEvidence $unanchoredTaskFixture "does not prove a full post-removal local API cycle"
 
 $taskBaselineAlert = Copy-Ticket06TestObject $taskEvidence
 $taskBaselineAlert.taskRemoval.baseline.completionAlertRequested = $true
-Assert-Ticket06TaskRejected "a completion notification during the completed baseline" $taskBaselineAlert
+Assert-Ticket06TaskRejected "a completion notification during the completed baseline" $taskEvidence $taskBaselineAlert "must explicitly record no force-stop"
 
 $taskCadenceMismatch = Copy-Ticket06TestObject $taskEvidence
 $taskCadenceMismatch.taskRemoval.cadence.serverDeltaMs = 50000
-Assert-Ticket06TaskRejected "a cadence inconsistent with the server monotonic dispatches" $taskCadenceMismatch
+Assert-Ticket06TaskRejected "a cadence inconsistent with the server monotonic dispatches" $taskEvidence $taskCadenceMismatch "does not match actual client elapsed-realtime and fixture server monotonic dispatches"
 $chunkPayload = [ordered]@{ runId = $runId; scenario = "ticket06"; phase = "post-reboot"; text = ("A" * 4500) } | ConvertTo-Json -Compress
 $chunkBytes = [Text.Encoding]::UTF8.GetBytes($chunkPayload)
 $chunkText = [Convert]::ToBase64String($chunkBytes)
@@ -510,40 +519,34 @@ $chunkLines = for ($index = 0; $index -lt $chunkList.Count; $index++) {
 if ((Join-Ticket06ResultChunks -LogLines $chunkLines -RunId $runId) -cne $chunkPayload) {
     throw "Ticket 06 structured result chunks did not round-trip exactly."
 }
-$duplicateChunksRejected = $false
+$duplicateChunkError = $null
 try { Join-Ticket06ResultChunks -LogLines (@($chunkLines) + $chunkLines[0]) -RunId $runId | Out-Null }
-catch { $duplicateChunksRejected = $true }
-if (-not $duplicateChunksRejected) { throw "Ticket 06 accepted a duplicate result chunk." }
-$missingChunksRejected = $false
+catch { $duplicateChunkError = $_.Exception.Message }
+if ($null -eq $duplicateChunkError) { throw "Ticket 06 accepted a duplicate result chunk." }
+if ($duplicateChunkError.IndexOf("is duplicated.", [StringComparison]::Ordinal) -lt 0) {
+    throw "Ticket 06 rejected duplicate chunks for an unrelated reason: $duplicateChunkError"
+}
+$missingChunkError = $null
 try { Join-Ticket06ResultChunks -LogLines @($chunkLines | Select-Object -Skip 1) -RunId $runId | Out-Null }
-catch { $missingChunksRejected = $true }
-if (-not $missingChunksRejected) { throw "Ticket 06 accepted missing result chunks." }
+catch { $missingChunkError = $_.Exception.Message }
+if ($null -eq $missingChunkError) { throw "Ticket 06 accepted missing result chunks." }
+if ($missingChunkError.IndexOf("is missing one or more chunks.", [StringComparison]::Ordinal) -lt 0) {
+    throw "Ticket 06 rejected missing chunks for an unrelated reason: $missingChunkError"
+}
 
-$lateReverseHost = Copy-Ticket06TestObject $bootHost
-$lateReverseHost.reboot.reverseReadyAtUtc = $serviceReadyMoment.AddSeconds(1).ToString("O")
-$lateReverseRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $bootPost -HostState $lateReverseHost | Out-Null }
-catch { $lateReverseRejected = $true }
-if (-not $lateReverseRejected) { throw "Ticket 06 accepted a reverse mapping verification completed after service readiness." }
+$lateReverseCandidate = Copy-Ticket06TestObject $bootValidSeed
+$lateReverseCandidate.hostState.reboot.reverseReadyAtUtc = $serviceReadyMoment.AddSeconds(1).ToString("O")
+Assert-Ticket06BootRejected "a reverse mapping verification completed after service readiness" $bootValidSeed $lateReverseCandidate "did not prove one bounded reboot, ready/unlocked device, and fixture route before service readiness"
 
-$earlyReverseHost = Copy-Ticket06TestObject $bootHost
-$earlyReverseHost.reboot.reverseReadyAtUtc = $reconnectMoment.AddSeconds(-1).ToString("O")
-$earlyReverseRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $bootPost -HostState $earlyReverseHost | Out-Null }
-catch { $earlyReverseRejected = $true }
-if (-not $earlyReverseRejected) { throw "Ticket 06 accepted a reverse mapping verification timestamp before device reconnection." }
+$earlyReverseCandidate = Copy-Ticket06TestObject $bootValidSeed
+$earlyReverseCandidate.hostState.reboot.reverseReadyAtUtc = $reconnectMoment.AddSeconds(-1).ToString("O")
+Assert-Ticket06BootRejected "a reverse mapping verification timestamp before device reconnection" $bootValidSeed $earlyReverseCandidate "did not prove one bounded reboot, ready/unlocked device, and fixture route before service readiness"
 
-$missingPreferenceHost = Copy-Ticket06TestObject $bootHost
-$missingPreferenceHost.persistedIntervalAfterReboot = $false
-$missingPreferenceRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $bootPost -HostState $missingPreferenceHost | Out-Null }
-catch { $missingPreferenceRejected = $true }
-if (-not $missingPreferenceRejected) { throw "Ticket 06 accepted a missing persisted preference after reboot." }
+$missingPreferenceCandidate = Copy-Ticket06TestObject $bootValidSeed
+$missingPreferenceCandidate.hostState.persistedIntervalAfterReboot = $false
+Assert-Ticket06BootRejected "a missing persisted preference after reboot" $bootValidSeed $missingPreferenceCandidate "filtered preferences did not prove registration, targets, and interval on both sides of reboot"
 
-$baselineAlert = Copy-Ticket06TestObject $bootPost
-$baselineAlert.baseline.completionAlertRequested = $true
-$baselineAlertRejected = $false
-try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $bootPreparation -PostReboot $baselineAlert -HostState $bootHost | Out-Null }
-catch { $baselineAlertRejected = $true }
-if (-not $baselineAlertRejected) { throw "Ticket 06 accepted a completion alert during the reboot baseline." }
+$baselineAlertCandidate = Copy-Ticket06TestObject $bootValidSeed
+$baselineAlertCandidate.postReboot.baseline.completionAlertRequested = $true
+Assert-Ticket06BootRejected "a completion alert during the reboot baseline" $bootValidSeed $baselineAlertCandidate "must explicitly record silent baselines"
 Write-Output "PASS Ticket06 independent task/reboot evidence, producer contract, and verified reverse timing."
