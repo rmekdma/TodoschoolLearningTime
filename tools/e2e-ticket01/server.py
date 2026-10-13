@@ -39,6 +39,7 @@ class FixtureState:
         self.released_report_holds: list[dict[str, Any]] = []
         self.armed_report_hold: dict[str, Any] | None = None
         self.active_report_hold: dict[str, Any] | None = None
+        self.armed_report_response: dict[str, Any] | None = None
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
             if scenario == "ticket03"
@@ -190,10 +191,39 @@ class FixtureState:
             self.report_counts.update(updates)
             return dict(self.report_counts), self.sequence
 
+    def arm_report_response(self, case_id: str, path: str, response_status: int) -> dict[str, Any]:
+        with self.lock:
+            if self.scenario != "ticket05":
+                raise ValueError("one-shot report responses are available only in Ticket 05")
+            if self.armed_report_response is not None:
+                raise ValueError("a one-shot report response is already armed")
+            if not isinstance(case_id, str) or not case_id or len(case_id) > 80:
+                raise ValueError("caseId must be a non-empty string of at most 80 characters")
+            if path not in REPORT_PATHS:
+                raise ValueError("path must be one of the supported report paths")
+            if isinstance(response_status, bool) or not isinstance(response_status, int) or response_status not in (401, 403, 500):
+                raise ValueError("responseStatus must be 401, 403, or 500")
+            self.armed_report_response = {
+                "caseId": case_id,
+                "path": path,
+                "responseStatus": response_status,
+            }
+            return dict(self.armed_report_response)
+
+    def consume_report_response(self, path: str, event: dict[str, Any]) -> dict[str, Any] | None:
+        with self.lock:
+            armed = self.armed_report_response
+            if armed is None or armed["path"] != path:
+                return None
+            self.armed_report_response = None
+            event["caseId"] = armed["caseId"]
+            event["injectedResponseStatus"] = armed["responseStatus"]
+            return dict(armed)
+
     def reset_requests(self) -> None:
         with self.lock:
-            if self.armed_report_hold is not None or self.active_report_hold is not None:
-                raise ValueError("cannot reset request history while a report hold is armed or in flight")
+            if self.armed_report_hold is not None or self.active_report_hold is not None or self.armed_report_response is not None:
+                raise ValueError("cannot reset request history while a response is armed or in flight")
             self.sequence = 0
             self.requests.clear()
 
@@ -214,6 +244,7 @@ class FixtureState:
                 "activeReportHold": None if self.active_report_hold is None else {
                     key: value for key, value in self.active_report_hold.items() if key != "release"
                 },
+                "armedReportResponse": None if self.armed_report_response is None else dict(self.armed_report_response),
                 "inFlightRequests": [
                     {
                         "sequence": request["sequence"],
@@ -300,6 +331,12 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
                 return
             if self.path == "/__ticket04/state" and state.scenario == "ticket04":
+                self._send_json(200, state.snapshot())
+                return
+            if self.path == "/__ticket05/health" and state.scenario == "ticket05":
+                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
+                return
+            if self.path == "/__ticket05/state" and state.scenario == "ticket05":
                 self._send_json(200, state.snapshot())
                 return
             self._send_json(404, {"error": "unknown path"})
@@ -421,6 +458,48 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 })
                 return
 
+            if state.scenario == "ticket05" and self.path == "/__ticket05/reset-requests":
+                try:
+                    state.reset_requests()
+                except ValueError as error:
+                    self._send_json(409, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id})
+                return
+
+            if state.scenario == "ticket05" and self.path == "/__ticket05/set-report-counts":
+                reports = body.get("reports") if isinstance(body, dict) else None
+                if not isinstance(reports, dict) or not reports:
+                    self._send_json(400, {"error": "reports must be a non-empty object"})
+                    return
+                valid_updates: dict[str, int] = {}
+                for subject, count in reports.items():
+                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
+                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
+                        return
+                    valid_updates[subject] = count
+                report_counts, after_sequence = state.set_report_counts(valid_updates)
+                self._send_json(200, {
+                    "ok": True,
+                    "runId": state.run_id,
+                    "reportCounts": report_counts,
+                    "afterRequestSequence": after_sequence,
+                })
+                return
+
+            if state.scenario == "ticket05" and self.path == "/__ticket05/arm-report-response":
+                try:
+                    armed = state.arm_report_response(
+                        case_id=body.get("caseId") if isinstance(body, dict) else "",
+                        path=body.get("path") if isinstance(body, dict) else "",
+                        response_status=body.get("responseStatus") if isinstance(body, dict) else None,
+                    )
+                except (TypeError, ValueError) as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, **armed})
+                return
+
             headers = {
                 "content-type": self.headers.get("Content-Type", ""),
                 "accept": self.headers.get("Accept", ""),
@@ -467,6 +546,12 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     state.complete(event, 400)
                     self._send_json(400, {"error": "unexpected report request body"})
                     return
+                injected = state.consume_report_response(self.path, event)
+                if injected is not None:
+                    status = injected["responseStatus"]
+                    state.complete(event, status)
+                    self._send_json(status, {"error": f"ticket05 injected HTTP {status}"})
+                    return
                 hold = state.hold_for_report(self.path, event)
                 if hold is not None:
                     while not hold["release"].wait(0.05):
@@ -511,7 +596,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04"), default="ticket01")
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04", "ticket05"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")

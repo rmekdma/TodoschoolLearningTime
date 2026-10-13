@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from http.server import ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import server
@@ -176,6 +177,7 @@ class Ticket04FixtureServerTest(unittest.TestCase):
         self.assertEqual([], after_reset["requests"])
         self.assertEqual(1, len(after_reset["releasedReportHolds"]))
 
+
     def test_explicit_unauthorized_hold_can_be_released_without_changing_fixture_counts(self) -> None:
         armed = self.post(
             "/__ticket04/arm-report-hold",
@@ -263,6 +265,114 @@ class Ticket04FixtureServerTest(unittest.TestCase):
         self.assertTrue(released["ok"])
         completed = self.wait_until(lambda snapshot: snapshot["requests"][0]["responseStatus"] is not None)
         self.assertEqual("write-failed", completed["requests"][0]["deliveryStatus"])
+
+
+class Ticket05FixtureServerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = server.FixtureState("ticket05-run", "ticket05")
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(self.state))
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.httpd.server_port}"
+
+    def tearDown(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+
+    def get(self, path: str) -> dict:
+        with urlopen(f"{self.base_url}{path}", timeout=3) as response:
+            return json.loads(response.read())
+
+    def post(self, path: str, body: dict, authorization: str | None = None) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if authorization is not None:
+            headers["Authorization"] = authorization
+        request = Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urlopen(request, timeout=3) as response:
+            return json.loads(response.read())
+
+    def post_report_status(self, path: str, user_id: str) -> int:
+        try:
+            self.post(
+                path,
+                {"userId": user_id, "yyyymmdd": 20261013, "languageCode": "ko"},
+                authorization="Bearer ticket01-fake-token",
+            )
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            return status
+        return 200
+
+    def post_status(self, path: str, body: dict) -> int:
+        try:
+            self.post(path, body)
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            return status
+        return 200
+
+    def test_one_shot_http_failures_use_real_report_route_and_the_next_request_recovers(self) -> None:
+        health = self.get("/__ticket05/health")
+        self.assertEqual({"ok": True, "runId": "ticket05-run", "scenario": "ticket05"}, health)
+
+        for case_id, path, user_id, status in (
+            ("temporary-500", "/v3/todoschool/report/daily/hangeul", "ticket01-hangeul", 500),
+            ("expired-auth", "/v3/todoschool/report/daily/math", "ticket01-math", 401),
+        ):
+            armed = self.post(
+                "/__ticket05/arm-report-response",
+                {"caseId": case_id, "path": path, "responseStatus": status},
+            )
+            self.assertTrue(armed["ok"])
+            self.assertEqual(case_id, armed["caseId"])
+            self.assertEqual(path, armed["path"])
+            self.assertEqual(status, self.post_report_status(path, user_id))
+
+        recovered = self.post(
+            "/v3/todoschool/report/daily/hangeul",
+            {"userId": "ticket01-hangeul", "yyyymmdd": 20261013, "languageCode": "ko"},
+            authorization="Bearer ticket01-fake-token",
+        )
+        self.assertTrue(recovered["result"])
+        self.assertEqual(2, len(recovered["data"]["contentsHistory"]["dailyCourse"]))
+
+        observed = self.get("/__ticket05/state")
+        self.assertEqual("ticket05-run", observed["runId"])
+        self.assertEqual([500, 401, 200], [request["responseStatus"] for request in observed["requests"]])
+        self.assertEqual(["temporary-500", "expired-auth", None], [request.get("caseId") for request in observed["requests"]])
+        self.assertTrue(all(request["headers"]["authorization"] == "Bearer ticket01-fake-token" for request in observed["requests"]))
+        self.assertEqual([None, None, 2], [request["servedReportCount"] for request in observed["requests"]])
+
+    def test_ticket05_response_injection_rejects_invalid_or_overlapping_cases(self) -> None:
+        for payload in (
+            {"caseId": "bad-status", "path": "/v3/todoschool/report/daily/hangeul", "responseStatus": 302},
+            {"caseId": "float-status", "path": "/v3/todoschool/report/daily/hangeul", "responseStatus": 500.0},
+            {"caseId": "boolean-status", "path": "/v3/todoschool/report/daily/hangeul", "responseStatus": True},
+            {"caseId": "bad-path", "path": "/v3/account/signin", "responseStatus": 500},
+        ):
+            self.assertEqual(400, self.post_status("/__ticket05/arm-report-response", payload))
+
+        armed = self.post(
+            "/__ticket05/arm-report-response",
+            {"caseId": "first", "path": "/v3/todoschool/report/daily/hangeul", "responseStatus": 500},
+        )
+        self.assertTrue(armed["ok"])
+        self.assertEqual(409, self.post_status("/__ticket05/reset-requests", {}))
+        self.assertEqual(
+            400,
+            self.post_status(
+                "/__ticket05/arm-report-response",
+                {"caseId": "second", "path": "/v3/todoschool/report/daily/math", "responseStatus": 401},
+            ),
+        )
 
 
 if __name__ == "__main__":

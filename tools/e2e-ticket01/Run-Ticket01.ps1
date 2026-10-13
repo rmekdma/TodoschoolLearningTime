@@ -2,7 +2,7 @@
 param(
     [string]$ConfigPath = (Join-Path $PSScriptRoot "config.json"),
     [string]$DeviceSerial,
-    [ValidateSet("ticket01", "ticket02", "ticket03", "ticket04")]
+    [ValidateSet("ticket01", "ticket02", "ticket03", "ticket04", "ticket05")]
     [string]$Scenario = "ticket01",
     [switch]$DeviceOnly,
     [switch]$PrepareDevice,
@@ -18,8 +18,12 @@ if ($Scenario -eq "ticket04") {
     Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/PermissionRecoveryEvidence.psm1") -Force
     Import-Module (Join-Path $PSScriptRoot "../e2e-ticket04/HostLifecycle.psm1") -Force
 }
+if ($Scenario -eq "ticket05") {
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket05/ResultChunks.psm1") -Force
+    Import-Module (Join-Path $PSScriptRoot "../e2e-ticket05/HttpAuthRecoveryEvidence.psm1") -Force
+}
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
-$usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04")
+$usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04", "ticket05")
 $configExample = Join-Path $PSScriptRoot "config.example.json"
 $configFile = if (Test-Path -LiteralPath $ConfigPath) { $ConfigPath } else { $configExample }
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
@@ -219,10 +223,28 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
 
     $stdoutPath = Join-Path $artifactDirectory "observer-instrumentation.stdout.txt"
     $stderrPath = Join-Path $artifactDirectory "observer-instrumentation.stderr.txt"
+    $nativeArgumentsPath = Join-Path $artifactDirectory "observer-native-arguments.json"
+    $nativeStatusPath = Join-Path $artifactDirectory "observer-native-transport.json"
+    $transportStatusPath = Join-Path $artifactDirectory "observer-transport-status.json"
     $samplePath = Join-Path $artifactDirectory "observer-lifecycle-samples.json"
-    $ticket04CaseArgument = if ($Scenario -eq "ticket04") { "-e caseMode $Ticket04CaseMode" } else { "" }
-    $argumentText = "-s $DeviceSerial shell am instrument -w -r -e apiBaseUrl $ApiBaseUrl -e runId $RunId $ticket04CaseArgument -e class $TestClass $InstrumentationComponent"
-    $process = Start-Process -FilePath $adbPath -ArgumentList $argumentText -WindowStyle Hidden `
+    $nativeArguments = @("-s", $DeviceSerial, "shell", "am", "instrument", "-w", "-r", "-e", "apiBaseUrl", $ApiBaseUrl, "-e", "runId", $RunId)
+    if ($Scenario -eq "ticket04") { $nativeArguments += @("-e", "caseMode", $Ticket04CaseMode) }
+    $nativeArguments += @("-e", "class", $TestClass, $InstrumentationComponent)
+    $nativeCommandConfig = [pscustomobject]@{
+        schemaVersion = 1
+        runId = $RunId
+        executablePath = $adbPath
+        arguments = $nativeArguments
+        statusPath = $nativeStatusPath
+    }
+    $nativeCommandConfig | ConvertTo-Json -Depth 5 -Compress | Set-Content -LiteralPath $nativeArgumentsPath -Encoding utf8
+    $nativeCommandLauncherPath = Join-Path $PSScriptRoot "Invoke-NativeCommand.ps1"
+    $powershellPath = Join-Path $PSHOME "powershell.exe"
+    $launcherArguments = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        ('"{0}"' -f $nativeCommandLauncherPath), "-ConfigPath", ('"{0}"' -f $nativeArgumentsPath)
+    ) -join " "
+    $process = Start-Process -FilePath $powershellPath -ArgumentList $launcherArguments -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $samples = [System.Collections.Generic.List[object]]::new()
     $ticket04ProgressLines = [System.Collections.Generic.List[string]]::new()
@@ -298,11 +320,17 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     if ($failure -or -not $process.HasExited) {
         if (-not $failure) { $failure = "External observer exceeded its $TimeoutMinutes-minute limit." }
         try { Invoke-SelectedAdb @("shell", "am", "force-stop", $observerTestApplicationId) | Out-Null } catch { }
-        if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        if (-not $process.HasExited) {
+            try { $process.WaitForExit(10000) | Out-Null } catch { }
+            $process.Refresh()
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        }
         throw "$failure The observer was stopped without altering the product app. PID/binding samples: $samplePath"
     }
 
     $process.WaitForExit()
+    $process.Refresh()
+    $launcherProcessExitCode = $process.ExitCode
     if ($Scenario -eq "ticket04") {
         $finalProgressOutput = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket04Progress:I", "*:S"))
         $finalMatchingProgress = @($finalProgressOutput | Where-Object { $_ -match [regex]::Escape($RunId) -and $_ -match "TICKET04_PROGRESS=" })
@@ -337,11 +365,43 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     }
     $after = Get-DeviceMonitorState
     $after.accessibilityDump | Set-Content -LiteralPath (Join-Path $artifactDirectory "product-service-after-observer.txt") -Encoding utf8
-    if ($process.ExitCode -ne 0) {
-        throw "External observer adb process exited with code $($process.ExitCode). See $stdoutPath and $stderrPath"
+    if (-not (Test-Path -LiteralPath $nativeStatusPath)) {
+        throw "External observer launcher did not save the native adb transport status. See $stdoutPath and $stderrPath"
+    }
+    $nativeTransport = Get-Content -LiteralPath $nativeStatusPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    if ($nativeTransport.runId -cne $RunId) {
+        throw "External observer native transport status belongs to another run. See $nativeStatusPath"
+    }
+    $observerAdbExitCode = if ($null -eq $nativeTransport.nativeExitCode) { $null } else { [int]$nativeTransport.nativeExitCode }
+    $transportRecord = [pscustomobject]@{
+        schemaVersion = 1
+        runId = $RunId
+        executablePath = [string]$nativeTransport.executablePath
+        nativeExitCode = $observerAdbExitCode
+        nativeExitCapturedBy = "PowerShell LASTEXITCODE captured immediately after invoking adb"
+        nativeExitStartedAtUtc = [string]$nativeTransport.startedAtUtc
+        nativeExitCompletedAtUtc = [string]$nativeTransport.completedAtUtc
+        nativeExitLaunchError = $nativeTransport.launchError
+        launcherProcessId = [int]$nativeTransport.launcherProcessId
+        launcherProcessExitCode = if ($null -eq $launcherProcessExitCode) { $null } else { [int]$launcherProcessExitCode }
+        launcherProcessExitCodeObserved = ($null -ne $launcherProcessExitCode)
+        nativeArgumentsSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $nativeArgumentsPath).Hash.ToLowerInvariant()
+    }
+    $transportRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $transportStatusPath -Encoding utf8
+    if ($null -eq $observerAdbExitCode) {
+        throw "External observer native adb transport exit code is unavailable and cannot be treated as zero. See $nativeStatusPath and $stdoutPath"
+    }
+    if ($observerAdbExitCode -ne 0) {
+        throw "External observer native adb transport exited with code $observerAdbExitCode. See $nativeStatusPath and $stdoutPath"
+    }
+    if ($null -ne $launcherProcessExitCode -and [int]$launcherProcessExitCode -ne $observerAdbExitCode) {
+        throw "External observer launcher exit code disagrees with native adb transport exit $observerAdbExitCode. See $transportStatusPath"
     }
     if ($Scenario -eq "ticket04") {
         $stdout = (& rg --no-heading -n -C 2 -e 'OK \(1 test\)' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' -e 'INSTRUMENTATION_STATUS: stack=' -e 'at com\.example\.todoschooltime\.e2eobserver\.Ticket04PermissionRecoveryTest' $stdoutPath 2>$null) -join "`n"
+        $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
+    } elseif ($Scenario -eq "ticket05") {
+        $stdout = (& rg --no-heading -n -C 2 -e 'OK \(1 test\)' -e 'INSTRUMENTATION_CODE: -1' -e 'FAILURES!!!' -e 'INSTRUMENTATION_FAILED' -e 'INSTRUMENTATION_STATUS: stack=' -e 'at com\.example\.todoschooltime\.e2eobserver\.Ticket05HttpAuthRecoveryTest' $stdoutPath 2>$null) -join "`n"
         $stderr = (& rg --no-heading -i -e 'error|exception|failed' $stderrPath 2>$null) -join "`n"
     } else {
         $stdout = Get-Content -LiteralPath $stdoutPath -Raw
@@ -349,6 +409,9 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     }
     if ($Scenario -eq "ticket04" -and $stdout -match 'FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[0-9]') {
         throw "Ticket 04 observer instrumentation failed. Filtered test evidence:`n$stdout`n$stderr"
+    }
+    if ($Scenario -eq "ticket05" -and $stdout -match 'FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[0-9]') {
+        throw "Ticket 05 observer instrumentation failed. Filtered test evidence:`n$stdout`n$stderr"
     }
     if ($after.crashed -or -not $after.bound -or ($Scenario -ne "ticket04" -and $after.pid -ne $before.pid)) {
         throw "The product service lifecycle failed its post-observer checks: beforePID='$($before.pid)', afterPID='$($after.pid)', bound=$($after.bound), crashed=$($after.crashed)."
@@ -358,9 +421,13 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     if ($Scenario -eq "ticket03") {
         $observerResultLog | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-result-logcat.txt") -Encoding utf8
     }
+    if ($Scenario -eq "ticket05") {
+        $observerResultLog | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-result-logcat.txt") -Encoding utf8
+    }
     $resultMarker = switch ($Scenario) {
         "ticket03" { "TICKET03_RESULT="; break }
         "ticket04" { "TICKET04_RESULT="; break }
+        "ticket05" { "TICKET05_RESULT="; break }
         default { "TICKET02_RESULT=" }
     }
     if ($Scenario -eq "ticket03") {
@@ -373,6 +440,19 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
         $structuredJson = Join-Ticket04ResultChunks -LogLines $observerResultLogLines -RunId $RunId
         $structuredResult = "$resultMarker$structuredJson"
     }
+    elseif ($Scenario -eq "ticket05") {
+        $structuredJson = Join-Ticket05ResultChunks -LogLines $observerResultLogLines -RunId $RunId
+        Import-Module (Join-Path $PSScriptRoot "../e2e-ticket05/InstrumentationOutcome.psm1") -Force
+        $transportOutcome = Assert-Ticket05InstrumentationOutcome `
+            -TransportStatus $transportRecord `
+            -LauncherProcessExitCode $launcherProcessExitCode `
+            -FilteredOutput $stdout `
+            -StructuredResultJson $structuredJson `
+            -RunId $RunId
+        $transportOutcome | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-instrumentation-outcome.json") -Encoding utf8
+        $script:ticket05StructuredResultJson = $structuredJson
+        $structuredResult = "$resultMarker$structuredJson"
+    }
     else {
         $structuredResult = $observerResultLogLines |
             Where-Object { $_ -match [regex]::Escape($resultMarker) -and $_ -match [regex]::Escape($RunId) } |
@@ -380,6 +460,9 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     }
     if ($structuredResult) {
         $structuredResult | Set-Content -LiteralPath (Join-Path $artifactDirectory "observer-structured-result.log") -Encoding utf8
+    }
+    if ($Scenario -eq "ticket05") {
+        return (($stdout + "`n" + $stderr + "`nTicket 05 structured result chunks decoded and saved.").Trim())
     }
     return (($stdout + "`n" + $stderr + "`n" + $structuredResult).Trim())
 }
@@ -409,6 +492,7 @@ function Read-ServerRequests {
             "ticket02" { "/__ticket02/state"; break }
             "ticket03" { "/__ticket03/state"; break }
             "ticket04" { "/__ticket04/state"; break }
+            "ticket05" { "/__ticket05/state"; break }
             default { "/__ticket01/requests" }
         }
         return Invoke-RestMethod -Uri "$apiBaseUrl$statePath" -Method Get -TimeoutSec 3
@@ -1474,6 +1558,7 @@ try {
                 "ticket02" { "/__ticket02/health"; break }
                 "ticket03" { "/__ticket03/health"; break }
                 "ticket04" { "/__ticket04/health"; break }
+                "ticket05" { "/__ticket05/health"; break }
                 default { "/__ticket01/health" }
             }
             $health = Invoke-RestMethod -Uri "$apiBaseUrl$healthPath" -TimeoutSec 2
@@ -1523,6 +1608,12 @@ try {
         $testClass = "com.example.todoschooltime.e2eobserver.Ticket04PermissionRecoveryTest"
         $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket04Result" 45 $Ticket04Case
         $instrumentationOutput = @($instrumentationText -split "`r?`n")
+    } elseif ($Scenario -eq "ticket05") {
+        $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
+        $testClass = "com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest"
+        $script:ticket05StructuredResultJson = $null
+        $instrumentationText = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket05Result" 15
+        $instrumentationOutput = @($instrumentationText -split "`r?`n")
     } else {
         Invoke-SelectedAdb @("install", "-r", $debugApk) | Out-Null
         Invoke-SelectedAdb @("install", "-r", $testApk) | Out-Null
@@ -1544,6 +1635,7 @@ try {
             "ticket02" { "Ticket 02 external observer test"; break }
             "ticket03" { "Ticket 03 foreground-polling observer test"; break }
             "ticket04" { "Ticket 04 permission-recovery observer test"; break }
+            "ticket05" { "Ticket 05 HTTP authentication-recovery observer test"; break }
             default { "Ticket 01 server-screen test" }
         }
         throw "$testDescription did not report one passing test. See $instrumentationLog"
@@ -1564,6 +1656,54 @@ try {
         Assert-Ticket03ForegroundPolling $snapshot $instrumentationText
     } elseif ($Scenario -eq "ticket04") {
         Assert-Ticket04PermissionRecovery $snapshot $instrumentationText $Ticket04Case $ticket04PriorNotificationCaseEvidence
+    } elseif ($Scenario -eq "ticket05") {
+        if ($null -eq $snapshot -or -not $script:ticket05StructuredResultJson) {
+            throw "Ticket 05 did not produce both the real fixture request log and complete observer result chunks."
+        }
+        $nativeResult = $script:ticket05StructuredResultJson | ConvertFrom-Json -ErrorAction Stop
+        $nativeResultPath = Join-Path $artifactDirectory "ticket05-observer-result.json"
+        if (Test-Path -LiteralPath $nativeResultPath) { throw "Ticket 05 observer result is immutable and already exists: $nativeResultPath" }
+        $nativeResult | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $nativeResultPath -Encoding utf8
+        $ticket05Evidence = Assert-Ticket05HttpAuthRecovery -Snapshot $snapshot -Result $nativeResult -RunId $runId -ApiBaseUrl $apiBaseUrl
+        $sourceFiles = @(
+            "tools/e2e-ticket01/server.py",
+            "tools/e2e-ticket01/test_server.py",
+            "tools/e2e-ticket01/Run-Ticket01.ps1",
+            "tools/e2e-ticket01/Invoke-NativeCommand.ps1",
+            "tools/e2e-ticket05/ResultChunks.psm1",
+            "tools/e2e-ticket05/HttpAuthRecoveryEvidence.psm1",
+            "tools/e2e-ticket05/InstrumentationOutcome.psm1",
+            "tools/e2e-ticket05/Run-Ticket05.ps1",
+            "tools/e2e-ticket05/README.md",
+            "tools/e2e-ticket05/Test-ExternalObserverOutcome.ps1",
+            "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket05HttpAuthRecoveryTest.kt"
+        )
+        $sourceHashes = [ordered]@{}
+        foreach ($relativePath in $sourceFiles) {
+            $sourcePath = Join-Path $repositoryRoot $relativePath
+            if (-not (Test-Path -LiteralPath $sourcePath)) { throw "Ticket 05 provenance source file is missing: $relativePath" }
+            $sourceHashes[$relativePath] = Get-ApkSha256 $sourcePath
+        }
+        $gitHead = (& git -C $repositoryRoot rev-parse HEAD 2>&1 | Select-Object -First 1).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Could not record Ticket 05 source revision." }
+        $provenance = [pscustomobject]@{
+            sourceRevision = $gitHead
+            sourceFileSha256 = $sourceHashes
+            deviceSerial = $DeviceSerial
+            deviceModel = $model
+            deviceApiLevel = [int]$sdkVersion
+            preparedProductApkSha256 = [string]$prepared.debugApkSha256
+            installedProductApkSha256 = [string]$prepared.debugApkSha256
+            observerApkSha256 = [string]$prepared.observerApkSha256
+            observerTestApkSha256 = [string]$prepared.observerTestApkSha256
+            fixtureAddress = $apiBaseUrl
+            runId = $runId
+            resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+        }
+        $ticket05Evidence | Add-Member -NotePropertyName provenance -NotePropertyValue $provenance
+        $evidencePath = Join-Path $artifactDirectory "ticket05-evidence.json"
+        if (Test-Path -LiteralPath $evidencePath) { throw "Ticket 05 evidence is immutable and already exists: $evidencePath" }
+        $ticket05Evidence | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $evidencePath -Encoding utf8
     } else {
         Assert-ServerRoundTrip $snapshot
         Save-AppScreenshot
@@ -1581,6 +1721,8 @@ try {
         Write-Host "PASS Ticket 04 notification case only on $apiDescription. Accessibility was not run; no two-case aggregate is reported."
     } elseif ($Scenario -eq "ticket04") {
         Write-Host "PASS Ticket 04 two-case aggregate on $apiDescription after manual permission revocation and restoration."
+    } elseif ($Scenario -eq "ticket05") {
+        Write-Host "PASS Ticket 05 actual HTTP failure, authentication pause, UI re-login, and completion recovery on $apiDescription. Product APK was reused without reinstall; sound/HUN delivery was not tested."
     } else {
         Write-Host "PASS $Scenario on $apiDescription. No notification or accessibility permissions were changed."
     }
