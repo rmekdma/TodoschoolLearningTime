@@ -4,8 +4,7 @@ param(
     [string]$DeviceSerial,
     [switch]$RunPrepared,
     [switch]$RefreshObserver,
-    [ValidateSet("all", "task-removal", "reboot-recovery")]
-    [string]$Case = "all"
+    [string]$Case
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,18 +12,25 @@ function Resolve-Ticket06ExecutionMode {
     [CmdletBinding()]
     param(
         [switch]$RunPrepared,
-        [switch]$RefreshObserver
+        [switch]$RefreshObserver,
+        [string]$Case
     )
 
     if ([bool]$RunPrepared -eq [bool]$RefreshObserver) {
         throw "Choose exactly one of -RunPrepared or -RefreshObserver."
     }
-    if ($RefreshObserver) { return "refresh-observer" }
+    if ($RefreshObserver) {
+        if (-not [string]::IsNullOrWhiteSpace($Case)) { throw "-Case is valid only with -RunPrepared." }
+        return "refresh-observer"
+    }
+    if ($Case -cnotin @("task-removal", "reboot-recovery")) {
+        throw "RunPrepared requires an explicit -Case: task-removal or reboot-recovery."
+    }
     return "run-prepared"
 }
 
 # Fail closed before resolving paths, reading configuration, starting the fixture, or invoking ADB.
-$executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver
+$executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver -Case $Case
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 if ($executionMode -eq "refresh-observer") {
@@ -150,12 +156,14 @@ function Ensure-ReversePortMapping {
         try {
             $existing = Get-ReversePortMapping
             if ($existing) {
-                return [pscustomobject]@{ status = "reused"; mapping = $existing; restoredAtUtc = $null; attemptCount = $attempts }
+                return New-Ticket06VerifiedReverseMapping -Status reused -LocalPort $serverPort -Mapping $existing `
+                    -AttemptCount $attempts -VerifiedAtUtc ([DateTimeOffset]::UtcNow)
             }
             Invoke-SelectedAdb @("reverse", "tcp:$serverPort", "tcp:$serverPort") | Out-Null
             $verified = Get-ReversePortMapping
             if ($verified) {
-                return [pscustomobject]@{ status = "restored"; mapping = $verified; restoredAtUtc = [DateTimeOffset]::UtcNow.ToString("O"); attemptCount = $attempts }
+                return New-Ticket06VerifiedReverseMapping -Status restored -LocalPort $serverPort -Mapping $verified `
+                    -AttemptCount $attempts -VerifiedAtUtc ([DateTimeOffset]::UtcNow)
             }
             $lastError = "adb reverse tcp:$serverPort was not present after the command."
         } catch {
@@ -542,7 +550,7 @@ function Wait-ForRebootReconnectAndRestoreReverse {
                 reconnectedAtUtc = $reconnectedAt.ToString("O")
                 reverseStatus = if ($mapping.status -eq "reused" -and $script:originalReversePresent) { "reused-before-reboot" } else { "restored-after-reboot" }
                 reverseMapping = $mapping.mapping
-                reverseReadyAtUtc = if ($mapping.restoredAtUtc) { $mapping.restoredAtUtc } else { $reconnectedAt.ToString("O") }
+                reverseReadyAtUtc = $mapping.verifiedAtUtc
                 reverseRestoreAttemptCount = [int]$mapping.attemptCount
             }
         }
@@ -699,15 +707,21 @@ try {
             if ($finalInstalledProductHash -cne $preparedProductHash) { throw "The product debug APK changed during Ticket 06 task removal." }
             $taskCaseEvidence = [pscustomobject]@{
                 schemaVersion = 1
-                pass = $true
                 scenario = "ticket06"
                 case = "task-removal"
                 runId = $runId
                 device = $deviceArtifact
                 source = $source
                 taskRemoval = $preResult
-                serviceState = [pscustomobject]@{ beforeTaskRemoval = $preState; afterTaskRemoval = $serviceAfterTaskCase }
+                serviceState = [pscustomobject]@{
+                    beforeTaskRemoval = $preState
+                    afterTaskRemoval = $serviceAfterTaskCase
+                    leaseAfterTaskRemoval = [bool]$preResult.taskRemovalState.serviceLeaseAttached
+                }
                 preferences = [pscustomobject]@{
+                    registrationPersisted = [bool]$preRemovalPreferenceState.registrationPersisted -and [bool]$prePreferenceState.registrationPersisted
+                    targetsPersisted = [bool]$preRemovalPreferenceState.targetsPersisted -and [bool]$prePreferenceState.targetsPersisted
+                    intervalPersisted = [bool]$preRemovalPreferenceState.intervalPersisted -and [bool]$prePreferenceState.intervalPersisted
                     registrationBeforeTaskRemoval = $preRemovalPreferenceState.registrationLine
                     registrationAfterTaskRemoval = $prePreferenceState.registrationLine
                     targetsBeforeTaskRemoval = $preRemovalPreferenceState.targetCountsLine
@@ -720,6 +734,9 @@ try {
                 executionScope = [pscustomobject]@{ rebootPerformed = $false; forceStopUsed = [bool]$preResult.taskRemoval.forceStopUsed; actualTodoApiCalled = $false }
                 resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
             }
+            $taskSummary = Assert-Ticket06TaskRemovalEvidence -RunId $runId -Evidence $taskCaseEvidence
+            $taskCaseEvidence | Add-Member -NotePropertyName summary -NotePropertyValue $taskSummary
+            $taskCaseEvidence | Add-Member -NotePropertyName pass -NotePropertyValue $true
             Write-JsonFile $taskCaseEvidence (Join-Path $artifactDirectory "ticket06-task-removal-evidence.json")
             Write-Host "PASS Ticket 06 task-removal case on Android API $actualApi; reboot recovery was not run in this case."
             Write-Host "Artifacts: $artifactDirectory"
@@ -859,72 +876,37 @@ try {
     }
     Write-JsonFile $hostState (Join-Path $artifactDirectory "host-lifecycle-and-preferences.json")
 
-    if ($Case -eq "reboot-recovery") {
-        $validatedSummary = Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $preResult -PostReboot $postResult -HostState $hostState
-        $ticket06Evidence = [pscustomobject]@{
-            schemaVersion = 1
-            pass = $true
-            scenario = "ticket06"
-            case = "reboot-recovery"
-            runId = $runId
-            device = $deviceArtifact
-            source = $source
-            host = $hostState
-            rebootPreparation = $preResult
-            taskRemovalCase = "not-run-in-this-case"
-            postReboot = $postResult
-            summary = $validatedSummary
-            fixture = [pscustomobject]@{ beforeReboot = $preFixture; afterReboot = $postFixture }
-            instrumentation = $instrumentationResults.ToArray()
-            executionScope = [pscustomobject]@{
-                actualTodoApiCalled = $false
-                productDebugApkInstalledOrReplaced = $false
-                productTargetInstrumentationUsed = $false
-                notificationOrAccessibilityPermissionChanged = $false
-                actualSoundOrHeadsUpDeliveryTested = $false
-                api35Claimed = $false
-            }
-            resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+    $validatedSummary = Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $preResult -PostReboot $postResult -HostState $hostState
+    $ticket06Evidence = [pscustomobject]@{
+        schemaVersion = 1
+        pass = $true
+        scenario = "ticket06"
+        case = "reboot-recovery"
+        runId = $runId
+        device = $deviceArtifact
+        source = $source
+        host = $hostState
+        rebootPreparation = $preResult
+        taskRemovalCase = "not-run-in-this-case"
+        postReboot = $postResult
+        summary = $validatedSummary
+        fixture = [pscustomobject]@{ beforeReboot = $preFixture; afterReboot = $postFixture }
+        instrumentation = $instrumentationResults.ToArray()
+        executionScope = [pscustomobject]@{
+            actualTodoApiCalled = $false
+            productDebugApkInstalledOrReplaced = $false
+            productTargetInstrumentationUsed = $false
+            notificationOrAccessibilityPermissionChanged = $false
+            actualSoundOrHeadsUpDeliveryTested = $false
+            api35Claimed = $false
         }
-        $evidencePath = Join-Path $artifactDirectory "ticket06-reboot-recovery-evidence.json"
+        resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
     }
-    else {
-        $validatedSummary = Assert-Ticket06RecoveryEvidence -RunId $runId -PreReboot $preResult -PostReboot $postResult -HostState $hostState
-        $ticket06Evidence = [pscustomobject]@{
-            schemaVersion = 1
-            pass = $true
-            scenario = "ticket06"
-            runId = $runId
-            device = $deviceArtifact
-            source = $source
-            host = $hostState
-            taskRemoval = $preResult
-            postReboot = $postResult
-            summary = $validatedSummary
-            fixture = [pscustomobject]@{ beforeReboot = $preFixture; afterReboot = $postFixture }
-            instrumentation = $instrumentationResults.ToArray()
-            executionScope = [pscustomobject]@{
-                actualTodoApiCalled = $false
-                productDebugApkInstalledOrReplaced = $false
-                productTargetInstrumentationUsed = $false
-                notificationOrAccessibilityPermissionChanged = $false
-                actualSoundOrHeadsUpDeliveryTested = $false
-                api35Claimed = $false
-            }
-            resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-        }
-        $evidencePath = Join-Path $artifactDirectory "ticket06-evidence.json"
-    }
+    $evidencePath = Join-Path $artifactDirectory "ticket06-reboot-recovery-evidence.json"
     if (Test-Path -LiteralPath $evidencePath) { throw "Ticket 06 evidence is immutable and already exists: $evidencePath" }
     Write-JsonFile $ticket06Evidence $evidencePath
-    if ($Case -eq "reboot-recovery") {
-        Write-Host "PASS Ticket 06 reboot-recovery case on Android API $actualApi ($actualManufacturer $actualModel)."
-        Write-Host "Task removal was not run in this separate reboot case; no force-stop was used."
-    }
-    else {
-        Write-Host "PASS Ticket 06 task-removal and automatic reboot recovery on Android API $actualApi ($actualManufacturer $actualModel)."
-        Write-Host "Task removal used the actual Recents observation plus the supported task command or a verified Recents swipe; no force-stop was used."
-    }
+    Write-Host "PASS Ticket 06 reboot-recovery case on Android API $actualApi ($actualManufacturer $actualModel)."
+    Write-Host "Task removal was not run in this separate reboot case; no force-stop was used."
     Write-Host "First post-boot check was silent; a later Hangeul completion updated the existing Android notification. Sound/HUN was not tested."
     Write-Host "Artifacts: $artifactDirectory"
 } catch {
