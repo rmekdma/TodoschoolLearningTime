@@ -190,6 +190,21 @@ function New-Ticket06VerifiedReverseMapping {
     }
 }
 
+function Test-Ticket06ExplicitFalseBoolean {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name
+    )
+
+    if ($null -eq $Object) { return $false }
+    $property = $Object.PSObject.Properties[$Name]
+    return $null -ne $property -and $property.Value -is [bool] -and $property.Value -eq $false
+}
+
 function Assert-Ticket06BootRecoveryEvidence {
     [CmdletBinding()]
     param(
@@ -224,19 +239,23 @@ function Assert-Ticket06BootRecoveryEvidence {
         -not $HostState.preRebootPreferenceGate.fixtureAcknowledged) {
         throw 'Ticket 06 reboot-only case did not capture and acknowledge saved preferences before reboot.'
     }
+    if (-not (Test-Ticket06ExplicitFalseBoolean -Object $Preparation.baseline -Name 'completionAlertRequested') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $PostReboot -Name 'productActivityLaunchedByController') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $PostReboot.baseline -Name 'completionAlertRequested') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $HostState.reboot -Name 'lockscreenNeedsUnlock')) {
+        throw 'Ticket 06 reboot-only evidence must explicitly record silent baselines, no controller Activity launch, and no required unlock as Boolean false.'
+    }
     if (-not $Preparation.serviceLeaseAttached -or
         @($Preparation.registration).Count -lt 1 -or
         -not $Preparation.baseline.complete -or [int]$Preparation.baseline.successfulSubjects -ne 3 -or
-        $Preparation.baseline.completionAlertRequested -or
         -not $Preparation.interval.persistedExplicitly -or [int]$Preparation.interval.minutes -lt 1) {
         throw 'Ticket 06 reboot preparation did not establish an actual lease, saved registration, explicit interval, and silent complete baseline.'
     }
-    if (-not $PostReboot.automaticServiceBound -or $PostReboot.productActivityLaunchedByController -or
-        -not $PostReboot.serviceLeaseAttached) {
+    if (-not $PostReboot.automaticServiceBound -or -not $PostReboot.serviceLeaseAttached) {
         throw 'Ticket 06 reboot-only case did not observe the real service automatically before opening the product Activity.'
     }
     if (-not $HostState.reboot.commandIssuedOnce -or -not $HostState.reboot.reconnectObserved -or
-        -not $HostState.reboot.bootCompleted -or $HostState.reboot.lockscreenNeedsUnlock -or
+        -not $HostState.reboot.bootCompleted -or
         -not $HostState.reboot.reverseRestoredBeforeServiceReady -or -not $reverseReadyBeforeService -or
         $HostState.reboot.reverseStatus -notin @('reused-before-reboot', 'restored-after-reboot')) {
         throw 'Ticket 06 reboot-only host evidence did not prove one bounded reboot, ready/unlocked device, and fixture route before service readiness.'
@@ -319,6 +338,13 @@ function Assert-Ticket06TaskRemovalEvidence {
     }
 
     $task = $observer.taskRemoval
+    if (-not (Test-Ticket06ExplicitFalseBoolean -Object $task -Name 'forceStopUsed') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $observer.baseline -Name 'completionAlertRequested') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $Evidence.executionScope -Name 'rebootPerformed') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $Evidence.executionScope -Name 'forceStopUsed') -or
+        -not (Test-Ticket06ExplicitFalseBoolean -Object $Evidence.executionScope -Name 'actualTodoApiCalled')) {
+        throw 'Ticket 06 task-removal evidence must explicitly record no force-stop, a silent baseline, and no reboot or Todo API as Boolean false.'
+    }
     $taskRemovalMechanism = [string]$task.mechanism
     $commandRemoval = $taskRemovalMechanism -ceq 'adb shell am task remove'
     $recentsDismissal = $taskRemovalMechanism -ceq 'actual Recents dismiss via targeted swipe'
@@ -338,12 +364,10 @@ function Assert-Ticket06TaskRemovalEvidence {
             [string]$task.recentsLabelWindowPackage -ceq 'com.example.todoschooltime.debug')) -or
         -not $task.taskAbsentAfterRemoval -or
         -not $task.otherTasksUnchanged -or
-        [string]::Join("`n", $expectedOtherTaskIds) -cne [string]::Join("`n", $actualOtherTaskIds) -or
-        $task.forceStopUsed) {
+        [string]::Join("`n", $expectedOtherTaskIds) -cne [string]::Join("`n", $actualOtherTaskIds)) {
         throw 'Ticket 06 task-removal evidence does not prove removal of only the observed debug task without force-stop.'
     }
-    if (-not $observer.baseline.complete -or [int]$observer.baseline.successfulSubjects -ne 3 -or
-        $observer.baseline.completionAlertRequested) {
+    if (-not $observer.baseline.complete -or [int]$observer.baseline.successfulSubjects -ne 3) {
         throw 'Ticket 06 task-removal baseline is incomplete or requested an unexpected completion alert.'
     }
     if (-not $observer.interval.persistedExplicitly -or [int]$observer.interval.minutes -ne 1 -or

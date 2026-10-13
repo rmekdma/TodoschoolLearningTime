@@ -366,6 +366,71 @@ function Assert-Ticket06TaskRejected([string]$Name, $Candidate) {
     catch { $rejected = $true }
     if (-not $rejected) { throw "Ticket 06 task-removal validator accepted $Name." }
 }
+function Set-Ticket06TestPropertyByPath($Root, [string]$Path, [string]$Mutation) {
+    $segments = $Path.Split('.')
+    $target = $Root
+    for ($index = 0; $index -lt ($segments.Count - 1); $index++) {
+        $property = $target.PSObject.Properties[$segments[$index]]
+        if ($null -eq $property -or $null -eq $property.Value) { throw "Test property path is missing: $Path" }
+        $target = $property.Value
+    }
+    $propertyName = $segments[-1]
+    $property = $target.PSObject.Properties[$propertyName]
+    switch ($Mutation) {
+        "missing" {
+            if ($null -eq $property) { throw "Test property was already missing: $Path" }
+            [void]$target.PSObject.Properties.Remove($propertyName)
+        }
+        "null" { $target.$propertyName = $null }
+        "string false" { $target.$propertyName = [string]"false" }
+        "number zero" { $target.$propertyName = [int]0 }
+        "true" { $target.$propertyName = [bool]$true }
+        default { throw "Unknown test mutation: $Mutation" }
+    }
+}
+function Assert-Ticket06BootRejected([string]$Name, $Preparation, $PostReboot, $HostState) {
+    $rejected = $false
+    try { Assert-Ticket06BootRecoveryEvidence -RunId $runId -Preparation $Preparation -PostReboot $PostReboot -HostState $HostState | Out-Null }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw "Ticket 06 reboot validator accepted $Name." }
+}
+
+$requiredFalseTaskProperties = @(
+    [pscustomobject]@{ path = "taskRemoval.taskRemoval.forceStopUsed"; name = "task.forceStopUsed" },
+    [pscustomobject]@{ path = "taskRemoval.baseline.completionAlertRequested"; name = "task-removal baseline completionAlertRequested" },
+    [pscustomobject]@{ path = "executionScope.rebootPerformed"; name = "executionScope.rebootPerformed" },
+    [pscustomobject]@{ path = "executionScope.forceStopUsed"; name = "executionScope.forceStopUsed" },
+    [pscustomobject]@{ path = "executionScope.actualTodoApiCalled"; name = "executionScope.actualTodoApiCalled" }
+)
+$invalidFalseMutations = @("missing", "null", "string false", "number zero", "true")
+foreach ($field in $requiredFalseTaskProperties) {
+    foreach ($mutation in $invalidFalseMutations) {
+        $candidate = Copy-Ticket06TestObject $taskEvidence
+        Set-Ticket06TestPropertyByPath -Root $candidate -Path $field.path -Mutation $mutation
+        Assert-Ticket06TaskRejected "$($field.name)=$mutation" $candidate
+    }
+}
+
+$requiredFalseBootProperties = @(
+    [pscustomobject]@{ root = "preparation"; path = "baseline.completionAlertRequested"; name = "preparation baseline completionAlertRequested" },
+    [pscustomobject]@{ root = "postReboot"; path = "productActivityLaunchedByController"; name = "post-reboot productActivityLaunchedByController" },
+    [pscustomobject]@{ root = "postReboot"; path = "baseline.completionAlertRequested"; name = "post-reboot baseline completionAlertRequested" },
+    [pscustomobject]@{ root = "hostState"; path = "reboot.lockscreenNeedsUnlock"; name = "reboot lockscreenNeedsUnlock" }
+)
+foreach ($field in $requiredFalseBootProperties) {
+    foreach ($mutation in $invalidFalseMutations) {
+        $candidatePreparation = Copy-Ticket06TestObject $bootPreparation
+        $candidatePostReboot = Copy-Ticket06TestObject $bootPost
+        $candidateHostState = Copy-Ticket06TestObject $bootHost
+        $candidateRoot = switch ($field.root) {
+            "preparation" { $candidatePreparation }
+            "postReboot" { $candidatePostReboot }
+            "hostState" { $candidateHostState }
+        }
+        Set-Ticket06TestPropertyByPath -Root $candidateRoot -Path $field.path -Mutation $mutation
+        Assert-Ticket06BootRejected "$($field.name)=$mutation" $candidatePreparation $candidatePostReboot $candidateHostState
+    }
+}
 
 $recentsFallback = Copy-Ticket06TestObject $taskEvidence
 $recentsFallback.taskRemoval.taskRemoval.mechanism = "actual Recents dismiss via targeted swipe"
