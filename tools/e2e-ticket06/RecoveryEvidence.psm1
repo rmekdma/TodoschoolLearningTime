@@ -369,26 +369,100 @@ function Assert-Ticket06TaskRemovalEvidence {
         throw 'Ticket 06 task-removal evidence must explicitly record no force-stop, a silent baseline, and no reboot or Todo API as Boolean false.'
     }
     $taskRemovalMechanism = [string]$task.mechanism
-    $commandRemoval = $taskRemovalMechanism -ceq 'adb shell am task remove'
-    $recentsDismissal = $taskRemovalMechanism -ceq 'actual Recents dismiss via targeted swipe'
-    $fallbackHasEvidence = [bool]$task.recentsSwipePerformed -and
-        ([bool]$task.commandReportedFailure -or [bool]$task.taskPresentAfterCommand) -and
-        $null -ne $task.recentsDismissal -and $task.recentsDismissal -isnot [System.DBNull]
     $expectedTaskComponent = 'com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity'
     $expectedOtherTaskIds = @($task.otherTaskIdsBeforeRemoval | ForEach-Object { [string]$_ })
     $actualOtherTaskIds = @($task.otherTaskIdsAfterRemoval | ForEach-Object { [string]$_ })
+    $hostGate = $Evidence.taskRemovalHostGate
+    $fixtureTarget = $Evidence.fixture.ticket06TaskRemovalTarget
+    $fixtureAcknowledgement = $Evidence.fixture.ticket06TaskRemovalAcknowledgement
+    $userAcknowledgement = $task.userAcknowledgement
+    $screenshotPath = [string]$hostGate.screenshotPath
+    $screenshotSha256 = [string]$hostGate.screenshotSha256
+    $screenshotFileHash = $null
+    $screenshotIsPng = $false
+    if (-not [string]::IsNullOrWhiteSpace($screenshotPath) -and (Test-Path -LiteralPath $screenshotPath -PathType Leaf)) {
+        $screenshotBytes = [IO.File]::ReadAllBytes($screenshotPath)
+        $screenshotIsPng = $screenshotBytes.Length -ge 1000 -and
+            [BitConverter]::ToString($screenshotBytes[0..7]) -ceq '89-50-4E-47-0D-0A-1A-0A'
+        if ($screenshotIsPng) { $screenshotFileHash = (Get-FileHash -LiteralPath $screenshotPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $acknowledgementTimestamp = $null
+    try { $acknowledgementTimestamp = [DateTimeOffset]::Parse([string]$fixtureAcknowledgement.acknowledgedAtUtc) } catch { }
+    $labelObservationValid = if ($hostGate.recentsCardLabelObserved -is [bool] -and $hostGate.recentsCardLabelObserved) {
+        [string]$hostGate.recentsCardLabel -ceq [string]$hostGate.expectedAppLabel -and
+            -not [string]::IsNullOrWhiteSpace([string]$hostGate.recentsLabelWindowPackage) -and
+            [string]$hostGate.recentsLabelWindowPackage -cne 'com.example.todoschooltime.debug'
+    } else {
+        $hostGate.recentsCardLabelObserved -is [bool] -and
+            $null -eq $hostGate.recentsCardLabel -and
+            $null -eq $hostGate.recentsLabelWindowPackage -and
+            -not $task.recentsViewLabelObserved -and
+            $null -eq $task.recentsCardLabel -and
+            $null -eq $task.recentsLabelWindowPackage
+    }
+    $acknowledgementBody = $hostGate.acknowledgementBody
+    $manualGateValid = $taskRemovalMechanism -ceq 'actual Recents dismissal by user' -and
+        (Test-Ticket06ExplicitFalseBoolean -Object $task -Name 'forceStopUsed') -and
+        (Test-Ticket06ExplicitFalseBoolean -Object $task -Name 'automaticTaskRemovalCommandAttempted') -and
+        (Test-Ticket06ExplicitFalseBoolean -Object $task -Name 'automaticGestureAttempted') -and
+        (Test-Ticket06ExplicitFalseBoolean -Object $task -Name 'recentsSwipePerformed') -and
+        (Test-Ticket06ExplicitFalseBoolean -Object $hostGate -Name 'automaticGestureOrCommand') -and
+        $task.otherTasksUnchanged -is [bool] -and $task.otherTasksUnchanged -and
+        $task.recentsObserved -is [bool] -and $task.recentsObserved -and
+        $task.taskPresentBeforeUserDismissal -is [bool] -and $task.taskPresentBeforeUserDismissal -and
+        $task.taskAbsentAfterRemoval -is [bool] -and $task.taskAbsentAfterRemoval -and
+        $task.userAcknowledged -is [bool] -and $task.userAcknowledged -and $task.taskAbsentObservedAtElapsedRealtimeMs -gt 0 -and
+        $task.taskAbsentObservedBeforeAcknowledgement -is [bool] -and
+        $task.otherTasksUnchanged -and
+        [string]$task.taskComponent -ceq $expectedTaskComponent -and
+        [int]$task.taskId -gt 0 -and
+        [int]$hostGate.exactTaskId -eq [int]$task.taskId -and
+        [string]$hostGate.exactTaskComponent -ceq [string]$task.taskComponent -and
+        [string]$hostGate.runId -ceq $RunId -and
+        [int]$hostGate.timeoutMinutes -eq 30 -and
+        [string]$hostGate.acknowledgementEndpoint -match '^http://127\.0\.0\.1:[0-9]+/__ticket06/ack-task-removal$' -and
+        $hostGate.currentWindowFocusObserved -is [bool] -and
+        [bool]$hostGate.currentWindowFocusObserved -eq (@($hostGate.selectedWindowFocus).Count -gt 0) -and
+        $labelObservationValid -and
+        $screenshotSha256 -match '^[0-9a-f]{64}$' -and
+        $screenshotIsPng -and
+        $screenshotFileHash -ceq $screenshotSha256 -and
+        [string]$task.screenshotSha256 -ceq $screenshotSha256 -and
+        [string]$Evidence.fixture.ticket06RecentsScreenshotSha256 -ceq $screenshotSha256 -and
+        [string]$fixtureTarget.runId -ceq $RunId -and
+        [int]$fixtureTarget.taskId -eq [int]$task.taskId -and
+        [string]$fixtureTarget.taskComponent -ceq [string]$task.taskComponent -and
+        [string]$fixtureTarget.expectedAppLabel -ceq [string]$hostGate.expectedAppLabel -and
+        [bool]$fixtureTarget.recentsCardLabelObserved -eq [bool]$hostGate.recentsCardLabelObserved -and
+        [string]$fixtureTarget.recentsCardLabel -ceq [string]$hostGate.recentsCardLabel -and
+        [string]$fixtureTarget.recentsLabelWindowPackage -ceq [string]$hostGate.recentsLabelWindowPackage -and
+        [string]$fixtureTarget.screenshotSha256 -ceq $screenshotSha256 -and
+        [string]::Join(',', @($fixtureTarget.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
+        [string]$fixtureAcknowledgement.runId -ceq $RunId -and
+        [int]$fixtureAcknowledgement.taskId -eq [int]$task.taskId -and
+        [string]$fixtureAcknowledgement.taskComponent -ceq [string]$task.taskComponent -and
+        [string]$fixtureAcknowledgement.screenshotSha256 -ceq $screenshotSha256 -and
+        [string]$fixtureAcknowledgement.confirmedAppLabel -ceq [string]$hostGate.expectedAppLabel -and
+        [string]::Join(',', @($fixtureAcknowledgement.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
+        [string]$userAcknowledgement.runId -ceq [string]$fixtureAcknowledgement.runId -and
+        [int]$userAcknowledgement.taskId -eq [int]$fixtureAcknowledgement.taskId -and
+        [string]$userAcknowledgement.taskComponent -ceq [string]$fixtureAcknowledgement.taskComponent -and
+        [string]$userAcknowledgement.screenshotSha256 -ceq [string]$fixtureAcknowledgement.screenshotSha256 -and
+        [string]$userAcknowledgement.confirmedAppLabel -ceq [string]$fixtureAcknowledgement.confirmedAppLabel -and
+        [string]::Join(',', @($userAcknowledgement.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
+        [string]$userAcknowledgement.acknowledgedAtUtc -ceq [string]$fixtureAcknowledgement.acknowledgedAtUtc -and
+        [int]$acknowledgementBody.taskId -eq [int]$task.taskId -and
+        [string]$acknowledgementBody.taskComponent -ceq [string]$task.taskComponent -and
+        [string]$acknowledgementBody.screenshotSha256 -ceq $screenshotSha256 -and
+        [string]$acknowledgementBody.confirmedAppLabel -ceq [string]$hostGate.expectedAppLabel -and
+        [string]::Join(',', @($acknowledgementBody.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
+        $null -ne $acknowledgementTimestamp -and
+        $Evidence.fixture.ticket06PreRemovalPreferencesCaptured -is [bool] -and
+        $Evidence.fixture.ticket06PreRemovalPreferencesCaptured
     if (-not $task.recentsObserved -or
-        [int]$task.taskId -lt 1 -or
-        [string]$task.taskComponent -cne $expectedTaskComponent -or
-        (-not $commandRemoval -and -not $recentsDismissal) -or
-        ($commandRemoval -and [bool]$task.recentsSwipePerformed) -or
-        ($recentsDismissal -and (-not $fallbackHasEvidence -or -not $task.recentsViewLabelObserved -or
-            [string]::IsNullOrWhiteSpace([string]$task.recentsLabelWindowPackage) -or
-            [string]$task.recentsLabelWindowPackage -ceq 'com.example.todoschooltime.debug')) -or
-        -not $task.taskAbsentAfterRemoval -or
-        -not $task.otherTasksUnchanged -or
+        -not $manualGateValid -or
         [string]::Join("`n", $expectedOtherTaskIds) -cne [string]::Join("`n", $actualOtherTaskIds)) {
-        throw 'Ticket 06 task-removal evidence does not prove removal of only the observed debug task without force-stop.'
+        throw 'Ticket 06 task-removal evidence does not prove a user-acknowledged dismissal of only the exact observed Recents task.'
     }
     if (-not $observer.baseline.complete -or [int]$observer.baseline.successfulSubjects -ne 3) {
         throw 'Ticket 06 task-removal baseline is incomplete or requested an unexpected completion alert.'
@@ -426,26 +500,46 @@ function Assert-Ticket06TaskRemovalEvidence {
     }
 
     $baselineEndSequence = [long]$observer.baseline.fixtureRequestEndSequence
-    $postBaselineRequests = @($Evidence.fixture.requests |
-        Where-Object { [long]$_.sequence -gt $baselineEndSequence } |
+    $postRemovalStartSequence = [long]$task.postRemovalFixtureRequestStartSequence
+    $postRemovalCycle = @($Evidence.fixture.requests |
+        Where-Object { [long]$_.sequence -ge $postRemovalStartSequence -and [long]$_.sequence -lt ($postRemovalStartSequence + 5L) } |
         Sort-Object { [long]$_.sequence })
-    $postRemovalCycle = @($postBaselineRequests | Select-Object -First 7)
-    $expectedPostRemovalSequences = @((1..7) | ForEach-Object { $baselineEndSequence + [long]$_ })
+    $expectedPostRemovalSequences = @((0..4) | ForEach-Object { $postRemovalStartSequence + [long]$_ })
     $actualPostRemovalSequences = @($postRemovalCycle | ForEach-Object { [long]$_.sequence })
     $postRemovalPathsFromFixture = @($postRemovalCycle | ForEach-Object { [string]$_.path })
     $postRemovalPaths = @($observer.postRemovalRequestPaths | ForEach-Object { [string]$_ })
-    $expectedPaths = @(
-        '/v3/account/signin', '/v3/todohangeul/user', '/v3/math/user', '/v3/english/user',
-        '/v3/todoschool/report/daily/hangeul', '/v3/todoschool/report/daily/math', '/v3/todoschool/report/daily/english'
-    )
+    $expectedPaths = @('/v3/account/signin', '/v3/todohangeul/user', '/v3/math/user', '/v3/english/user', '/v3/todoschool/report/daily/hangeul')
+    $cycleResponsesSuccessful = $false
+    if ($postRemovalCycle.Count -eq 5) {
+        $cycleResponsesSuccessful = @($postRemovalCycle | Where-Object { [int]$_.responseStatus -ne 200 }).Count -eq 0 -and
+            [int]$postRemovalCycle[-1].servedReportCount -eq 2
+    }
+    $dispatchForegroundPackages = @($task.postRemovalDispatchForegroundPackages | ForEach-Object { [string]$_ })
+    $dispatchServiceLeases = @($task.postRemovalDispatchServiceLeases | ForEach-Object { $_ })
+    $postRemovalDispatchPaths = @($task.postRemovalDispatchPaths | ForEach-Object { [string]$_ })
+    $postRemovalDispatchSequences = @($task.postRemovalDispatchSequences | ForEach-Object { [long]$_ })
+    $expectedPostRemovalDispatchSequences = @((0..4) | ForEach-Object { [long]$task.postRemovalDispatchStartSequence + [long]$_ })
     if ($Evidence.fixture.runId -cne $RunId -or $Evidence.fixture.scenario -cne 'ticket06' -or
         $baselineEndSequence -lt 1 -or
+        $postRemovalStartSequence -le $baselineEndSequence -or
         $postRemovalCycle.Count -ne $expectedPaths.Count -or
         [string]::Join(',', $actualPostRemovalSequences) -cne [string]::Join(',', $expectedPostRemovalSequences) -or
         [string]::Join("`n", $postRemovalPathsFromFixture) -cne [string]::Join("`n", $expectedPaths) -or
         [string]::Join("`n", $postRemovalPaths) -cne [string]::Join("`n", $expectedPaths) -or
-        [string]::Join("`n", $postRemovalPathsFromFixture) -cne [string]::Join("`n", $postRemovalPaths)) {
-        throw 'Ticket 06 task-removal fixture does not prove a full post-removal local API cycle.'
+        [string]::Join("`n", $postRemovalPathsFromFixture) -cne [string]::Join("`n", $postRemovalPaths) -or
+        -not $cycleResponsesSuccessful -or
+        [string]$task.postRemovalForegroundPackage -cne 'com.enuma.todohangeul' -or
+        -not $task.postRemovalServiceLeaseAttachedAtDispatch -or
+        [string]$observer.cadence.foregroundPackage -cne 'com.enuma.todohangeul' -or
+        -not $observer.cadence.serviceLeaseAttachedAtDispatch -or
+        [long]$task.postRemovalDispatchStartSequence -lt 1 -or
+        [string]::Join(',', $postRemovalDispatchSequences) -cne [string]::Join(',', $expectedPostRemovalDispatchSequences) -or
+        [string]::Join("`n", $postRemovalDispatchPaths) -cne [string]::Join("`n", $expectedPaths) -or
+        $dispatchForegroundPackages.Count -ne 5 -or
+        @($dispatchForegroundPackages | Where-Object { $_ -cne 'com.enuma.todohangeul' }).Count -gt 0 -or
+        $dispatchServiceLeases.Count -ne 5 -or
+        @($dispatchServiceLeases | Where-Object { $_ -isnot [bool] -or -not $_ }).Count -gt 0) {
+        throw 'Ticket 06 task-removal fixture does not prove one successful exact five-request Hangeul foreground cycle with the real service lease.'
     }
     if ($Evidence.executionScope.rebootPerformed -or $Evidence.executionScope.forceStopUsed -or $Evidence.executionScope.actualTodoApiCalled) {
         throw 'Ticket 06 task-removal case used a reboot, force-stop, or real Todo API.'
@@ -458,6 +552,7 @@ function Assert-Ticket06TaskRemovalEvidence {
         case = 'task-removal'
         taskId = [int]$task.taskId
         taskRemovalMechanism = $taskRemovalMechanism
+        userAcknowledged = $true
         rebootCount = 0
         actualTodoApiCalled = $false
         notificationOrAccessibilityPermissionChanged = $false

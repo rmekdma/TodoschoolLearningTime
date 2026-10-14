@@ -4,6 +4,26 @@ Import-Module (Join-Path $PSScriptRoot "RecoveryEvidence.psm1") -Force
 $runId = "0123456789abcdef0123456789abcdef"
 $runnerPath = Join-Path $PSScriptRoot "Run-Ticket06.ps1"
 $runnerAst = [System.Management.Automation.Language.Parser]::ParseFile($runnerPath, [ref]$null, [ref]$null)
+$runnerSource = Get-Content -LiteralPath $runnerPath -Raw
+$observerSourcePath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path "e2eobserver/src/androidTest/java/com/example/todoschooltime/e2eobserver/Ticket06TaskRebootRecoveryTest.kt"
+$observerSource = Get-Content -LiteralPath $observerSourcePath -Raw
+if ($runnerSource -match '(?i)adb\s+shell\s+am\s+task\s+remove|input\s+swipe' -or
+    $observerSource -match '(?i)executeShellCommand\([^\r\n]*(?:am\s+task\s+remove|input\s+swipe)') {
+    throw "Ticket 06 task-removal harness still contains an automated task-removal command or swipe."
+}
+foreach ($requiredManualGateToken in @(
+    "/__ticket06/record-recents-screenshot",
+    "/__ticket06/ack-task-removal",
+    "task-removal-human-gate.json",
+    'AddMinutes($observerTimeoutMinutes)',
+    "awaitManualTaskRemovalAcknowledgement",
+    "MANUAL_TASK_REMOVAL_TIMEOUT_MS",
+    "actual Recents dismissal by user"
+)) {
+    if (-not $runnerSource.Contains($requiredManualGateToken) -and -not $observerSource.Contains($requiredManualGateToken)) {
+        throw "Ticket 06 manual task-removal gate is missing a required bounded evidence element: $requiredManualGateToken"
+    }
+}
 $modeGuardAst = $runnerAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -147,30 +167,113 @@ $missingStoredInterval = ConvertFrom-Ticket06PreferenceRows `
     -TargetRows @('<string name="테스트 아이">{&quot;한글&quot;:6,&quot;수학&quot;:5,&quot;영어&quot;:8}</string>')
 if ($missingStoredInterval.intervalPersisted) { throw "Ticket 06 accepted a missing interval row." }
 
+$taskScreenshotPath = Join-Path ([IO.Path]::GetTempPath()) ("ticket06-task-removal-" + [Guid]::NewGuid().ToString("N") + ".png")
+$taskScreenshotBytes = New-Object byte[] 1200
+$taskScreenshotSignature = [byte[]](137, 80, 78, 71, 13, 10, 26, 10)
+for ($signatureIndex = 0; $signatureIndex -lt $taskScreenshotSignature.Count; $signatureIndex++) { $taskScreenshotBytes[$signatureIndex] = $taskScreenshotSignature[$signatureIndex] }
+[IO.File]::WriteAllBytes($taskScreenshotPath, $taskScreenshotBytes)
+$taskScreenshotSha256 = (Get-FileHash -LiteralPath $taskScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$taskAckAt = [DateTimeOffset]::UtcNow.ToString("O")
+$taskAcknowledgement = [pscustomobject]@{
+    runId = $runId
+    taskId = 2471
+    taskComponent = "com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity"
+    otherTaskIds = @(1220)
+    screenshotSha256 = $taskScreenshotSha256
+    confirmedAppLabel = "TodoSchool"
+    acknowledgedAtUtc = $taskAckAt
+}
+$taskTarget = [pscustomobject]@{
+    runId = $runId
+    taskId = 2471
+    taskComponent = $taskAcknowledgement.taskComponent
+    expectedAppLabel = "TodoSchool"
+    recentsCardLabelObserved = $false
+    recentsCardLabel = $null
+    recentsLabelWindowPackage = $null
+    otherTaskIds = @(1220)
+    screenshotSha256 = $taskScreenshotSha256
+}
+$taskHostGate = [pscustomobject]@{
+    runId = $runId
+    stage = "actual-Recents-card-dismissal-by-user"
+    exactTaskId = 2471
+    exactTaskComponent = $taskAcknowledgement.taskComponent
+    expectedAppLabel = "TodoSchool"
+    recentsCardLabelObserved = $false
+    recentsCardLabel = $null
+    recentsLabelWindowPackage = $null
+    otherTaskIds = @(1220)
+    screenshotPath = $taskScreenshotPath
+    screenshotSha256 = $taskScreenshotSha256
+    acknowledgementEndpoint = "http://127.0.0.1:18765/__ticket06/ack-task-removal"
+    acknowledgementBody = [pscustomobject]@{
+        runId = $runId
+        taskId = 2471
+        taskComponent = $taskAcknowledgement.taskComponent
+        otherTaskIds = @(1220)
+        screenshotSha256 = $taskScreenshotSha256
+        confirmedAppLabel = "TodoSchool"
+    }
+    timeoutMinutes = 30
+    automaticGestureOrCommand = $false
+    selectedWindowFocus = @("mCurrentFocus=Window{123 u0 com.android.launcher3/.RecentsActivity}")
+    currentWindowFocusObserved = $true
+}
 $pre = [pscustomobject]@{
     runId = $runId
     scenario = "ticket06"
     phase = "task-removal"
     taskRemoval = [pscustomobject]@{
         recentsObserved = $true
-        recentsViewLabelObserved = $true
-        mechanism = "adb shell am task remove"
+        recentsViewLabelObserved = $false
+        recentsCardLabel = $null
+        recentsLabelWindowPackage = $null
+        mechanism = "actual Recents dismissal by user"
         taskId = 2471
-        taskComponent = "com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity"
+        taskComponent = $taskAcknowledgement.taskComponent
+        expectedAppLabel = "TodoSchool"
+        taskPresentBeforeUserDismissal = $true
+        userAcknowledged = $true
+        userAcknowledgement = $taskAcknowledgement
+        taskAbsentObservedAtElapsedRealtimeMs = 200000
+        taskAbsentObservedBeforeAcknowledgement = $true
+        screenshotSha256 = $taskScreenshotSha256
+        automaticTaskRemovalCommandAttempted = $false
+        automaticGestureAttempted = $false
+        recentsSwipePerformed = $false
         otherTasksUnchanged = $true
         otherTaskIdsBeforeRemoval = @(1220)
         otherTaskIdsAfterRemoval = @(1220)
         taskAbsentAfterRemoval = $true
         forceStopUsed = $false
+        postRemovalFixtureRequestStartSequence = 8
+        postRemovalDispatchStartSequence = 8
+        postRemovalDispatchSequences = @(8, 9, 10, 11, 12)
+        postRemovalForegroundPackage = "com.enuma.todohangeul"
+        postRemovalServiceLeaseAttachedAtDispatch = $true
+        postRemovalDispatchPaths = @(
+            "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
+            "/v3/todoschool/report/daily/hangeul"
+        )
+        postRemovalDispatchForegroundPackages = @("com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul")
+        postRemovalDispatchServiceLeases = @($true, $true, $true, $true, $true)
     }
     registration = @("테스트 아이")
     targets = [pscustomobject]@{ hangeul = 6; math = 5; english = 8 }
     interval = [pscustomobject]@{ minutes = 1; persistedExplicitly = $true }
     baseline = [pscustomobject]@{ complete = $true; successfulSubjects = 3; completionAlertRequested = $false; fixtureRequestStartSequence = 1; fixtureRequestEndSequence = 7 }
-    cadence = [pscustomobject]@{ baselineSigninElapsedRealtimeMs = 100000; nextCycleSigninElapsedRealtimeMs = 160200; clientDeltaMs = 60200; serverDeltaMs = 60204 }
+    cadence = [pscustomobject]@{
+        baselineSigninElapsedRealtimeMs = 100000
+        nextCycleSigninElapsedRealtimeMs = 160200
+        clientDeltaMs = 60200
+        serverDeltaMs = 60204
+        foregroundPackage = "com.enuma.todohangeul"
+        serviceLeaseAttachedAtDispatch = $true
+    }
     postRemovalRequestPaths = @(
         "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
-        "/v3/todoschool/report/daily/hangeul", "/v3/todoschool/report/daily/math", "/v3/todoschool/report/daily/english"
+        "/v3/todoschool/report/daily/hangeul"
     )
 }
 $post = [pscustomobject]@{
@@ -268,14 +371,20 @@ $taskExpectedPaths = @(
     "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
     "/v3/todoschool/report/daily/hangeul", "/v3/todoschool/report/daily/math", "/v3/todoschool/report/daily/english"
 )
+$taskPostRemovalPaths = @(
+    "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
+    "/v3/todoschool/report/daily/hangeul"
+)
 $taskFixtureRequests = @()
-for ($requestIndex = 0; $requestIndex -lt ($taskExpectedPaths.Count * 2); $requestIndex++) {
-    $taskFixtureRequests += [pscustomobject]@{ sequence = $requestIndex + 1; path = $taskExpectedPaths[$requestIndex % $taskExpectedPaths.Count] }
+foreach ($path in $taskExpectedPaths + $taskPostRemovalPaths) {
+    $servedCount = if ($path -ceq "/v3/todoschool/report/daily/hangeul") { 2 } else { $null }
+    $taskFixtureRequests += [pscustomobject]@{ sequence = $taskFixtureRequests.Count + 1; path = $path; responseStatus = 200; servedReportCount = $servedCount }
 }
 $taskEvidence = [pscustomobject]@{
     runId = $runId
     scenario = "ticket06"
     case = "task-removal"
+    taskRemovalHostGate = $taskHostGate
     taskRemoval = $pre
     serviceState = [pscustomobject]@{
         beforeTaskRemoval = [pscustomobject]@{ pid = 1234; bound = $true; crashed = $false }
@@ -294,11 +403,21 @@ $taskEvidence = [pscustomobject]@{
         intervalAfterTaskRemoval = $hostState.preferences.intervalLineAfterTaskRemoval
         credentialFileRead = $false
     }
-    fixture = [pscustomobject]@{ runId = $runId; scenario = "ticket06"; requests = $taskFixtureRequests }
+    fixture = [pscustomobject]@{
+        runId = $runId
+        scenario = "ticket06"
+        ticket06PreRemovalPreferencesCaptured = $true
+        ticket06RecentsScreenshotSha256 = $taskScreenshotSha256
+        ticket06TaskRemovalTarget = $taskTarget
+        ticket06TaskRemovalAcknowledgement = $taskAcknowledgement
+        requests = $taskFixtureRequests
+    }
     executionScope = [pscustomobject]@{ rebootPerformed = $false; forceStopUsed = $false; actualTodoApiCalled = $false }
 }
 $taskRemovalSummary = Assert-Ticket06TaskRemovalEvidence -RunId $runId -Evidence $taskEvidence
-if (-not $taskRemovalSummary.pass -or $taskRemovalSummary.rebootCount -ne 0 -or $taskRemovalSummary.taskId -ne 2471) {
+if (-not $taskRemovalSummary.pass -or $taskRemovalSummary.rebootCount -ne 0 -or $taskRemovalSummary.taskId -ne 2471 -or
+    $taskRemovalSummary.taskRemovalMechanism -cne "actual Recents dismissal by user" -or $taskRemovalSummary.postRemovalRequestCount -ne 5 -or
+    -not $taskRemovalSummary.userAcknowledged) {
     throw "Valid task-only Ticket 06 evidence did not remain independent from reboot evidence."
 }
 
@@ -504,35 +623,60 @@ foreach ($field in $requiredFalseBootProperties) {
     }
 }
 
-$recentsFallback = Copy-Ticket06TestObject $taskEvidence
-$recentsFallback.taskRemoval.taskRemoval.mechanism = "actual Recents dismiss via targeted swipe"
-$recentsFallback.taskRemoval.taskRemoval | Add-Member -NotePropertyName commandReportedFailure -NotePropertyValue $true -Force
-$recentsFallback.taskRemoval.taskRemoval | Add-Member -NotePropertyName taskPresentAfterCommand -NotePropertyValue $true -Force
-$recentsFallback.taskRemoval.taskRemoval | Add-Member -NotePropertyName recentsSwipePerformed -NotePropertyValue $true -Force
-$recentsFallback.taskRemoval.taskRemoval | Add-Member -NotePropertyName recentsDismissal -NotePropertyValue ([pscustomobject]@{ method = "input swipe inside observed product card"; windowPackage = "com.android.launcher3" }) -Force
-$recentsFallback.taskRemoval.taskRemoval | Add-Member -NotePropertyName recentsLabelWindowPackage -NotePropertyValue "com.android.launcher3" -Force
-$fallbackEvidence = Assert-Ticket06TaskRemovalEvidence -RunId $runId -Evidence $recentsFallback
-if (-not $fallbackEvidence.pass) { throw "Ticket 06 rejected a bounded targeted Recents dismissal after task-command failure." }
+$invalidManualGateMessage = "does not prove a user-acknowledged dismissal of only the exact observed Recents task"
+$automaticCommandCandidate = Copy-Ticket06TestObject $taskEvidence
+$automaticCommandCandidate.taskRemoval.taskRemoval.automaticTaskRemovalCommandAttempted = $true
+Assert-Ticket06TaskRejected "an automatic task-removal command" $taskEvidence $automaticCommandCandidate $invalidManualGateMessage
 
-$unobservedFallback = Copy-Ticket06TestObject $recentsFallback
-$unobservedFallback.taskRemoval.taskRemoval.recentsSwipePerformed = $false
-Assert-Ticket06TaskRejected "a command failure without a targeted Recents dismissal" $recentsFallback $unobservedFallback "does not prove removal of only the observed debug task"
+$automaticGestureCandidate = Copy-Ticket06TestObject $taskEvidence
+$automaticGestureCandidate.taskRemoval.taskRemoval.automaticGestureAttempted = $true
+Assert-Ticket06TaskRejected "an automatic Recents gesture" $taskEvidence $automaticGestureCandidate $invalidManualGateMessage
+
+$swipeCandidate = Copy-Ticket06TestObject $taskEvidence
+$swipeCandidate.taskRemoval.taskRemoval.recentsSwipePerformed = $true
+Assert-Ticket06TaskRejected "an automated Recents swipe" $taskEvidence $swipeCandidate $invalidManualGateMessage
+
+$missingAcknowledgement = Copy-Ticket06TestObject $taskEvidence
+$missingAcknowledgement.taskRemoval.taskRemoval.userAcknowledged = $false
+Assert-Ticket06TaskRejected "missing human acknowledgement" $taskEvidence $missingAcknowledgement $invalidManualGateMessage
+
+$wrongAcknowledgedTaskId = Copy-Ticket06TestObject $taskEvidence
+$wrongAcknowledgedTaskId.taskRemoval.taskRemoval.userAcknowledgement.taskId = 2472
+$wrongAcknowledgedTaskId.fixture.ticket06TaskRemovalAcknowledgement.taskId = 2472
+Assert-Ticket06TaskRejected "acknowledgement for a different task ID" $taskEvidence $wrongAcknowledgedTaskId $invalidManualGateMessage
+
+$wrongAcknowledgedComponent = Copy-Ticket06TestObject $taskEvidence
+$wrongAcknowledgedComponent.taskRemoval.taskRemoval.userAcknowledgement.taskComponent = "com.example.todoschooltime.debug/com.example.todoschooltime.OtherActivity"
+Assert-Ticket06TaskRejected "acknowledgement for a different task component" $taskEvidence $wrongAcknowledgedComponent $invalidManualGateMessage
+
+$wrongAcknowledgedOtherTasks = Copy-Ticket06TestObject $taskEvidence
+$wrongAcknowledgedOtherTasks.taskRemoval.taskRemoval.userAcknowledgement.otherTaskIds = @(1221)
+Assert-Ticket06TaskRejected "acknowledgement with a different other-task snapshot" $taskEvidence $wrongAcknowledgedOtherTasks $invalidManualGateMessage
+
+$wrongAcknowledgedScreenshot = Copy-Ticket06TestObject $taskEvidence
+$wrongAcknowledgedScreenshot.taskRemoval.taskRemoval.userAcknowledgement.screenshotSha256 = "b" * 64
+$wrongAcknowledgedScreenshot.fixture.ticket06TaskRemovalAcknowledgement.screenshotSha256 = "b" * 64
+Assert-Ticket06TaskRejected "acknowledgement bound to a different screenshot" $taskEvidence $wrongAcknowledgedScreenshot $invalidManualGateMessage
+
+$wrongHostScreenshot = Copy-Ticket06TestObject $taskEvidence
+$wrongHostScreenshot.taskRemovalHostGate.screenshotSha256 = "b" * 64
+Assert-Ticket06TaskRejected "host screenshot digest differs from the saved PNG" $taskEvidence $wrongHostScreenshot $invalidManualGateMessage
+
+$taskStillPresent = Copy-Ticket06TestObject $taskEvidence
+$taskStillPresent.taskRemoval.taskRemoval.taskAbsentAfterRemoval = $false
+Assert-Ticket06TaskRejected "user acknowledgement without observed task absence" $taskEvidence $taskStillPresent $invalidManualGateMessage
+
+$unknownLabelWithFabricatedValue = Copy-Ticket06TestObject $taskEvidence
+$unknownLabelWithFabricatedValue.taskRemoval.taskRemoval.recentsCardLabel = "TodoSchool"
+Assert-Ticket06TaskRejected "an accessibility label fabricated when the UI did not expose one" $taskEvidence $unknownLabelWithFabricatedValue $invalidManualGateMessage
+
+$changedOtherTask = Copy-Ticket06TestObject $taskEvidence
+$changedOtherTask.taskRemoval.taskRemoval.otherTaskIdsAfterRemoval = @(1220, 1221)
+Assert-Ticket06TaskRejected "manual removal that changed another recent task" $taskEvidence $changedOtherTask $invalidManualGateMessage
 
 $wrongTaskComponent = Copy-Ticket06TestObject $taskEvidence
 $wrongTaskComponent.taskRemoval.taskRemoval.taskComponent = "com.enuma.todoenglish/org.cocos2dx.cpp.MainActivity"
-Assert-Ticket06TaskRejected "a task outside the isolated product MainActivity" $taskEvidence $wrongTaskComponent "does not prove removal of only the observed debug task"
-
-$unobservedCardFallback = Copy-Ticket06TestObject $recentsFallback
-$unobservedCardFallback.taskRemoval.taskRemoval.recentsViewLabelObserved = $false
-Assert-Ticket06TaskRejected "a swipe without a visible exact product card label" $recentsFallback $unobservedCardFallback "does not prove removal of only the observed debug task"
-
-$wrongWindowFallback = Copy-Ticket06TestObject $recentsFallback
-$wrongWindowFallback.taskRemoval.taskRemoval.recentsLabelWindowPackage = "com.example.todoschooltime.debug"
-Assert-Ticket06TaskRejected "a card label from the active product window" $recentsFallback $wrongWindowFallback "does not prove removal of only the observed debug task"
-
-$changedOtherTask = Copy-Ticket06TestObject $recentsFallback
-$changedOtherTask.taskRemoval.taskRemoval.otherTaskIdsAfterRemoval = @(1220, 1221)
-Assert-Ticket06TaskRejected "a gesture that changed another recent task" $recentsFallback $changedOtherTask "does not prove removal of only the observed debug task"
+Assert-Ticket06TaskRejected "a task outside the isolated product MainActivity" $taskEvidence $wrongTaskComponent $invalidManualGateMessage
 
 $wrongTaskScenario = Copy-Ticket06TestObject $taskEvidence
 $wrongTaskScenario.taskRemoval.scenario = "ticket05"
@@ -556,11 +700,41 @@ Assert-Ticket06TaskRejected "changed saved preferences after task removal" $task
 
 $incompleteTaskFixture = Copy-Ticket06TestObject $taskEvidence
 $incompleteTaskFixture.fixture.requests = @($incompleteTaskFixture.fixture.requests | Select-Object -First 8)
-Assert-Ticket06TaskRejected "an incomplete post-removal fixture cycle" $taskEvidence $incompleteTaskFixture "does not prove a full post-removal local API cycle"
+Assert-Ticket06TaskRejected "an incomplete post-removal fixture cycle" $taskEvidence $incompleteTaskFixture "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $unanchoredTaskFixture = Copy-Ticket06TestObject $taskEvidence
 $unanchoredTaskFixture.fixture.requests[7].sequence = 9
-Assert-Ticket06TaskRejected "a fixture cycle that does not begin immediately after the completed baseline" $taskEvidence $unanchoredTaskFixture "does not prove a full post-removal local API cycle"
+Assert-Ticket06TaskRejected "a fixture cycle with a missing sequence" $taskEvidence $unanchoredTaskFixture "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$wrongSubjectTaskCycle = Copy-Ticket06TestObject $taskEvidence
+$wrongSubjectTaskCycle.fixture.requests[11].path = "/v3/todoschool/report/daily/english"
+$wrongSubjectTaskCycle.taskRemoval.postRemovalRequestPaths[-1] = "/v3/todoschool/report/daily/english"
+$wrongSubjectTaskCycle.taskRemoval.taskRemoval.postRemovalDispatchPaths[-1] = "/v3/todoschool/report/daily/english"
+Assert-Ticket06TaskRejected "a post-removal cycle for the wrong subject" $taskEvidence $wrongSubjectTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$extraSubjectTaskCycle = Copy-Ticket06TestObject $taskEvidence
+$extraSubjectTaskCycle.fixture.requests += [pscustomobject]@{ sequence = 13; path = "/v3/todoschool/report/daily/math"; responseStatus = 200; servedReportCount = 5 }
+$extraSubjectTaskCycle.taskRemoval.postRemovalRequestPaths += "/v3/todoschool/report/daily/math"
+Assert-Ticket06TaskRejected "an extra post-removal request" $taskEvidence $extraSubjectTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$wrongOrderTaskCycle = Copy-Ticket06TestObject $taskEvidence
+$wrongOrderTaskCycle.fixture.requests[9].path = "/v3/math/user"
+$wrongOrderTaskCycle.fixture.requests[10].path = "/v3/todohangeul/user"
+$wrongOrderTaskCycle.taskRemoval.postRemovalRequestPaths[1], $wrongOrderTaskCycle.taskRemoval.postRemovalRequestPaths[2] =
+    $wrongOrderTaskCycle.taskRemoval.postRemovalRequestPaths[2], $wrongOrderTaskCycle.taskRemoval.postRemovalRequestPaths[1]
+Assert-Ticket06TaskRejected "a post-removal cycle with requests out of order" $taskEvidence $wrongOrderTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$wrongTaskDispatchSource = Copy-Ticket06TestObject $taskEvidence
+$wrongTaskDispatchSource.taskRemoval.taskRemoval.postRemovalDispatchForegroundPackages[2] = "com.example.todoschooltime.debug"
+Assert-Ticket06TaskRejected "a post-removal cycle attributed to the wrong foreground app" $taskEvidence $wrongTaskDispatchSource "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$missingTaskDispatchLease = Copy-Ticket06TestObject $taskEvidence
+$missingTaskDispatchLease.taskRemoval.taskRemoval.postRemovalDispatchServiceLeases[2] = $false
+Assert-Ticket06TaskRejected "a post-removal dispatch without the monitor lease" $taskEvidence $missingTaskDispatchLease "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$failedTaskCycleResponse = Copy-Ticket06TestObject $taskEvidence
+$failedTaskCycleResponse.fixture.requests[11].responseStatus = 500
+Assert-Ticket06TaskRejected "a post-removal cycle with a failed fixture response" $taskEvidence $failedTaskCycleResponse "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $taskBaselineAlert = Copy-Ticket06TestObject $taskEvidence
 $taskBaselineAlert.taskRemoval.baseline.completionAlertRequested = $true
@@ -612,4 +786,5 @@ Assert-Ticket06BootRejected "a missing persisted preference after reboot" $bootV
 $baselineAlertCandidate = Copy-Ticket06TestObject $bootValidSeed
 $baselineAlertCandidate.postReboot.baseline.completionAlertRequested = $true
 Assert-Ticket06BootRejected "a completion alert during the reboot baseline" $bootValidSeed $baselineAlertCandidate "must explicitly record silent baselines"
+Remove-Item -LiteralPath $taskScreenshotPath -Force -ErrorAction SilentlyContinue
 Write-Output "PASS Ticket06 independent task/reboot evidence, producer contract, and verified reverse timing."

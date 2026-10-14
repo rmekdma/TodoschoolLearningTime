@@ -8,6 +8,7 @@ import http.client
 import threading
 import time
 import unittest
+from datetime import datetime
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -435,6 +436,103 @@ class Ticket06FixtureServerTest(unittest.TestCase):
         self.assertFalse(after_reset["ticket06PreRemovalPreferencesCaptured"])
         self.assertFalse(after_reset["ticket06PreRebootPreferencesCaptured"])
         self.assertEqual({"hangeul": 6, "math": 5, "english": 7}, after_reset["reportCounts"])
+
+    def test_ticket06_task_removal_acknowledges_only_the_registered_exact_recents_task(self) -> None:
+        target = {
+            "runId": "ticket06-run",
+            "taskId": 42,
+            "taskComponent": "com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity",
+            "expectedAppLabel": "TodoSchool",
+            "recentsCardLabelObserved": False,
+            "recentsCardLabel": None,
+            "recentsLabelWindowPackage": None,
+            "otherTaskIds": [11, 12],
+        }
+        initial_state = self.get("/__ticket06/state")
+        self.assertIsNone(initial_state["ticket06RecentsScreenshotSha256"])
+        self.assertIsNone(initial_state["ticket06TaskRemovalTarget"])
+        self.assertIsNone(initial_state["ticket06TaskRemovalAcknowledgement"])
+        self.post("/__ticket06/ack-pre-removal-preferences", {"runId": "ticket06-run"})
+        screenshot = "a" * 64
+        self.assertEqual(400, self.post_status("/__ticket06/record-recents-screenshot", {"runId": "another-run", "screenshotSha256": screenshot}))
+        self.assertEqual(400, self.post_status("/__ticket06/record-recents-screenshot", {"runId": "ticket06-run", "screenshotSha256": "bad"}))
+        self.assertEqual(
+            {"ok": True, "runId": "ticket06-run", "recentsScreenshotRecorded": True},
+            self.post("/__ticket06/record-recents-screenshot", {"runId": "ticket06-run", "screenshotSha256": screenshot}),
+        )
+        self.assertEqual(400, self.post_status("/__ticket06/record-recents-screenshot", {"runId": "ticket06-run", "screenshotSha256": screenshot}))
+        self.assertEqual(
+            400,
+            self.post_status(
+                "/__ticket06/ack-task-removal",
+                {
+                    "runId": "ticket06-run",
+                    "taskId": 42,
+                    "taskComponent": target["taskComponent"],
+                    "otherTaskIds": [11, 12],
+                    "screenshotSha256": screenshot,
+                    "confirmedAppLabel": "TodoSchool",
+                },
+            ),
+        )
+
+        invalid_target = dict(target, taskComponent="com.example.todoschooltime.debug/.OtherActivity")
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", invalid_target))
+        invalid_label_observation = dict(target, recentsCardLabelObserved=True)
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", invalid_label_observation))
+        fabricated_unobserved_label = dict(target, recentsCardLabel="TodoSchool")
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", fabricated_unobserved_label))
+        target_in_other_tasks = dict(target, otherTaskIds=[11, 42])
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", target_in_other_tasks))
+        duplicate_other_task = dict(target, otherTaskIds=[11, 11])
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", duplicate_other_task))
+
+        registered = self.post("/__ticket06/register-task-removal-target", target)
+        self.assertEqual({"ok": True, "runId": "ticket06-run", "readyForManualDismissal": True}, registered)
+        snapshot = self.get("/__ticket06/state")
+        self.assertEqual(42, snapshot["ticket06TaskRemovalTarget"]["taskId"])
+        self.assertEqual(target["taskComponent"], snapshot["ticket06TaskRemovalTarget"]["taskComponent"])
+        self.assertEqual([11, 12], snapshot["ticket06TaskRemovalTarget"]["otherTaskIds"])
+        self.assertIsNone(snapshot["ticket06TaskRemovalAcknowledgement"])
+
+        wrong_task_id = {"runId": "ticket06-run", "taskId": 43, "taskComponent": target["taskComponent"]}
+        correct_ack = {
+            "runId": "ticket06-run",
+            "taskId": 42,
+            "taskComponent": target["taskComponent"],
+            "otherTaskIds": [11, 12],
+            "screenshotSha256": "a" * 64,
+            "confirmedAppLabel": "TodoSchool",
+        }
+        wrong_component = dict(correct_ack, taskComponent="com.example.todoschooltime.debug/.OtherActivity")
+        wrong_other_tasks = dict(correct_ack, otherTaskIds=[12, 11])
+        wrong_screenshot = dict(correct_ack, screenshotSha256="b" * 64)
+        wrong_confirmed_label = dict(correct_ack, confirmedAppLabel="Another app")
+        wrong_run_id = dict(correct_ack, runId="another-run")
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", dict(correct_ack, taskId=43)))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_component))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_other_tasks))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_screenshot))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_confirmed_label))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_run_id))
+
+        acknowledged = self.post("/__ticket06/ack-task-removal", correct_ack)
+        self.assertEqual({"ok": True, "runId": "ticket06-run", "manualDismissalAcknowledged": True}, acknowledged)
+        saved_ack = self.get("/__ticket06/state")["ticket06TaskRemovalAcknowledgement"]
+        self.assertEqual("ticket06-run", saved_ack["runId"])
+        self.assertEqual(42, saved_ack["taskId"])
+        self.assertEqual(target["taskComponent"], saved_ack["taskComponent"])
+        self.assertEqual([11, 12], saved_ack["otherTaskIds"])
+        self.assertEqual(screenshot, saved_ack["screenshotSha256"])
+        self.assertEqual("TodoSchool", saved_ack["confirmedAppLabel"])
+        datetime.fromisoformat(saved_ack["acknowledgedAtUtc"].replace("Z", "+00:00"))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", correct_ack))
+
+        self.post("/__ticket06/reset-requests", {})
+        reset_state = self.get("/__ticket06/state")
+        self.assertIsNone(reset_state["ticket06RecentsScreenshotSha256"])
+        self.assertIsNone(reset_state["ticket06TaskRemovalTarget"])
+        self.assertIsNone(reset_state["ticket06TaskRemovalAcknowledgement"])
 
     def test_ticket06_controls_reject_invalid_counts_and_other_scenarios(self) -> None:
         self.assertEqual(400, self.post_status("/__ticket06/set-report-counts", {"reports": {"math": True}}))

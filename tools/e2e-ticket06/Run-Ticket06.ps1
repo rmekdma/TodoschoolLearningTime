@@ -103,6 +103,11 @@ $preRebootPreferenceState = $null
 $preRebootStageSeenAtUtc = $null
 $preRebootPreferenceAck = $null
 $script:recentsDiagnosticCaptured = $false
+$script:recentsScreenshotPath = $null
+$script:recentsScreenshotSha256 = $null
+$script:recentsDiagnostic = $null
+$script:taskRemovalHumanGateCaptured = $false
+$script:taskRemovalHumanGate = $null
 $postPreferenceState = $null
 $instrumentationResults = [System.Collections.Generic.List[object]]::new()
 
@@ -393,7 +398,8 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
     ) -join " "
     $process = Start-Process -FilePath $powershellPath -ArgumentList $launcherArguments -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    $deadline = [DateTimeOffset]::UtcNow.AddMinutes(8)
+    $observerTimeoutMinutes = if ($Phase -eq "task-removal") { 40 } else { 8 }
+    $deadline = [DateTimeOffset]::UtcNow.AddMinutes($observerTimeoutMinutes)
     $stageDeadline = if ($Phase -in @("task-removal", "reboot-preparation")) { [DateTimeOffset]::UtcNow.AddSeconds(135) } else { [DateTimeOffset]::MaxValue }
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
         if ($Phase -eq "task-removal" -and -not $script:recentsDiagnosticCaptured) {
@@ -402,18 +408,31 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
             if ($recentsStageLines.Count -gt 0) {
                 $recentsScreenshotPath = Join-Path $artifactDirectory "screen-after-global-recents.png"
                 $screenshotCapture = & $pythonPath -c "import pathlib,subprocess,sys; p=subprocess.run([sys.argv[1],'-s',sys.argv[2],'exec-out','screencap','-p'],capture_output=True,check=False); pathlib.Path(sys.argv[3]).write_bytes(p.stdout); print('exit='+str(p.returncode),'bytes='+str(len(p.stdout)),'png='+str(p.stdout.startswith(bytes([137,80,78,71]))),'stderr='+p.stderr.decode(errors='replace')[-240:])" $script:AdbPath $script:DeviceSerial $recentsScreenshotPath
+                $captureText = @($screenshotCapture | ForEach-Object { [string]$_ }) -join " "
+                if ($captureText -notmatch 'exit=0\s+bytes=(?<bytes>[0-9]+)\s+png=True' -or [int64]$Matches.bytes -lt 1000) {
+                    throw "The actual Recents screenshot was not captured as a complete PNG: $captureText"
+                }
+                $script:recentsScreenshotPath = $recentsScreenshotPath
+                $script:recentsScreenshotSha256 = (Get-FileHash -LiteralPath $recentsScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                $screenshotAck = Invoke-RestMethod -Method Post -Uri "$apiBaseUrl/__ticket06/record-recents-screenshot" `
+                    -ContentType "application/json" -Body (@{ runId = $runId; screenshotSha256 = $script:recentsScreenshotSha256 } | ConvertTo-Json -Compress) -TimeoutSec 5
+                if (-not $screenshotAck.ok -or $screenshotAck.runId -cne $runId -or -not $screenshotAck.recentsScreenshotRecorded) {
+                    throw "The local fixture did not record the exact host-captured Recents screenshot digest."
+                }
                 $windowFocus = @(Invoke-SelectedAdb @("shell", "dumpsys", "window") |
                     Where-Object { $_ -match "mCurrentFocus|mFocusedApp|mTopFocusedDisplayId|mObscuringWindow" } |
                     Select-Object -First 12)
-                Write-JsonFile ([pscustomobject]@{
+                $script:recentsDiagnostic = [pscustomobject]@{
                     runId = $runId
                     stage = "after-global-recents"
                     capturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
                     stageLog = [string]($recentsStageLines | Select-Object -Last 1)
                     screenshotPath = $recentsScreenshotPath
+                    screenshotSha256 = $script:recentsScreenshotSha256
                     screenshotCapture = @($screenshotCapture)
                     selectedWindowFocus = $windowFocus
-                }) (Join-Path $artifactDirectory "recents-screen-diagnostic.json")
+                }
+                Write-JsonFile $script:recentsDiagnostic (Join-Path $artifactDirectory "recents-screen-diagnostic.json")
                 $script:recentsDiagnosticCaptured = $true
             }
         }
@@ -448,6 +467,54 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
             } elseif ([DateTimeOffset]::UtcNow -ge $stageDeadline) {
                 if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
                 throw "The observer did not reach its registered-before-task-removal stage within 135 seconds."
+            }
+        }
+        if ($Phase -eq "task-removal" -and -not $script:taskRemovalHumanGateCaptured) {
+            $fixtureState = Get-FixtureState
+            $target = $fixtureState.ticket06TaskRemovalTarget
+            if ($null -ne $target) {
+                if (-not $script:recentsDiagnosticCaptured -or -not $script:recentsScreenshotPath -or
+                    [string]$target.runId -cne $runId -or
+                    [string]$target.screenshotSha256 -cne $script:recentsScreenshotSha256 -or
+                    [string]$fixtureState.ticket06RecentsScreenshotSha256 -cne $script:recentsScreenshotSha256) {
+                    throw "The registered task-removal target does not match this run's captured Recents screenshot."
+                }
+                $acknowledgementBody = [pscustomobject]@{
+                    runId = $runId
+                    taskId = [int]$target.taskId
+                    taskComponent = [string]$target.taskComponent
+                    otherTaskIds = @($target.otherTaskIds | ForEach-Object { [int]$_ })
+                    screenshotSha256 = [string]$script:recentsScreenshotSha256
+                    confirmedAppLabel = [string]$target.expectedAppLabel
+                }
+                $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
+                $gate = [pscustomobject]@{
+                    runId = $runId
+                    stage = "actual-Recents-card-dismissal-by-user"
+                    capturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                    exactTaskId = [int]$target.taskId
+                    exactTaskComponent = [string]$target.taskComponent
+                    stageLog = [string]$script:recentsDiagnostic.stageLog
+                    expectedAppLabel = [string]$target.expectedAppLabel
+                    recentsCardLabelObserved = [bool]$target.recentsCardLabelObserved
+                    recentsCardLabel = $target.recentsCardLabel
+                    recentsLabelWindowPackage = $target.recentsLabelWindowPackage
+                    otherTaskIds = @($target.otherTaskIds | ForEach-Object { [int]$_ })
+                    screenshotPath = $script:recentsScreenshotPath
+                    screenshotSha256 = $script:recentsScreenshotSha256
+                    selectedWindowFocus = @($script:recentsDiagnostic.selectedWindowFocus)
+                    currentWindowFocusObserved = (@($script:recentsDiagnostic.selectedWindowFocus).Count -gt 0)
+                    acknowledgementEndpoint = "$apiBaseUrl/__ticket06/ack-task-removal"
+                    acknowledgementBody = $acknowledgementBody
+                    timeoutMinutes = 30
+                    automaticGestureOrCommand = $false
+                }
+                Write-JsonFile $gate $gatePath
+                $script:taskRemovalHumanGateCaptured = $true
+                $otherIdsText = [string]::Join(",", @($gate.otherTaskIds | ForEach-Object { [string]$_ }))
+                $labelText = if ($gate.recentsCardLabelObserved) { "observed='$($gate.recentsCardLabel)' from '$($gate.recentsLabelWindowPackage)'" } else { "accessibility label unknown; inspect the screenshot" }
+                Write-Host "HUMAN TASK REMOVAL GATE: exact app card '$($gate.expectedAppLabel)' taskId=$($gate.exactTaskId) component=$($gate.exactTaskComponent); otherTaskIds=[$otherIdsText]; label=$labelText; screenshot=$($gate.screenshotPath); sha256=$($gate.screenshotSha256); gate=$gatePath"
+                Write-Host "After you confirm the exact product card in the screenshot and the user dismisses only that card, post the acknowledgementBody from the gate JSON to acknowledgementEndpoint. The observer requires both that acknowledgement and an actual absent task ID; timeout is failure."
             }
         }
         if ($Phase -eq "reboot-preparation" -and $null -eq $script:preRebootPreferenceState) {
@@ -489,7 +556,7 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
     }
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw "Ticket 06 $Phase observer exceeded its bounded eight-minute limit."
+        throw "Ticket 06 $Phase observer exceeded its bounded $observerTimeoutMinutes-minute limit."
     }
     $process.WaitForExit()
     $process.Refresh()
@@ -527,6 +594,28 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
     $resultJson = Join-Ticket06ResultChunks -LogLines $resultLines -RunId $runId
     $result = $resultJson | ConvertFrom-Json -ErrorAction Stop
     if ($result.scenario -cne "ticket06" -or $result.phase -cne $Phase) { throw "Ticket 06 observer returned the wrong scenario or phase." }
+    if ($Phase -eq "task-removal") {
+        if (-not $script:taskRemovalHumanGateCaptured -or -not (Test-Path -LiteralPath $script:recentsScreenshotPath)) {
+            throw "Ticket 06 task-removal observer completed without its saved human gate and Recents screenshot."
+        }
+        $fixtureState = Get-FixtureState
+        $savedScreenshotHash = (Get-FileHash -LiteralPath $script:recentsScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $target = $fixtureState.ticket06TaskRemovalTarget
+        $acknowledgement = $fixtureState.ticket06TaskRemovalAcknowledgement
+        if ($savedScreenshotHash -cne $script:recentsScreenshotSha256 -or
+            $null -eq $target -or $null -eq $acknowledgement -or
+            [string]$target.screenshotSha256 -cne $savedScreenshotHash -or
+            [string]$acknowledgement.screenshotSha256 -cne $savedScreenshotHash -or
+            [int]$acknowledgement.taskId -ne [int]$target.taskId -or
+            [string]$acknowledgement.taskComponent -cne [string]$target.taskComponent -or
+            [string]$acknowledgement.confirmedAppLabel -cne [string]$target.expectedAppLabel -or
+            [string]::Join(",", @($acknowledgement.otherTaskIds | ForEach-Object { [string]$_ })) -cne
+                [string]::Join(",", @($target.otherTaskIds | ForEach-Object { [string]$_ }))) {
+            throw "Ticket 06 task-removal acknowledgement and screenshot do not match the exact registered Recents target."
+        }
+        $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
+        $script:taskRemovalHumanGate = Get-Content -LiteralPath $gatePath -Raw | ConvertFrom-Json -ErrorAction Stop
+    }
     Write-JsonFile $result $resultPath
     [void]$instrumentationResults.Add([pscustomobject]@{ phase = $Phase; resultPath = $resultPath; filteredOutputPath = $filteredPath; transportPath = $transportPath })
     return $result
@@ -730,6 +819,7 @@ try {
                     intervalAfterTaskRemoval = $prePreferenceState.intervalLine
                     credentialFileRead = $false
                 }
+                taskRemovalHostGate = $script:taskRemovalHumanGate
                 fixture = $preFixture
                 executionScope = [pscustomobject]@{ rebootPerformed = $false; forceStopUsed = [bool]$preResult.taskRemoval.forceStopUsed; actualTodoApiCalled = $false }
                 resultCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")

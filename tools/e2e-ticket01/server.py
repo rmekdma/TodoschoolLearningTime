@@ -19,6 +19,8 @@ TEST_PASSWORD = "not-a-real-password"
 AUTH_TOKEN = "ticket01-fake-token"
 ACCOUNT_ID = "ticket01-fake-account"
 CHILD_NAME = "테스트 아이"
+TICKET06_TASK_COMPONENT = "com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity"
+TICKET06_PRODUCT_PACKAGE = "com.example.todoschooltime.debug"
 
 SUBJECTS = {
     "hangeul": ("/v3/todohangeul/user", "/v3/todoschool/report/daily/hangeul", "ticket01-hangeul", 2, 61),
@@ -42,6 +44,9 @@ class FixtureState:
         self.armed_report_response: dict[str, Any] | None = None
         self.ticket06_pre_removal_preferences_captured = False
         self.ticket06_pre_reboot_preferences_captured = False
+        self.ticket06_recents_screenshot_sha256: str | None = None
+        self.ticket06_task_removal_target: dict[str, Any] | None = None
+        self.ticket06_task_removal_acknowledgement: dict[str, Any] | None = None
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
             if scenario == "ticket03"
@@ -231,6 +236,9 @@ class FixtureState:
             if self.scenario == "ticket06":
                 self.ticket06_pre_removal_preferences_captured = False
                 self.ticket06_pre_reboot_preferences_captured = False
+                self.ticket06_recents_screenshot_sha256 = None
+                self.ticket06_task_removal_target = None
+                self.ticket06_task_removal_acknowledgement = None
 
     def acknowledge_ticket06_pre_removal_preferences(self, run_id: str) -> None:
         with self.lock:
@@ -248,6 +256,109 @@ class FixtureState:
                 raise ValueError("runId does not match the active Ticket 06 fixture")
             self.ticket06_pre_reboot_preferences_captured = True
 
+    def record_ticket06_recents_screenshot(self, run_id: str, screenshot_sha256: Any) -> None:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 Recents screenshot recording is available only in Ticket 06")
+            if run_id != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            if not self.ticket06_pre_removal_preferences_captured:
+                raise ValueError("filtered pre-removal preference capture is required first")
+            if self.ticket06_recents_screenshot_sha256 is not None:
+                raise ValueError("the Ticket 06 Recents screenshot is already recorded")
+            if not isinstance(screenshot_sha256, str) or len(screenshot_sha256) != 64 or any(character not in "0123456789abcdef" for character in screenshot_sha256):
+                raise ValueError("screenshotSha256 must be a lowercase SHA-256 digest")
+            self.ticket06_recents_screenshot_sha256 = screenshot_sha256
+
+    def register_ticket06_task_removal_target(self, target: dict[str, Any]) -> None:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 task-removal registration is available only in Ticket 06")
+            if target.get("runId") != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            if not self.ticket06_pre_removal_preferences_captured:
+                raise ValueError("filtered pre-removal preference capture is required first")
+            if self.ticket06_recents_screenshot_sha256 is None:
+                raise ValueError("a host-captured Recents screenshot is required before registering the target")
+            if self.ticket06_task_removal_target is not None:
+                raise ValueError("the Ticket 06 task-removal target is already registered")
+
+            task_id = target.get("taskId")
+            if type(task_id) is not int or task_id < 1:
+                raise ValueError("taskId must be a positive integer")
+            if target.get("taskComponent") != TICKET06_TASK_COMPONENT:
+                raise ValueError("taskComponent is not the isolated debug MainActivity")
+            expected_app_label = target.get("expectedAppLabel")
+            if not isinstance(expected_app_label, str) or not expected_app_label.strip():
+                raise ValueError("expectedAppLabel must be a non-empty string")
+
+            label_observed = target.get("recentsCardLabelObserved")
+            card_label = target.get("recentsCardLabel")
+            label_window_package = target.get("recentsLabelWindowPackage")
+            if type(label_observed) is not bool:
+                raise ValueError("recentsCardLabelObserved must be an explicit Boolean")
+            if label_observed:
+                if card_label != expected_app_label:
+                    raise ValueError("the observed Recents card label must match the installed app label")
+                if not isinstance(label_window_package, str) or not label_window_package.strip() or label_window_package == TICKET06_PRODUCT_PACKAGE:
+                    raise ValueError("an observed Recents label must identify a non-product window package")
+            elif card_label is not None or label_window_package is not None:
+                raise ValueError("unobserved Recents label and window package must be recorded as null")
+
+            other_task_ids = target.get("otherTaskIds")
+            if not isinstance(other_task_ids, list) or any(type(value) is not int or value < 1 for value in other_task_ids):
+                raise ValueError("otherTaskIds must be a list of positive integer task IDs")
+            if task_id in other_task_ids or len(other_task_ids) != len(set(other_task_ids)):
+                raise ValueError("otherTaskIds must be unique and exclude the target task")
+
+            self.ticket06_task_removal_target = {
+                "runId": self.run_id,
+                "taskId": task_id,
+                "taskComponent": TICKET06_TASK_COMPONENT,
+                "expectedAppLabel": expected_app_label,
+                "recentsCardLabelObserved": label_observed,
+                "recentsCardLabel": card_label,
+                "recentsLabelWindowPackage": label_window_package,
+                "otherTaskIds": list(other_task_ids),
+                "screenshotSha256": self.ticket06_recents_screenshot_sha256,
+                "registeredAtUtc": datetime.now(timezone.utc).isoformat(),
+            }
+
+    def acknowledge_ticket06_task_removal(self, acknowledgement: dict[str, Any]) -> None:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 task-removal acknowledgement is available only in Ticket 06")
+            if acknowledgement.get("runId") != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            target = self.ticket06_task_removal_target
+            if target is None:
+                raise ValueError("the exact Ticket 06 task-removal target has not been registered")
+            if self.ticket06_task_removal_acknowledgement is not None:
+                raise ValueError("the Ticket 06 task-removal acknowledgement is already recorded")
+            if type(acknowledgement.get("taskId")) is not int or acknowledgement.get("taskId") != target["taskId"]:
+                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
+            if acknowledgement.get("taskComponent") != target["taskComponent"]:
+                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
+            other_task_ids = acknowledgement.get("otherTaskIds")
+            if other_task_ids != target["otherTaskIds"]:
+                raise ValueError("otherTaskIds do not match the registered Recents snapshot")
+            screenshot_sha256 = acknowledgement.get("screenshotSha256")
+            if screenshot_sha256 != target["screenshotSha256"]:
+                raise ValueError("screenshotSha256 does not match the host-captured Recents image")
+            confirmed_app_label = acknowledgement.get("confirmedAppLabel")
+            if confirmed_app_label != target["expectedAppLabel"]:
+                raise ValueError("confirmedAppLabel does not match the installed debug app label")
+
+            self.ticket06_task_removal_acknowledgement = {
+                "runId": self.run_id,
+                "taskId": target["taskId"],
+                "taskComponent": target["taskComponent"],
+                "otherTaskIds": list(other_task_ids),
+                "screenshotSha256": screenshot_sha256,
+                "confirmedAppLabel": confirmed_app_label,
+                "acknowledgedAtUtc": datetime.now(timezone.utc).isoformat(),
+            }
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             snapshot_monotonic_ns = time.monotonic_ns()
@@ -258,6 +369,11 @@ class FixtureState:
                 "sequence": self.sequence,
                 "ticket06PreRemovalPreferencesCaptured": self.ticket06_pre_removal_preferences_captured,
                 "ticket06PreRebootPreferencesCaptured": self.ticket06_pre_reboot_preferences_captured,
+                **({
+                    "ticket06RecentsScreenshotSha256": self.ticket06_recents_screenshot_sha256,
+                    "ticket06TaskRemovalTarget": None if self.ticket06_task_removal_target is None else dict(self.ticket06_task_removal_target),
+                    "ticket06TaskRemovalAcknowledgement": None if self.ticket06_task_removal_acknowledgement is None else dict(self.ticket06_task_removal_acknowledgement),
+                } if self.scenario == "ticket06" else {}),
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
                 "releasedReportHolds": [dict(hold) for hold in self.released_report_holds],
@@ -549,6 +665,35 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(400, {"error": str(error)})
                     return
                 self._send_json(200, {"ok": True, "runId": state.run_id, "readyForTaskRemoval": True})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/record-recents-screenshot":
+                run_id = body.get("runId") if isinstance(body, dict) else None
+                screenshot_sha256 = body.get("screenshotSha256") if isinstance(body, dict) else None
+                try:
+                    state.record_ticket06_recents_screenshot(run_id, screenshot_sha256)
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "recentsScreenshotRecorded": True})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/register-task-removal-target":
+                try:
+                    state.register_ticket06_task_removal_target(body if isinstance(body, dict) else {})
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "readyForManualDismissal": True})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/ack-task-removal":
+                try:
+                    state.acknowledge_ticket06_task_removal(body if isinstance(body, dict) else {})
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "manualDismissalAcknowledged": True})
                 return
 
             if state.scenario == "ticket06" and self.path == "/__ticket06/ack-pre-reboot-preferences":
