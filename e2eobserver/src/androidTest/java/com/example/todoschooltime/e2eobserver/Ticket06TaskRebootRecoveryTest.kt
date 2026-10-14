@@ -212,7 +212,7 @@ class Ticket06TaskRebootRecoveryTest {
         val otherTaskIdsAfterRemoval = recentTaskIdentities(automation).filterNot { it.id == taskId }.map { it.id }
         assertEquals("Manual dismissal changed another recent task", otherTaskIdsBeforeRemoval, otherTaskIdsAfterRemoval)
         val afterRemoval = waitForProductState(context, TIMEOUT_MS) {
-            it.getJSONArray("registeredChildren").strings() == setOf(CHILD_NAME) && it.optBoolean("serviceLeaseAttached")
+            it.getJSONArray("registeredChildren").strings().toSet() == setOf(CHILD_NAME) && it.optBoolean("serviceLeaseAttached")
         }
         assertTrue("Removing the activity task detached the real service", afterRemoval.getBoolean("serviceLeaseAttached"))
         assertEquals(setOf(CHILD_NAME), afterRemoval.getJSONArray("registeredChildren").strings().toSet())
