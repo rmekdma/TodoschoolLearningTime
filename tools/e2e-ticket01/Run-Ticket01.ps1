@@ -1671,8 +1671,12 @@ try {
             if (-not (Test-Path -LiteralPath $sourcePath)) { throw "Ticket 05 provenance source file is missing: $relativePath" }
             $sourceHashes[$relativePath] = Get-ApkSha256 $sourcePath
         }
-        $gitHead = (& git -C $repositoryRoot rev-parse HEAD 2>&1 | Select-Object -First 1).Trim()
-        if ($LASTEXITCODE -ne 0) { throw "Could not record Ticket 05 source revision." }
+        $sourceRevisionOutput = @(& git -C $repositoryRoot rev-parse HEAD 2>&1)
+        $sourceRevisionExitCode = $LASTEXITCODE
+        $gitHead = if ($sourceRevisionOutput.Count -gt 0) { ([string]$sourceRevisionOutput[0]).Trim() } else { "" }
+        if ($sourceRevisionExitCode -ne 0 -or $gitHead -notmatch '^[0-9a-f]{40}$') {
+            throw "Could not record Ticket 05 source revision."
+        }
         $provenance = [pscustomobject]@{
             sourceRevision = $gitHead
             sourceFileSha256 = $sourceHashes
