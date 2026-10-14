@@ -8,7 +8,7 @@ import http.client
 import threading
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -451,6 +451,8 @@ class Ticket06FixtureServerTest(unittest.TestCase):
         initial_state = self.get("/__ticket06/state")
         self.assertIsNone(initial_state["ticket06RecentsScreenshotSha256"])
         self.assertIsNone(initial_state["ticket06TaskRemovalTarget"])
+        self.assertIsNone(initial_state["ticket06TaskRemovalGate"])
+        self.assertIsNone(initial_state["ticket06TaskRemovalAbsence"])
         self.assertIsNone(initial_state["ticket06TaskRemovalAcknowledgement"])
         self.post("/__ticket06/ack-pre-removal-preferences", {"runId": "ticket06-run"})
         screenshot = "a" * 64
@@ -478,8 +480,13 @@ class Ticket06FixtureServerTest(unittest.TestCase):
 
         invalid_target = dict(target, taskComponent="com.example.todoschooltime.debug/.OtherActivity")
         self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", invalid_target))
+        missing_label_fields = dict(target)
+        missing_label_fields.pop("recentsLabelWindowPackage")
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", missing_label_fields))
         invalid_label_observation = dict(target, recentsCardLabelObserved=True)
         self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", invalid_label_observation))
+        wrong_label_flag_type = dict(target, recentsCardLabelObserved="false")
+        self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", wrong_label_flag_type))
         fabricated_unobserved_label = dict(target, recentsCardLabel="TodoSchool")
         self.assertEqual(400, self.post_status("/__ticket06/register-task-removal-target", fabricated_unobserved_label))
         target_in_other_tasks = dict(target, otherTaskIds=[11, 42])
@@ -493,6 +500,9 @@ class Ticket06FixtureServerTest(unittest.TestCase):
         self.assertEqual(42, snapshot["ticket06TaskRemovalTarget"]["taskId"])
         self.assertEqual(target["taskComponent"], snapshot["ticket06TaskRemovalTarget"]["taskComponent"])
         self.assertEqual([11, 12], snapshot["ticket06TaskRemovalTarget"]["otherTaskIds"])
+        self.assertFalse(snapshot["ticket06TaskRemovalTarget"]["recentsCardLabelObserved"])
+        self.assertIsNone(snapshot["ticket06TaskRemovalTarget"]["recentsCardLabel"])
+        self.assertIsNone(snapshot["ticket06TaskRemovalTarget"]["recentsLabelWindowPackage"])
         self.assertIsNone(snapshot["ticket06TaskRemovalAcknowledgement"])
 
         wrong_task_id = {"runId": "ticket06-run", "taskId": 43, "taskComponent": target["taskComponent"]}
@@ -516,6 +526,44 @@ class Ticket06FixtureServerTest(unittest.TestCase):
         self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_confirmed_label))
         self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", wrong_run_id))
 
+        self.assertEqual(400, self.post_status("/__ticket06/observe-task-removal-absence", {
+            "runId": "ticket06-run", "taskId": 42, "taskComponent": target["taskComponent"], "otherTaskIds": [11, 12]
+        }))
+        gate_body = {
+            "runId": "ticket06-run",
+            "taskId": 42,
+            "taskComponent": target["taskComponent"],
+            "screenshotSha256": screenshot,
+            "capturedAtUtc": datetime.now(timezone.utc).isoformat(),
+        }
+        registered_gate = self.post("/__ticket06/register-task-removal-gate", gate_body)
+        saved_gate = registered_gate["ticket06TaskRemovalGate"]
+        self.assertTrue(registered_gate["ok"])
+        self.assertEqual("ticket06-run", saved_gate["runId"])
+        self.assertEqual(42, saved_gate["taskId"])
+        self.assertEqual(target["taskComponent"], saved_gate["taskComponent"])
+        self.assertEqual(screenshot, saved_gate["screenshotSha256"])
+        datetime.fromisoformat(saved_gate["createdAtUtc"].replace("Z", "+00:00"))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", correct_ack))
+
+        absence_request = {
+            "runId": "ticket06-run",
+            "taskId": 42,
+            "taskComponent": target["taskComponent"],
+            "otherTaskIds": [11, 12],
+        }
+        self.assertEqual(400, self.post_status("/__ticket06/observe-task-removal-absence", dict(absence_request, otherTaskIds=[12, 11])))
+        absence = self.post("/__ticket06/observe-task-removal-absence", absence_request)["ticket06TaskRemovalAbsence"]
+        self.assertEqual(42, absence["taskId"])
+        self.assertEqual([11, 12], absence["otherTaskIds"])
+        datetime.fromisoformat(absence["observedAtUtc"].replace("Z", "+00:00"))
+
+        # Simulate a five-minute human wait; the gate's 30-minute deadline is independent of poll cadence.
+        created_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        absence_at = created_at + timedelta(minutes=4)
+        self.state.ticket06_task_removal_gate["createdAtUtc"] = created_at.isoformat()
+        self.state.ticket06_task_removal_absence["observedAtUtc"] = absence_at.isoformat()
+
         acknowledged = self.post("/__ticket06/ack-task-removal", correct_ack)
         self.assertEqual({"ok": True, "runId": "ticket06-run", "manualDismissalAcknowledged": True}, acknowledged)
         saved_ack = self.get("/__ticket06/state")["ticket06TaskRemovalAcknowledgement"]
@@ -526,13 +574,34 @@ class Ticket06FixtureServerTest(unittest.TestCase):
         self.assertEqual(screenshot, saved_ack["screenshotSha256"])
         self.assertEqual("TodoSchool", saved_ack["confirmedAppLabel"])
         datetime.fromisoformat(saved_ack["acknowledgedAtUtc"].replace("Z", "+00:00"))
+        self.assertLessEqual(self.state.ticket06_task_removal_gate["createdAtUtc"], self.state.ticket06_task_removal_absence["observedAtUtc"])
+        self.assertLessEqual(self.state.ticket06_task_removal_absence["observedAtUtc"], saved_ack["acknowledgedAtUtc"])
         self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", correct_ack))
 
         self.post("/__ticket06/reset-requests", {})
         reset_state = self.get("/__ticket06/state")
         self.assertIsNone(reset_state["ticket06RecentsScreenshotSha256"])
         self.assertIsNone(reset_state["ticket06TaskRemovalTarget"])
+        self.assertIsNone(reset_state["ticket06TaskRemovalGate"])
+        self.assertIsNone(reset_state["ticket06TaskRemovalAbsence"])
         self.assertIsNone(reset_state["ticket06TaskRemovalAcknowledgement"])
+
+        self.post("/__ticket06/ack-pre-removal-preferences", {"runId": "ticket06-run"})
+        self.post("/__ticket06/record-recents-screenshot", {"runId": "ticket06-run", "screenshotSha256": screenshot})
+        self.post("/__ticket06/register-task-removal-target", target)
+        self.post("/__ticket06/register-task-removal-gate", {
+            "runId": "ticket06-run",
+            "taskId": 42,
+            "taskComponent": target["taskComponent"],
+            "screenshotSha256": screenshot,
+            "capturedAtUtc": datetime.now(timezone.utc).isoformat(),
+        })
+        expired_gate_time = datetime.now(timezone.utc) - timedelta(minutes=31)
+        self.state.ticket06_task_removal_gate["createdAtUtc"] = expired_gate_time.isoformat()
+        self.assertEqual(400, self.post_status("/__ticket06/observe-task-removal-absence", {
+            "runId": "ticket06-run", "taskId": 42, "taskComponent": target["taskComponent"], "otherTaskIds": [11, 12]
+        }))
+        self.assertEqual(400, self.post_status("/__ticket06/ack-task-removal", correct_ack))
 
     def test_ticket06_controls_reject_invalid_counts_and_other_scenarios(self) -> None:
         self.assertEqual(400, self.post_status("/__ticket06/set-report-counts", {"reports": {"math": True}}))

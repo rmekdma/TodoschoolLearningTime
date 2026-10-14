@@ -13,11 +13,17 @@ if ($runnerSource -match '(?i)adb\s+shell\s+am\s+task\s+remove|input\s+swipe' -o
 }
 foreach ($requiredManualGateToken in @(
     "/__ticket06/record-recents-screenshot",
+    "/__ticket06/register-task-removal-gate",
+    "/__ticket06/observe-task-removal-absence",
     "/__ticket06/ack-task-removal",
     "task-removal-human-gate.json",
     'AddMinutes($observerTimeoutMinutes)',
     "awaitManualTaskRemovalAcknowledgement",
     "MANUAL_TASK_REMOVAL_TIMEOUT_MS",
+    "TASK_REMOVAL_GATE_CREATION_TIMEOUT_MS",
+    "gateCreatedAtUtc",
+    "taskAbsentObservedBeforeAcknowledgement",
+    "90_000L",
     "actual Recents dismissal by user"
 )) {
     if (-not $runnerSource.Contains($requiredManualGateToken) -and -not $observerSource.Contains($requiredManualGateToken)) {
@@ -173,7 +179,10 @@ $taskScreenshotSignature = [byte[]](137, 80, 78, 71, 13, 10, 26, 10)
 for ($signatureIndex = 0; $signatureIndex -lt $taskScreenshotSignature.Count; $signatureIndex++) { $taskScreenshotBytes[$signatureIndex] = $taskScreenshotSignature[$signatureIndex] }
 [IO.File]::WriteAllBytes($taskScreenshotPath, $taskScreenshotBytes)
 $taskScreenshotSha256 = (Get-FileHash -LiteralPath $taskScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$taskAckAt = [DateTimeOffset]::UtcNow.ToString("O")
+$taskGateCreatedAt = [DateTimeOffset]::UtcNow.AddMinutes(-6)
+$taskGateCaptureAt = $taskGateCreatedAt.AddSeconds(-1)
+$taskAbsenceAt = $taskGateCreatedAt.AddMinutes(5)
+$taskAckAt = $taskAbsenceAt.AddSeconds(10).ToString("O")
 $taskAcknowledgement = [pscustomobject]@{
     runId = $runId
     taskId = 2471
@@ -194,9 +203,26 @@ $taskTarget = [pscustomobject]@{
     otherTaskIds = @(1220)
     screenshotSha256 = $taskScreenshotSha256
 }
+$taskFixtureGate = [pscustomobject]@{
+    runId = $runId
+    taskId = 2471
+    taskComponent = $taskAcknowledgement.taskComponent
+    screenshotSha256 = $taskScreenshotSha256
+    hostCapturedAtUtc = $taskGateCaptureAt.ToString("O")
+    createdAtUtc = $taskGateCreatedAt.ToString("O")
+}
+$taskAbsenceObservation = [pscustomobject]@{
+    runId = $runId
+    taskId = 2471
+    taskComponent = $taskAcknowledgement.taskComponent
+    otherTaskIds = @(1220)
+    observedAtUtc = $taskAbsenceAt.ToString("O")
+}
 $taskHostGate = [pscustomobject]@{
     runId = $runId
     stage = "actual-Recents-card-dismissal-by-user"
+    capturedAtUtc = $taskGateCaptureAt.ToString("O")
+    gateCreatedAtUtc = $taskGateCreatedAt.ToString("O")
     exactTaskId = 2471
     exactTaskComponent = $taskAcknowledgement.taskComponent
     expectedAppLabel = "TodoSchool"
@@ -219,6 +245,8 @@ $taskHostGate = [pscustomobject]@{
     automaticGestureOrCommand = $false
     selectedWindowFocus = @("mCurrentFocus=Window{123 u0 com.android.launcher3/.RecentsActivity}")
     currentWindowFocusObserved = $true
+    taskAbsentObservation = $taskAbsenceObservation
+    taskAbsentObservedAtUtc = $taskAbsenceAt.ToString("O")
 }
 $pre = [pscustomobject]@{
     runId = $runId
@@ -236,6 +264,8 @@ $pre = [pscustomobject]@{
         taskPresentBeforeUserDismissal = $true
         userAcknowledged = $true
         userAcknowledgement = $taskAcknowledgement
+        gateCreatedAtUtc = $taskGateCreatedAt.ToString("O")
+        taskAbsentObservedAtUtc = $taskAbsenceAt.ToString("O")
         taskAbsentObservedAtElapsedRealtimeMs = 200000
         taskAbsentObservedBeforeAcknowledgement = $true
         screenshotSha256 = $taskScreenshotSha256
@@ -265,9 +295,10 @@ $pre = [pscustomobject]@{
     baseline = [pscustomobject]@{ complete = $true; successfulSubjects = 3; completionAlertRequested = $false; fixtureRequestStartSequence = 1; fixtureRequestEndSequence = 7 }
     cadence = [pscustomobject]@{
         baselineSigninElapsedRealtimeMs = 100000
-        nextCycleSigninElapsedRealtimeMs = 160200
-        clientDeltaMs = 60200
-        serverDeltaMs = 60204
+        eligibleForegroundElapsedRealtimeMs = 460000
+        postRemovalCycleSigninElapsedRealtimeMs = 480000
+        postRemovalCycleDelayMs = 20000
+        maximumEligibleCycleDelayMs = 90000
         foregroundPackage = "com.enuma.todohangeul"
         serviceLeaseAttachedAtDispatch = $true
     }
@@ -409,6 +440,8 @@ $taskEvidence = [pscustomobject]@{
         ticket06PreRemovalPreferencesCaptured = $true
         ticket06RecentsScreenshotSha256 = $taskScreenshotSha256
         ticket06TaskRemovalTarget = $taskTarget
+        ticket06TaskRemovalGate = $taskFixtureGate
+        ticket06TaskRemovalAbsence = $taskAbsenceObservation
         ticket06TaskRemovalAcknowledgement = $taskAcknowledgement
         requests = $taskFixtureRequests
     }
@@ -419,6 +452,10 @@ if (-not $taskRemovalSummary.pass -or $taskRemovalSummary.rebootCount -ne 0 -or 
     $taskRemovalSummary.taskRemovalMechanism -cne "actual Recents dismissal by user" -or $taskRemovalSummary.postRemovalRequestCount -ne 5 -or
     -not $taskRemovalSummary.userAcknowledged) {
     throw "Valid task-only Ticket 06 evidence did not remain independent from reboot evidence."
+}
+if (($pre.cadence.postRemovalCycleSigninElapsedRealtimeMs - $pre.cadence.baselineSigninElapsedRealtimeMs) -le 180000 -or
+    ([DateTimeOffset]::Parse($taskAckAt) - [DateTimeOffset]::Parse($taskGateCreatedAt.ToString("O"))).TotalMinutes -le 3) {
+    throw "The task-removal seed must prove a human wait longer than three minutes with a foreground-anchored eligible cycle."
 }
 
 $bootPreparation = [pscustomobject]@{
@@ -666,6 +703,38 @@ $taskStillPresent = Copy-Ticket06TestObject $taskEvidence
 $taskStillPresent.taskRemoval.taskRemoval.taskAbsentAfterRemoval = $false
 Assert-Ticket06TaskRejected "user acknowledgement without observed task absence" $taskEvidence $taskStillPresent $invalidManualGateMessage
 
+$ackBeforeAbsentObservation = Copy-Ticket06TestObject $taskEvidence
+$ackBeforeAbsentObservation.taskRemoval.taskRemoval.taskAbsentObservedBeforeAcknowledgement = $false
+$ackBeforeAbsentObservation.taskRemoval.taskRemoval.taskAbsentObservedAtUtc = $taskAckAt
+$ackBeforeAbsentObservation.fixture.ticket06TaskRemovalAbsence.observedAtUtc = ([DateTimeOffset]::Parse($taskAckAt).AddSeconds(1)).ToString("O")
+$ackBeforeAbsentObservation.taskRemovalHostGate.taskAbsentObservedAtUtc = $ackBeforeAbsentObservation.fixture.ticket06TaskRemovalAbsence.observedAtUtc
+$ackBeforeAbsentObservation.taskRemovalHostGate.taskAbsentObservation.observedAtUtc = $ackBeforeAbsentObservation.fixture.ticket06TaskRemovalAbsence.observedAtUtc
+Assert-Ticket06TaskRejected "acknowledgement before the exact task absence observation" $taskEvidence $ackBeforeAbsentObservation $invalidManualGateMessage
+
+$expiredAcknowledgement = Copy-Ticket06TestObject $taskEvidence
+$expiredAcknowledgement.fixture.ticket06TaskRemovalAcknowledgement.acknowledgedAtUtc = $taskGateCreatedAt.AddMinutes(31).ToString("O")
+$expiredAcknowledgement.taskRemoval.taskRemoval.userAcknowledgement.acknowledgedAtUtc = $expiredAcknowledgement.fixture.ticket06TaskRemovalAcknowledgement.acknowledgedAtUtc
+Assert-Ticket06TaskRejected "acknowledgement after the 30-minute gate deadline" $taskEvidence $expiredAcknowledgement $invalidManualGateMessage
+
+$missingHostLabelField = Copy-Ticket06TestObject $taskEvidence
+$missingHostLabelField.taskRemovalHostGate.PSObject.Properties.Remove("recentsLabelWindowPackage")
+Assert-Ticket06TaskRejected "a missing host Recents label field" $taskEvidence $missingHostLabelField $invalidManualGateMessage
+$wrongHostLabelFlagType = Copy-Ticket06TestObject $taskEvidence
+$wrongHostLabelFlagType.taskRemovalHostGate.recentsCardLabelObserved = "false"
+Assert-Ticket06TaskRejected "a non-Boolean host Recents label-observed flag" $taskEvidence $wrongHostLabelFlagType $invalidManualGateMessage
+$missingObserverLabelFlag = Copy-Ticket06TestObject $taskEvidence
+$missingObserverLabelFlag.taskRemoval.taskRemoval.PSObject.Properties.Remove("recentsViewLabelObserved")
+Assert-Ticket06TaskRejected "a missing observer Recents label-observed flag" $taskEvidence $missingObserverLabelFlag $invalidManualGateMessage
+$wrongObserverLabelFlagType = Copy-Ticket06TestObject $taskEvidence
+$wrongObserverLabelFlagType.taskRemoval.taskRemoval.recentsViewLabelObserved = "false"
+Assert-Ticket06TaskRejected "a non-Boolean observer Recents label-observed flag" $taskEvidence $wrongObserverLabelFlagType $invalidManualGateMessage
+$missingFixtureLabelField = Copy-Ticket06TestObject $taskEvidence
+$missingFixtureLabelField.fixture.ticket06TaskRemovalTarget.PSObject.Properties.Remove("recentsCardLabel")
+Assert-Ticket06TaskRejected "a missing fixture Recents label field" $taskEvidence $missingFixtureLabelField $invalidManualGateMessage
+$wrongFixtureLabelFlagType = Copy-Ticket06TestObject $taskEvidence
+$wrongFixtureLabelFlagType.fixture.ticket06TaskRemovalTarget.recentsCardLabelObserved = "false"
+Assert-Ticket06TaskRejected "a non-Boolean fixture Recents label-observed flag" $taskEvidence $wrongFixtureLabelFlagType $invalidManualGateMessage
+
 $unknownLabelWithFabricatedValue = Copy-Ticket06TestObject $taskEvidence
 $unknownLabelWithFabricatedValue.taskRemoval.taskRemoval.recentsCardLabel = "TodoSchool"
 Assert-Ticket06TaskRejected "an accessibility label fabricated when the UI did not expose one" $taskEvidence $unknownLabelWithFabricatedValue $invalidManualGateMessage
@@ -741,8 +810,13 @@ $taskBaselineAlert.taskRemoval.baseline.completionAlertRequested = $true
 Assert-Ticket06TaskRejected "a completion notification during the completed baseline" $taskEvidence $taskBaselineAlert "must explicitly record no force-stop"
 
 $taskCadenceMismatch = Copy-Ticket06TestObject $taskEvidence
-$taskCadenceMismatch.taskRemoval.cadence.serverDeltaMs = 50000
-Assert-Ticket06TaskRejected "a cadence inconsistent with the server monotonic dispatches" $taskEvidence $taskCadenceMismatch "does not match actual client elapsed-realtime and fixture server monotonic dispatches"
+$taskCadenceMismatch.taskRemoval.cadence.postRemovalCycleDelayMs = 90001
+$taskCadenceMismatch.taskRemoval.cadence.postRemovalCycleSigninElapsedRealtimeMs = $taskCadenceMismatch.taskRemoval.cadence.eligibleForegroundElapsedRealtimeMs + 90001
+Assert-Ticket06TaskRejected "a post-foreground eligible cycle after its bounded timeout" $taskEvidence $taskCadenceMismatch "did not start in order within 90 seconds"
+$taskCycleBeforeForeground = Copy-Ticket06TestObject $taskEvidence
+$taskCycleBeforeForeground.taskRemoval.cadence.postRemovalCycleSigninElapsedRealtimeMs = $taskCycleBeforeForeground.taskRemoval.cadence.eligibleForegroundElapsedRealtimeMs - 1
+$taskCycleBeforeForeground.taskRemoval.cadence.postRemovalCycleDelayMs = -1
+Assert-Ticket06TaskRejected "an eligible cycle before the actual Hangeul foreground event" $taskEvidence $taskCycleBeforeForeground "did not start in order within 90 seconds"
 $chunkPayload = [ordered]@{ runId = $runId; scenario = "ticket06"; phase = "post-reboot"; text = ("A" * 4500) } | ConvertTo-Json -Compress
 $chunkBytes = [Text.Encoding]::UTF8.GetBytes($chunkPayload)
 $chunkText = [Convert]::ToBase64String($chunkBytes)

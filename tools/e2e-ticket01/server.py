@@ -9,7 +9,7 @@ import select
 import socket
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -46,6 +46,8 @@ class FixtureState:
         self.ticket06_pre_reboot_preferences_captured = False
         self.ticket06_recents_screenshot_sha256: str | None = None
         self.ticket06_task_removal_target: dict[str, Any] | None = None
+        self.ticket06_task_removal_gate: dict[str, Any] | None = None
+        self.ticket06_task_removal_absence: dict[str, Any] | None = None
         self.ticket06_task_removal_acknowledgement: dict[str, Any] | None = None
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
@@ -238,6 +240,8 @@ class FixtureState:
                 self.ticket06_pre_reboot_preferences_captured = False
                 self.ticket06_recents_screenshot_sha256 = None
                 self.ticket06_task_removal_target = None
+                self.ticket06_task_removal_gate = None
+                self.ticket06_task_removal_absence = None
                 self.ticket06_task_removal_acknowledgement = None
 
     def acknowledge_ticket06_pre_removal_preferences(self, run_id: str) -> None:
@@ -295,6 +299,8 @@ class FixtureState:
             label_observed = target.get("recentsCardLabelObserved")
             card_label = target.get("recentsCardLabel")
             label_window_package = target.get("recentsLabelWindowPackage")
+            if any(name not in target for name in ("recentsCardLabelObserved", "recentsCardLabel", "recentsLabelWindowPackage")):
+                raise ValueError("Recents label observation fields must all be explicitly present")
             if type(label_observed) is not bool:
                 raise ValueError("recentsCardLabelObserved must be an explicit Boolean")
             if label_observed:
@@ -324,6 +330,80 @@ class FixtureState:
                 "registeredAtUtc": datetime.now(timezone.utc).isoformat(),
             }
 
+    def record_ticket06_task_removal_gate(self, gate: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 task-removal gates are available only in Ticket 06")
+            if gate.get("runId") != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            target = self.ticket06_task_removal_target
+            if target is None:
+                raise ValueError("the exact Ticket 06 task-removal target has not been registered")
+            if self.ticket06_task_removal_gate is not None:
+                raise ValueError("the Ticket 06 task-removal gate is already recorded")
+            if type(gate.get("taskId")) is not int or gate.get("taskId") != target["taskId"]:
+                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
+            if gate.get("taskComponent") != target["taskComponent"]:
+                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
+            if gate.get("screenshotSha256") != target["screenshotSha256"]:
+                raise ValueError("screenshotSha256 does not match the host-captured Recents image")
+            try:
+                host_captured_at = datetime.fromisoformat(str(gate.get("capturedAtUtc")).replace("Z", "+00:00"))
+            except (TypeError, ValueError) as error:
+                raise ValueError("capturedAtUtc must be an ISO-8601 timestamp") from error
+            if host_captured_at.tzinfo is None:
+                raise ValueError("capturedAtUtc must include a timezone")
+
+            created_at = datetime.now(timezone.utc)
+            if host_captured_at.astimezone(timezone.utc) > created_at or (created_at - host_captured_at.astimezone(timezone.utc)).total_seconds() > 30:
+                raise ValueError("the host gate capture timestamp must be recent and cannot be in the future")
+            self.ticket06_task_removal_gate = {
+                "runId": self.run_id,
+                "taskId": target["taskId"],
+                "taskComponent": target["taskComponent"],
+                "screenshotSha256": target["screenshotSha256"],
+                "hostCapturedAtUtc": host_captured_at.astimezone(timezone.utc).isoformat(),
+                "createdAtUtc": created_at.isoformat(),
+            }
+            return dict(self.ticket06_task_removal_gate)
+
+    def record_ticket06_task_removal_absence(self, observation: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            if self.scenario != "ticket06":
+                raise ValueError("Ticket 06 task-removal observations are available only in Ticket 06")
+            if observation.get("runId") != self.run_id:
+                raise ValueError("runId does not match the active Ticket 06 fixture")
+            target = self.ticket06_task_removal_target
+            gate = self.ticket06_task_removal_gate
+            if target is None or gate is None:
+                raise ValueError("the exact Ticket 06 task-removal gate has not been recorded")
+            if type(observation.get("taskId")) is not int or observation.get("taskId") != target["taskId"]:
+                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
+            if observation.get("taskComponent") != target["taskComponent"]:
+                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
+            other_task_ids = observation.get("otherTaskIds")
+            if other_task_ids != target["otherTaskIds"]:
+                raise ValueError("otherTaskIds do not match the registered Recents snapshot")
+
+            now = datetime.now(timezone.utc)
+            gate_created_at = datetime.fromisoformat(gate["createdAtUtc"])
+            if now < gate_created_at or now > gate_created_at + timedelta(minutes=30):
+                raise ValueError("the task-absence observation must occur within the 30-minute human gate")
+            if self.ticket06_task_removal_absence is not None:
+                saved = self.ticket06_task_removal_absence
+                if saved["taskId"] == target["taskId"] and saved["otherTaskIds"] == other_task_ids:
+                    return dict(saved)
+                raise ValueError("the Ticket 06 task-absence observation conflicts with the recorded target")
+
+            self.ticket06_task_removal_absence = {
+                "runId": self.run_id,
+                "taskId": target["taskId"],
+                "taskComponent": target["taskComponent"],
+                "otherTaskIds": list(other_task_ids),
+                "observedAtUtc": now.isoformat(),
+            }
+            return dict(self.ticket06_task_removal_absence)
+
     def acknowledge_ticket06_task_removal(self, acknowledgement: dict[str, Any]) -> None:
         with self.lock:
             if self.scenario != "ticket06":
@@ -333,6 +413,12 @@ class FixtureState:
             target = self.ticket06_task_removal_target
             if target is None:
                 raise ValueError("the exact Ticket 06 task-removal target has not been registered")
+            gate = self.ticket06_task_removal_gate
+            absence = self.ticket06_task_removal_absence
+            if gate is None:
+                raise ValueError("the exact Ticket 06 human gate has not been created")
+            if absence is None:
+                raise ValueError("the observer has not confirmed the exact task absent before acknowledgement")
             if self.ticket06_task_removal_acknowledgement is not None:
                 raise ValueError("the Ticket 06 task-removal acknowledgement is already recorded")
             if type(acknowledgement.get("taskId")) is not int or acknowledgement.get("taskId") != target["taskId"]:
@@ -349,6 +435,13 @@ class FixtureState:
             if confirmed_app_label != target["expectedAppLabel"]:
                 raise ValueError("confirmedAppLabel does not match the installed debug app label")
 
+            gate_created_at = datetime.fromisoformat(gate["createdAtUtc"])
+            absence_observed_at = datetime.fromisoformat(absence["observedAtUtc"])
+            acknowledged_at = datetime.now(timezone.utc)
+            deadline = gate_created_at + timedelta(minutes=30)
+            if not gate_created_at <= absence_observed_at <= acknowledged_at <= deadline:
+                raise ValueError("the exact task must be observed absent before acknowledgement and within 30 minutes of gate creation")
+
             self.ticket06_task_removal_acknowledgement = {
                 "runId": self.run_id,
                 "taskId": target["taskId"],
@@ -356,7 +449,7 @@ class FixtureState:
                 "otherTaskIds": list(other_task_ids),
                 "screenshotSha256": screenshot_sha256,
                 "confirmedAppLabel": confirmed_app_label,
-                "acknowledgedAtUtc": datetime.now(timezone.utc).isoformat(),
+                "acknowledgedAtUtc": acknowledged_at.isoformat(),
             }
 
     def snapshot(self) -> dict[str, Any]:
@@ -372,6 +465,8 @@ class FixtureState:
                 **({
                     "ticket06RecentsScreenshotSha256": self.ticket06_recents_screenshot_sha256,
                     "ticket06TaskRemovalTarget": None if self.ticket06_task_removal_target is None else dict(self.ticket06_task_removal_target),
+                    "ticket06TaskRemovalGate": None if self.ticket06_task_removal_gate is None else dict(self.ticket06_task_removal_gate),
+                    "ticket06TaskRemovalAbsence": None if self.ticket06_task_removal_absence is None else dict(self.ticket06_task_removal_absence),
                     "ticket06TaskRemovalAcknowledgement": None if self.ticket06_task_removal_acknowledgement is None else dict(self.ticket06_task_removal_acknowledgement),
                 } if self.scenario == "ticket06" else {}),
                 "reportCounts": dict(self.report_counts),
@@ -685,6 +780,24 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     self._send_json(400, {"error": str(error)})
                     return
                 self._send_json(200, {"ok": True, "runId": state.run_id, "readyForManualDismissal": True})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/register-task-removal-gate":
+                try:
+                    gate = state.record_ticket06_task_removal_gate(body if isinstance(body, dict) else {})
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "ticket06TaskRemovalGate": gate})
+                return
+
+            if state.scenario == "ticket06" and self.path == "/__ticket06/observe-task-removal-absence":
+                try:
+                    observation = state.record_ticket06_task_removal_absence(body if isinstance(body, dict) else {})
+                except ValueError as error:
+                    self._send_json(400, {"error": str(error)})
+                    return
+                self._send_json(200, {"ok": True, "runId": state.run_id, "ticket06TaskRemovalAbsence": observation})
                 return
 
             if state.scenario == "ticket06" and self.path == "/__ticket06/ack-task-removal":

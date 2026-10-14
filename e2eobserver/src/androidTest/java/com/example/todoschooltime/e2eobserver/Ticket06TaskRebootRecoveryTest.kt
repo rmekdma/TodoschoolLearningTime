@@ -18,6 +18,7 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import org.json.JSONArray
@@ -221,15 +222,21 @@ class Ticket06TaskRebootRecoveryTest {
         val dispatchCursorBeforeForeground = lastSequence(afterRemoval.getJSONArray("httpRequestDispatchEvents"))
         launchActualSubjectApp(context, HANGEUL_APP_PACKAGE)
         waitForActualForegroundAndConnectedService(automation, context, foregroundCursor, HANGEUL_APP_PACKAGE)
-        val baselineEndSequence = baselineRequests.last().getLong("sequence")
-        val cycleFixture = awaitFixtureState(apiBaseUrl, runId, CADENCE_TIMEOUT_MS) {
+        val foregroundState = readProductState(context)
+        val eligibleForeground = foregroundState.getJSONArray("foregroundEvents").objects().firstOrNull {
+            it.optLong("sequence") > foregroundCursor && it.optString("packageName") == HANGEUL_APP_PACKAGE
+        } ?: throw AssertionError("The actual Hangeul foreground did not produce a timestamped eligibility event")
+        val cycleDeadlineElapsedRealtimeMs = eligibleForeground.getLong("elapsedRealtimeMs") + TASK_REMOVAL_CADENCE_TIMEOUT_MS
+        val cycleWaitRemainingMs = cycleDeadlineElapsedRealtimeMs - SystemClock.elapsedRealtime()
+        assertTrue("The actual Hangeul foreground consumed the entire bounded cycle wait", cycleWaitRemainingMs > 0L)
+        val cycleFixture = awaitFixtureState(apiBaseUrl, runId, cycleWaitRemainingMs) {
             eligibleHangeulCycleAfter(it.getJSONArray("requests").objects(), requestCursorBeforeForeground) != null
         }
         val cycleRequests = eligibleHangeulCycleAfter(cycleFixture.getJSONArray("requests").objects(), requestCursorBeforeForeground)
             ?: throw AssertionError("The actual Hangeul foreground did not produce one exact five-request eligible cycle")
         assertSuccessfulFakeFixtureRequests(cycleRequests, baselineCounts(), Ticket06EligibleSubjectCycle.HANGEUL_PATHS)
         val afterCycle = readProductState(context)
-        val cycleSignin = firstSigninDispatchForPackageAfter(afterCycle, HANGEUL_APP_PACKAGE, baselineSignin.getLong("elapsedRealtimeMs"))
+        val cycleSignin = firstSigninDispatchForPackageAfter(afterCycle, HANGEUL_APP_PACKAGE, eligibleForeground.getLong("elapsedRealtimeMs"))
         val dispatchCycle = eligibleHangeulCycleAfter(
             afterCycle.getJSONArray("httpRequestDispatchEvents").objects(),
             maxOf(dispatchCursorBeforeForeground, cycleSignin.getLong("sequence") - 1L),
@@ -240,12 +247,9 @@ class Ticket06TaskRebootRecoveryTest {
             assertTrue("The eligible Hangeul foreground event followed dispatch $event", event.getLong("foregroundEventElapsedRealtimeMs") <= event.getLong("elapsedRealtimeMs"))
         }
         assertEquals("The eligible post-removal cycle did not begin with its Hangeul sign-in dispatch", cycleSignin.getLong("sequence"), dispatchCycle.first().getLong("sequence"))
-        val baselineServerSignin = baselineRequests.first { it.getString("path") == SIGN_IN_PATH }
-        val cycleServerSignin = cycleRequests.first { it.getString("path") == SIGN_IN_PATH }
-        val clientDeltaMs = cycleSignin.getLong("elapsedRealtimeMs") - baselineSignin.getLong("elapsedRealtimeMs")
-        val serverDeltaMs = (cycleServerSignin.getLong("serverReceivedMonotonicNs") - baselineServerSignin.getLong("serverReceivedMonotonicNs")) / 1_000_000L
-        assertTrue("The recorded cycle interval was shorter than the explicitly saved minute: $clientDeltaMs", clientDeltaMs >= 60_000L)
-        assertTrue("The recorded cycle interval exceeded its bounded wait: $clientDeltaMs", clientDeltaMs < 180_000L)
+        val postRemovalCycleDelayMs = cycleSignin.getLong("elapsedRealtimeMs") - eligibleForeground.getLong("elapsedRealtimeMs")
+        assertTrue("The eligible Hangeul cycle started before its foreground event: $postRemovalCycleDelayMs", postRemovalCycleDelayMs >= 0L)
+        assertTrue("The eligible Hangeul cycle exceeded its foreground-anchored bounded wait: $postRemovalCycleDelayMs", postRemovalCycleDelayMs <= TASK_REMOVAL_CADENCE_TIMEOUT_MS)
 
         val targets = JSONObject().put("hangeul", TARGET_HANGEUL).put("math", TARGET_MATH).put("english", TARGET_ENGLISH)
         return JSONObject()
@@ -269,6 +273,8 @@ class Ticket06TaskRebootRecoveryTest {
                 .put("automaticGestureAttempted", false)
                 .put("recentsSwipePerformed", false)
                 .put("screenshotSha256", recentsScreenshotSha256)
+                .put("gateCreatedAtUtc", manualDismissal.gateCreatedAtUtc)
+                .put("taskAbsentObservedAtUtc", manualDismissal.taskAbsentObservedAtUtc)
                 .put("userAcknowledged", true)
                 .put("userAcknowledgement", manualDismissal.acknowledgement)
                 .put("taskAbsentObservedAtElapsedRealtimeMs", manualDismissal.taskAbsentObservedAtElapsedRealtimeMs)
@@ -290,11 +296,10 @@ class Ticket06TaskRebootRecoveryTest {
                 .put("registeredChildren", afterRemoval.getJSONArray("registeredChildren")))
             .put("cadence", JSONObject()
                 .put("baselineSigninElapsedRealtimeMs", baselineSignin.getLong("elapsedRealtimeMs"))
-                .put("nextCycleSigninElapsedRealtimeMs", cycleSignin.getLong("elapsedRealtimeMs"))
-                .put("clientDeltaMs", clientDeltaMs)
-                .put("baselineServerSigninMonotonicNs", baselineServerSignin.getLong("serverReceivedMonotonicNs"))
-                .put("nextCycleServerSigninMonotonicNs", cycleServerSignin.getLong("serverReceivedMonotonicNs"))
-                .put("serverDeltaMs", serverDeltaMs)
+                .put("eligibleForegroundElapsedRealtimeMs", eligibleForeground.getLong("elapsedRealtimeMs"))
+                .put("postRemovalCycleSigninElapsedRealtimeMs", cycleSignin.getLong("elapsedRealtimeMs"))
+                .put("postRemovalCycleDelayMs", postRemovalCycleDelayMs)
+                .put("maximumEligibleCycleDelayMs", TASK_REMOVAL_CADENCE_TIMEOUT_MS)
                 .put("foregroundPackage", cycleSignin.getString("foregroundPackage"))
                 .put("serviceLeaseAttachedAtDispatch", cycleSignin.getBoolean("serviceLeaseAttached")))
             .put("postRemovalFixtureRequestStartSequence", cycleRequests.first().getLong("sequence"))
@@ -696,6 +701,8 @@ class Ticket06TaskRebootRecoveryTest {
         val acknowledgement: JSONObject,
         val taskAbsentObservedAtElapsedRealtimeMs: Long,
         val taskAbsentObservedBeforeAcknowledgement: Boolean,
+        val gateCreatedAtUtc: String,
+        val taskAbsentObservedAtUtc: String,
     )
 
     private fun awaitTicket06RecentsScreenshot(apiBaseUrl: String, runId: String): String {
@@ -723,10 +730,13 @@ class Ticket06TaskRebootRecoveryTest {
         otherTaskIdsBeforeRemoval: List<Int>,
         screenshotSha256: String,
     ): ManualTaskRemovalOutcome {
-        val deadline = SystemClock.elapsedRealtime() + MANUAL_TASK_REMOVAL_TIMEOUT_MS
+        val gateCreationDeadline = SystemClock.elapsedRealtime() + TASK_REMOVAL_GATE_CREATION_TIMEOUT_MS
+        var deadline = 0L
+        var gateCreatedAtUtc: String? = null
         var taskAbsentAt: Long? = null
+        var taskAbsentObservedAtUtc: String? = null
         var taskWasAbsentBeforeAcknowledgement = false
-        do {
+        while (true) {
             val state = fixtureRequest(apiBaseUrl, "GET", "/__ticket06/state")
             assertEquals("Ticket 06 fixture run changed while waiting for exact-task removal", runId, state.optString("runId"))
             val target = state.optJSONObject("ticket06TaskRemovalTarget")
@@ -737,6 +747,25 @@ class Ticket06TaskRebootRecoveryTest {
             assertEquals(expectedAppLabel, target.optString("expectedAppLabel"))
             assertEquals(screenshotSha256, target.optString("screenshotSha256"))
             assertEquals(otherTaskIdsBeforeRemoval, target.getJSONArray("otherTaskIds").ints())
+
+            val gate = state.optJSONObject("ticket06TaskRemovalGate")
+            if (gate == null) {
+                if (SystemClock.elapsedRealtime() >= gateCreationDeadline) {
+                    throw AssertionError("The host did not create the exact task-removal gate within the bounded handoff")
+                }
+                SystemClock.sleep(POLL_INTERVAL_MS)
+                continue
+            }
+            assertEquals("Task-removal gate run ID mismatch", runId, gate.optString("runId"))
+            assertEquals("Task-removal gate task ID mismatch", taskId, gate.optInt("taskId", -1))
+            assertEquals("Task-removal gate component mismatch", taskComponent, gate.optString("taskComponent"))
+            assertEquals("Task-removal gate screenshot mismatch", screenshotSha256, gate.optString("screenshotSha256"))
+            if (gateCreatedAtUtc == null) {
+                gateCreatedAtUtc = gate.optString("createdAtUtc")
+                assertTrue("Task-removal gate creation timestamp is missing", gateCreatedAtUtc!!.isNotBlank())
+                Instant.parse(gateCreatedAtUtc!!)
+                deadline = SystemClock.elapsedRealtime() + MANUAL_TASK_REMOVAL_TIMEOUT_MS
+            }
 
             val acknowledgement = if (state.isNull("ticket06TaskRemovalAcknowledgement")) {
                 null
@@ -753,6 +782,19 @@ class Ticket06TaskRebootRecoveryTest {
                 assertTrue("Human acknowledgement timestamp is missing", acknowledgement.optString("acknowledgedAtUtc").isNotBlank())
             }
 
+            val absence = state.optJSONObject("ticket06TaskRemovalAbsence")
+            if (absence != null) {
+                assertEquals("Task-absence observation run ID mismatch", runId, absence.optString("runId"))
+                assertEquals("Task-absence observation task ID mismatch", taskId, absence.optInt("taskId", -1))
+                assertEquals("Task-absence observation component mismatch", taskComponent, absence.optString("taskComponent"))
+                assertEquals("Task-absence observation other-task snapshot mismatch", otherTaskIdsBeforeRemoval, absence.getJSONArray("otherTaskIds").ints())
+                taskAbsentObservedAtUtc = absence.optString("observedAtUtc")
+                assertTrue("Task-absence observation timestamp is missing", taskAbsentObservedAtUtc!!.isNotBlank())
+                val gateInstant = Instant.parse(gateCreatedAtUtc!!)
+                val absenceInstant = Instant.parse(taskAbsentObservedAtUtc!!)
+                assertTrue("Task absence was recorded before gate creation", !absenceInstant.isBefore(gateInstant))
+            }
+
             val tasks = recentTaskIdentities(automation)
             val observedTarget = tasks.firstOrNull { it.id == taskId }
             if (observedTarget != null) {
@@ -764,24 +806,47 @@ class Ticket06TaskRebootRecoveryTest {
                 if (taskAbsentAt == null) {
                     taskAbsentAt = SystemClock.elapsedRealtime()
                     taskWasAbsentBeforeAcknowledgement = acknowledgement == null
+                    assertTrue("An acknowledgement arrived before the observer saw the exact task absent", taskWasAbsentBeforeAcknowledgement)
+                    val absenceObservation = fixtureRequest(
+                        apiBaseUrl,
+                        "POST",
+                        "/__ticket06/observe-task-removal-absence",
+                        JSONObject()
+                            .put("runId", runId)
+                            .put("taskId", taskId)
+                            .put("taskComponent", taskComponent)
+                            .put("otherTaskIds", JSONArray(otherTaskIdsBeforeRemoval)),
+                    ).getJSONObject("ticket06TaskRemovalAbsence")
+                    assertEquals(taskId, absenceObservation.optInt("taskId", -1))
+                    taskAbsentObservedAtUtc = absenceObservation.getString("observedAtUtc")
                 }
             }
 
             if (acknowledgement != null && taskAbsentAt != null) {
+                assertTrue("The exact task was not observed absent before acknowledgement", taskWasAbsentBeforeAcknowledgement)
+                val gateInstant = Instant.parse(gateCreatedAtUtc!!)
+                val absenceInstant = Instant.parse(taskAbsentObservedAtUtc!!)
+                val acknowledgementInstant = Instant.parse(acknowledgement.getString("acknowledgedAtUtc"))
+                assertTrue("The exact task absence was recorded after acknowledgement", !absenceInstant.isAfter(acknowledgementInstant))
+                assertTrue("Acknowledgement preceded task-removal gate creation", !acknowledgementInstant.isBefore(gateInstant))
+                assertTrue("Acknowledgement arrived after the 30-minute task-removal deadline", !acknowledgementInstant.isAfter(gateInstant.plusSeconds(30 * 60)))
                 return ManualTaskRemovalOutcome(
                     acknowledgement = acknowledgement,
                     taskAbsentObservedAtElapsedRealtimeMs = taskAbsentAt,
                     taskAbsentObservedBeforeAcknowledgement = taskWasAbsentBeforeAcknowledgement,
+                    gateCreatedAtUtc = gateCreatedAtUtc!!,
+                    taskAbsentObservedAtUtc = taskAbsentObservedAtUtc!!,
                 )
             }
+            if (deadline > 0L && SystemClock.elapsedRealtime() >= deadline) {
+                val missing = buildList {
+                    if (taskAbsentAt == null) add("exact task ID $taskId is still present")
+                    if (state.isNull("ticket06TaskRemovalAcknowledgement")) add("user acknowledgement was not received")
+                }.joinToString(" and ")
+                throw AssertionError("Timed out after the bounded 30-minute exact Recents removal gate: $missing")
+            }
             SystemClock.sleep(POLL_INTERVAL_MS)
-        } while (SystemClock.elapsedRealtime() < deadline)
-        val missing = buildList {
-            if (taskAbsentAt == null) add("exact task ID $taskId is still present")
-            val state = fixtureRequest(apiBaseUrl, "GET", "/__ticket06/state")
-            if (state.isNull("ticket06TaskRemovalAcknowledgement")) add("user acknowledgement was not received")
-        }.joinToString(" and ")
-        throw AssertionError("Timed out after the bounded 30-minute exact Recents removal gate: $missing")
+        }
     }
 
     private fun recentTaskIdentities(automation: UiAutomation): List<TaskIdentity> {
@@ -1032,8 +1097,10 @@ class Ticket06TaskRebootRecoveryTest {
         const val BASELINE_TIMEOUT_MS = 90_000L
         const val BOOT_BASELINE_TIMEOUT_MS = 45_000L
         const val CADENCE_TIMEOUT_MS = 140_000L
+        const val TASK_REMOVAL_CADENCE_TIMEOUT_MS = 90_000L
         const val RECENTS_SCREENSHOT_TIMEOUT_MS = 30_000L
         const val MANUAL_TASK_REMOVAL_TIMEOUT_MS = 30 * 60 * 1000L
+        const val TASK_REMOVAL_GATE_CREATION_TIMEOUT_MS = 120_000L
         const val SERVER_TIMEOUT_MS = 5_000
         const val POLL_INTERVAL_MS = 400L
         const val MAX_WAKE_LOCK_MS = 15 * 60 * 1000L

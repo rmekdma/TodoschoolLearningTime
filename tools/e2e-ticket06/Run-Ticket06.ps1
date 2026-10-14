@@ -108,6 +108,7 @@ $script:recentsScreenshotSha256 = $null
 $script:recentsDiagnostic = $null
 $script:taskRemovalHumanGateCaptured = $false
 $script:taskRemovalHumanGate = $null
+$script:taskRemovalAbsenceNoticeDisplayed = $false
 $postPreferenceState = $null
 $instrumentationResults = [System.Collections.Generic.List[object]]::new()
 
@@ -488,10 +489,11 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
                     confirmedAppLabel = [string]$target.expectedAppLabel
                 }
                 $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
+                $hostGateCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
                 $gate = [pscustomobject]@{
                     runId = $runId
                     stage = "actual-Recents-card-dismissal-by-user"
-                    capturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
+                    capturedAtUtc = $hostGateCapturedAtUtc
                     exactTaskId = [int]$target.taskId
                     exactTaskComponent = [string]$target.taskComponent
                     stageLog = [string]$script:recentsDiagnostic.stageLog
@@ -509,12 +511,55 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
                     timeoutMinutes = 30
                     automaticGestureOrCommand = $false
                 }
+                $gateRegistration = Invoke-RestMethod -Method Post -Uri "$apiBaseUrl/__ticket06/register-task-removal-gate" `
+                    -ContentType "application/json" -Body (@{
+                        runId = $runId
+                        taskId = [int]$target.taskId
+                        taskComponent = [string]$target.taskComponent
+                        screenshotSha256 = [string]$script:recentsScreenshotSha256
+                        capturedAtUtc = $hostGateCapturedAtUtc
+                    } | ConvertTo-Json -Compress) -TimeoutSec 5
+                $registeredGate = $gateRegistration.ticket06TaskRemovalGate
+                if (-not $gateRegistration.ok -or $gateRegistration.runId -cne $runId -or
+                    [int]$registeredGate.taskId -ne [int]$target.taskId -or
+                    [string]$registeredGate.taskComponent -cne [string]$target.taskComponent -or
+                    [string]$registeredGate.screenshotSha256 -cne [string]$script:recentsScreenshotSha256 -or
+                    [string]::IsNullOrWhiteSpace([string]$registeredGate.createdAtUtc)) {
+                    throw "The fixture did not record the exact task-removal gate creation time."
+                }
+                $gate | Add-Member -MemberType NoteProperty -Name gateCreatedAtUtc -Value ([string]$registeredGate.createdAtUtc)
                 Write-JsonFile $gate $gatePath
+                $script:taskRemovalHumanGate = $gate
                 $script:taskRemovalHumanGateCaptured = $true
                 $otherIdsText = [string]::Join(",", @($gate.otherTaskIds | ForEach-Object { [string]$_ }))
                 $labelText = if ($gate.recentsCardLabelObserved) { "observed='$($gate.recentsCardLabel)' from '$($gate.recentsLabelWindowPackage)'" } else { "accessibility label unknown; inspect the screenshot" }
                 Write-Host "HUMAN TASK REMOVAL GATE: exact app card '$($gate.expectedAppLabel)' taskId=$($gate.exactTaskId) component=$($gate.exactTaskComponent); otherTaskIds=[$otherIdsText]; label=$labelText; screenshot=$($gate.screenshotPath); sha256=$($gate.screenshotSha256); gate=$gatePath"
-                Write-Host "After you confirm the exact product card in the screenshot and the user dismisses only that card, post the acknowledgementBody from the gate JSON to acknowledgementEndpoint. The observer requires both that acknowledgement and an actual absent task ID; timeout is failure."
+                Write-Host "After the user dismisses only the exact product card, wait for the observer's exact-task-absent confirmation. Only then post the acknowledgementBody from the gate JSON to acknowledgementEndpoint. The acknowledgement is a human attestation; the observer separately verifies absence and other-task preservation."
+            }
+        }
+        if ($Phase -eq "task-removal" -and $script:taskRemovalHumanGateCaptured -and -not $script:taskRemovalAbsenceNoticeDisplayed) {
+            $fixtureState = Get-FixtureState
+            $absence = $fixtureState.ticket06TaskRemovalAbsence
+            if ($null -ne $absence) {
+                $gate = $fixtureState.ticket06TaskRemovalGate
+                if ([string]$absence.runId -cne $runId -or
+                    [int]$absence.taskId -ne [int]$script:taskRemovalHumanGate.exactTaskId -or
+                    [string]$absence.taskComponent -cne [string]$script:taskRemovalHumanGate.exactTaskComponent -or
+                    [string]::Join(',', @($absence.otherTaskIds | ForEach-Object { [string]$_ })) -cne
+                        [string]::Join(',', @($script:taskRemovalHumanGate.otherTaskIds | ForEach-Object { [string]$_ })) -or
+                    [string]$gate.createdAtUtc -cne [string]$script:taskRemovalHumanGate.gateCreatedAtUtc) {
+                    throw "The observer's task-absence event does not match the exact human gate."
+                }
+                $absenceTimestamp = [DateTimeOffset]::Parse([string]$absence.observedAtUtc)
+                $gateTimestamp = [DateTimeOffset]::Parse([string]$gate.createdAtUtc)
+                if ($absenceTimestamp -lt $gateTimestamp -or $absenceTimestamp -gt $gateTimestamp.AddMinutes(30)) {
+                    throw "The exact task was observed absent outside the 30-minute gate window."
+                }
+                $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservation -Value $absence -Force
+                $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservedAtUtc -Value ([string]$absence.observedAtUtc) -Force
+                Write-JsonFile $script:taskRemovalHumanGate (Join-Path $artifactDirectory "task-removal-human-gate.json")
+                Write-Host "OBSERVER CONFIRMED exact taskId=$($absence.taskId) absent at $($absence.observedAtUtc); otherTaskIds=[$([string]::Join(',', @($absence.otherTaskIds | ForEach-Object { [string]$_ })))] remain unchanged. The user may now submit the human acknowledgement."
+                $script:taskRemovalAbsenceNoticeDisplayed = $true
             }
         }
         if ($Phase -eq "reboot-preparation" -and $null -eq $script:preRebootPreferenceState) {
@@ -601,20 +646,38 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
         $fixtureState = Get-FixtureState
         $savedScreenshotHash = (Get-FileHash -LiteralPath $script:recentsScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $target = $fixtureState.ticket06TaskRemovalTarget
+        $absence = $fixtureState.ticket06TaskRemovalAbsence
         $acknowledgement = $fixtureState.ticket06TaskRemovalAcknowledgement
         if ($savedScreenshotHash -cne $script:recentsScreenshotSha256 -or
-            $null -eq $target -or $null -eq $acknowledgement -or
+            $null -eq $target -or $null -eq $absence -or $null -eq $acknowledgement -or
             [string]$target.screenshotSha256 -cne $savedScreenshotHash -or
             [string]$acknowledgement.screenshotSha256 -cne $savedScreenshotHash -or
             [int]$acknowledgement.taskId -ne [int]$target.taskId -or
             [string]$acknowledgement.taskComponent -cne [string]$target.taskComponent -or
             [string]$acknowledgement.confirmedAppLabel -cne [string]$target.expectedAppLabel -or
+            [string]$absence.runId -cne $runId -or
+            [int]$absence.taskId -ne [int]$target.taskId -or
+            [string]$absence.taskComponent -cne [string]$target.taskComponent -or
+            [string]::Join(',', @($absence.otherTaskIds | ForEach-Object { [string]$_ })) -cne
+                [string]::Join(',', @($target.otherTaskIds | ForEach-Object { [string]$_ })) -or
             [string]::Join(",", @($acknowledgement.otherTaskIds | ForEach-Object { [string]$_ })) -cne
                 [string]::Join(",", @($target.otherTaskIds | ForEach-Object { [string]$_ }))) {
             throw "Ticket 06 task-removal acknowledgement and screenshot do not match the exact registered Recents target."
         }
         $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
         $script:taskRemovalHumanGate = Get-Content -LiteralPath $gatePath -Raw | ConvertFrom-Json -ErrorAction Stop
+        $gateCreatedAt = [DateTimeOffset]::Parse([string]$script:taskRemovalHumanGate.gateCreatedAtUtc)
+        $absenceAt = [DateTimeOffset]::Parse([string]$absence.observedAtUtc)
+        $acknowledgedAt = [DateTimeOffset]::Parse([string]$acknowledgement.acknowledgedAtUtc)
+        if ($absenceAt -lt $gateCreatedAt -or $acknowledgedAt -lt $absenceAt -or $acknowledgedAt -gt $gateCreatedAt.AddMinutes(30)) {
+            throw "Ticket 06 task-removal absence and acknowledgement timestamps are outside their required order or 30-minute deadline."
+        }
+        if (-not $script:taskRemovalAbsenceNoticeDisplayed) {
+            throw "Ticket 06 completed without the host observing the exact task absent before acknowledgement."
+        }
+        $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservation -Value $absence -Force
+        $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservedAtUtc -Value ([string]$absence.observedAtUtc) -Force
+        Write-JsonFile $script:taskRemovalHumanGate $gatePath
     }
     Write-JsonFile $result $resultPath
     [void]$instrumentationResults.Add([pscustomobject]@{ phase = $Phase; resultPath = $resultPath; filteredOutputPath = $filteredPath; transportPath = $transportPath })

@@ -374,6 +374,8 @@ function Assert-Ticket06TaskRemovalEvidence {
     $actualOtherTaskIds = @($task.otherTaskIdsAfterRemoval | ForEach-Object { [string]$_ })
     $hostGate = $Evidence.taskRemovalHostGate
     $fixtureTarget = $Evidence.fixture.ticket06TaskRemovalTarget
+    $fixtureGate = $Evidence.fixture.ticket06TaskRemovalGate
+    $fixtureAbsence = $Evidence.fixture.ticket06TaskRemovalAbsence
     $fixtureAcknowledgement = $Evidence.fixture.ticket06TaskRemovalAcknowledgement
     $userAcknowledgement = $task.userAcknowledgement
     $screenshotPath = [string]$hostGate.screenshotPath
@@ -388,17 +390,70 @@ function Assert-Ticket06TaskRemovalEvidence {
     }
     $acknowledgementTimestamp = $null
     try { $acknowledgementTimestamp = [DateTimeOffset]::Parse([string]$fixtureAcknowledgement.acknowledgedAtUtc) } catch { }
+    $hostGateCaptureTimestamp = $null
+    $gateCreatedTimestamp = $null
+    $fixtureGateCaptureTimestamp = $null
+    $fixtureGateCreatedTimestamp = $null
+    $observerGateCreatedTimestamp = $null
+    $taskAbsenceTimestamp = $null
+    $hostAbsenceTimestamp = $null
+    $hostAbsenceEventTimestamp = $null
+    $fixtureAbsenceTimestamp = $null
+    try { $hostGateCaptureTimestamp = [DateTimeOffset]::Parse([string]$hostGate.capturedAtUtc) } catch { }
+    try { $gateCreatedTimestamp = [DateTimeOffset]::Parse([string]$hostGate.gateCreatedAtUtc) } catch { }
+    try { $fixtureGateCaptureTimestamp = [DateTimeOffset]::Parse([string]$fixtureGate.hostCapturedAtUtc) } catch { }
+    try { $fixtureGateCreatedTimestamp = [DateTimeOffset]::Parse([string]$fixtureGate.createdAtUtc) } catch { }
+    try { $observerGateCreatedTimestamp = [DateTimeOffset]::Parse([string]$task.gateCreatedAtUtc) } catch { }
+    try { $taskAbsenceTimestamp = [DateTimeOffset]::Parse([string]$task.taskAbsentObservedAtUtc) } catch { }
+    try { $hostAbsenceTimestamp = [DateTimeOffset]::Parse([string]$hostGate.taskAbsentObservedAtUtc) } catch { }
+    try { $hostAbsenceEventTimestamp = [DateTimeOffset]::Parse([string]$hostGate.taskAbsentObservation.observedAtUtc) } catch { }
+    try { $fixtureAbsenceTimestamp = [DateTimeOffset]::Parse([string]$fixtureAbsence.observedAtUtc) } catch { }
+    $gateTimelineValid = $null -ne $hostGateCaptureTimestamp -and
+        $null -ne $gateCreatedTimestamp -and $null -ne $fixtureGateCaptureTimestamp -and $null -ne $fixtureGateCreatedTimestamp -and
+        $null -ne $observerGateCreatedTimestamp -and $null -ne $taskAbsenceTimestamp -and $null -ne $hostAbsenceTimestamp -and
+        $null -ne $hostAbsenceEventTimestamp -and $null -ne $fixtureAbsenceTimestamp -and
+        $null -ne $acknowledgementTimestamp -and
+        $hostGateCaptureTimestamp -eq $fixtureGateCaptureTimestamp -and $hostGateCaptureTimestamp -le $gateCreatedTimestamp -and
+        $gateCreatedTimestamp -eq $fixtureGateCreatedTimestamp -and $fixtureGateCreatedTimestamp -eq $observerGateCreatedTimestamp -and
+        $fixtureGateCreatedTimestamp -le $fixtureAbsenceTimestamp -and
+        $fixtureAbsenceTimestamp -eq $taskAbsenceTimestamp -and $fixtureAbsenceTimestamp -eq $hostAbsenceTimestamp -and
+        $fixtureAbsenceTimestamp -eq $hostAbsenceEventTimestamp -and
+        $fixtureAbsenceTimestamp -le $acknowledgementTimestamp -and
+        $acknowledgementTimestamp -le $fixtureGateCreatedTimestamp.AddMinutes(30)
+    $hostLabelObservedProperty = $hostGate.PSObject.Properties['recentsCardLabelObserved']
+    $hostLabelProperty = $hostGate.PSObject.Properties['recentsCardLabel']
+    $hostLabelWindowProperty = $hostGate.PSObject.Properties['recentsLabelWindowPackage']
+    $taskLabelObservedProperty = $task.PSObject.Properties['recentsViewLabelObserved']
+    $taskLabelProperty = $task.PSObject.Properties['recentsCardLabel']
+    $taskLabelWindowProperty = $task.PSObject.Properties['recentsLabelWindowPackage']
+    $fixtureLabelObservedProperty = $fixtureTarget.PSObject.Properties['recentsCardLabelObserved']
+    $fixtureLabelProperty = $fixtureTarget.PSObject.Properties['recentsCardLabel']
+    $fixtureLabelWindowProperty = $fixtureTarget.PSObject.Properties['recentsLabelWindowPackage']
+    $labelFieldsPresent = $null -ne $hostLabelObservedProperty -and $null -ne $hostLabelProperty -and $null -ne $hostLabelWindowProperty -and
+        $null -ne $taskLabelObservedProperty -and $null -ne $taskLabelProperty -and $null -ne $taskLabelWindowProperty -and
+        $null -ne $fixtureLabelObservedProperty -and $null -ne $fixtureLabelProperty -and $null -ne $fixtureLabelWindowProperty
     $labelObservationValid = if ($hostGate.recentsCardLabelObserved -is [bool] -and $hostGate.recentsCardLabelObserved) {
-        [string]$hostGate.recentsCardLabel -ceq [string]$hostGate.expectedAppLabel -and
+        $labelFieldsPresent -and
+            $task.recentsViewLabelObserved -is [bool] -and $task.recentsViewLabelObserved -and
+            $fixtureTarget.recentsCardLabelObserved -is [bool] -and $fixtureTarget.recentsCardLabelObserved -and
+            [string]$hostGate.recentsCardLabel -ceq [string]$hostGate.expectedAppLabel -and
+            [string]$task.recentsCardLabel -ceq [string]$hostGate.recentsCardLabel -and
+            [string]$fixtureTarget.recentsCardLabel -ceq [string]$hostGate.recentsCardLabel -and
             -not [string]::IsNullOrWhiteSpace([string]$hostGate.recentsLabelWindowPackage) -and
-            [string]$hostGate.recentsLabelWindowPackage -cne 'com.example.todoschooltime.debug'
+            [string]$hostGate.recentsLabelWindowPackage -cne 'com.example.todoschooltime.debug' -and
+            [string]$task.recentsLabelWindowPackage -ceq [string]$hostGate.recentsLabelWindowPackage -and
+            [string]$fixtureTarget.recentsLabelWindowPackage -ceq [string]$hostGate.recentsLabelWindowPackage
     } else {
-        $hostGate.recentsCardLabelObserved -is [bool] -and
+        $labelFieldsPresent -and
+            $hostGate.recentsCardLabelObserved -is [bool] -and -not $hostGate.recentsCardLabelObserved -and
+            $task.recentsViewLabelObserved -is [bool] -and -not $task.recentsViewLabelObserved -and
+            $fixtureTarget.recentsCardLabelObserved -is [bool] -and -not $fixtureTarget.recentsCardLabelObserved -and
             $null -eq $hostGate.recentsCardLabel -and
             $null -eq $hostGate.recentsLabelWindowPackage -and
-            -not $task.recentsViewLabelObserved -and
             $null -eq $task.recentsCardLabel -and
-            $null -eq $task.recentsLabelWindowPackage
+            $null -eq $task.recentsLabelWindowPackage -and
+            $null -eq $fixtureTarget.recentsCardLabel -and
+            $null -eq $fixtureTarget.recentsLabelWindowPackage
     }
     $acknowledgementBody = $hostGate.acknowledgementBody
     $manualGateValid = $taskRemovalMechanism -ceq 'actual Recents dismissal by user' -and
@@ -412,7 +467,8 @@ function Assert-Ticket06TaskRemovalEvidence {
         $task.taskPresentBeforeUserDismissal -is [bool] -and $task.taskPresentBeforeUserDismissal -and
         $task.taskAbsentAfterRemoval -is [bool] -and $task.taskAbsentAfterRemoval -and
         $task.userAcknowledged -is [bool] -and $task.userAcknowledged -and $task.taskAbsentObservedAtElapsedRealtimeMs -gt 0 -and
-        $task.taskAbsentObservedBeforeAcknowledgement -is [bool] -and
+        $task.taskAbsentObservedBeforeAcknowledgement -is [bool] -and $task.taskAbsentObservedBeforeAcknowledgement -and
+        $gateTimelineValid -and
         $task.otherTasksUnchanged -and
         [string]$task.taskComponent -ceq $expectedTaskComponent -and
         [int]$task.taskId -gt 0 -and
@@ -433,9 +489,6 @@ function Assert-Ticket06TaskRemovalEvidence {
         [int]$fixtureTarget.taskId -eq [int]$task.taskId -and
         [string]$fixtureTarget.taskComponent -ceq [string]$task.taskComponent -and
         [string]$fixtureTarget.expectedAppLabel -ceq [string]$hostGate.expectedAppLabel -and
-        [bool]$fixtureTarget.recentsCardLabelObserved -eq [bool]$hostGate.recentsCardLabelObserved -and
-        [string]$fixtureTarget.recentsCardLabel -ceq [string]$hostGate.recentsCardLabel -and
-        [string]$fixtureTarget.recentsLabelWindowPackage -ceq [string]$hostGate.recentsLabelWindowPackage -and
         [string]$fixtureTarget.screenshotSha256 -ceq $screenshotSha256 -and
         [string]::Join(',', @($fixtureTarget.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
         [string]$fixtureAcknowledgement.runId -ceq $RunId -and
@@ -443,7 +496,19 @@ function Assert-Ticket06TaskRemovalEvidence {
         [string]$fixtureAcknowledgement.taskComponent -ceq [string]$task.taskComponent -and
         [string]$fixtureAcknowledgement.screenshotSha256 -ceq $screenshotSha256 -and
         [string]$fixtureAcknowledgement.confirmedAppLabel -ceq [string]$hostGate.expectedAppLabel -and
+        [string]$fixtureGate.runId -ceq $RunId -and
+        [int]$fixtureGate.taskId -eq [int]$task.taskId -and
+        [string]$fixtureGate.taskComponent -ceq [string]$task.taskComponent -and
+        [string]$fixtureGate.screenshotSha256 -ceq $screenshotSha256 -and
+        [string]$fixtureAbsence.runId -ceq $RunId -and
+        [int]$fixtureAbsence.taskId -eq [int]$task.taskId -and
+        [string]$fixtureAbsence.taskComponent -ceq [string]$task.taskComponent -and
+        [string]$hostGate.taskAbsentObservation.runId -ceq [string]$fixtureAbsence.runId -and
+        [int]$hostGate.taskAbsentObservation.taskId -eq [int]$fixtureAbsence.taskId -and
+        [string]$hostGate.taskAbsentObservation.taskComponent -ceq [string]$fixtureAbsence.taskComponent -and
+        [string]::Join(',', @($hostGate.taskAbsentObservation.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
         [string]::Join(',', @($fixtureAcknowledgement.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
+        [string]::Join(',', @($fixtureAbsence.otherTaskIds | ForEach-Object { [string]$_ })) -ceq [string]::Join(',', $expectedOtherTaskIds) -and
         [string]$userAcknowledgement.runId -ceq [string]$fixtureAcknowledgement.runId -and
         [int]$userAcknowledgement.taskId -eq [int]$fixtureAcknowledgement.taskId -and
         [string]$userAcknowledgement.taskComponent -ceq [string]$fixtureAcknowledgement.taskComponent -and
@@ -473,13 +538,14 @@ function Assert-Ticket06TaskRemovalEvidence {
         throw 'Ticket 06 task-removal case did not preserve the registered child, target counts, and explicit one-minute interval.'
     }
 
-    $clientDelta = [long]$observer.cadence.nextCycleSigninElapsedRealtimeMs - [long]$observer.cadence.baselineSigninElapsedRealtimeMs
-    if ($clientDelta -ne [long]$observer.cadence.clientDeltaMs -or
-        $clientDelta -lt ([long]$observer.interval.minutes * 60000L) -or
-        $clientDelta -ge ([long]($observer.interval.minutes + 2) * 60000L) -or
-        [long]$observer.cadence.serverDeltaMs -le 0 -or
-        [Math]::Abs($clientDelta - [long]$observer.cadence.serverDeltaMs) -ge 5000L) {
-        throw 'Ticket 06 task-removal cadence does not match actual client elapsed-realtime and fixture server monotonic dispatches.'
+    $eligibleForegroundElapsed = [long]$observer.cadence.eligibleForegroundElapsedRealtimeMs
+    $cycleSigninElapsed = [long]$observer.cadence.postRemovalCycleSigninElapsedRealtimeMs
+    $eligibleCycleDelay = $cycleSigninElapsed - $eligibleForegroundElapsed
+    if ($eligibleForegroundElapsed -le 0 -or $eligibleCycleDelay -lt 0 -or
+        $eligibleCycleDelay -ne [long]$observer.cadence.postRemovalCycleDelayMs -or
+        [long]$observer.cadence.maximumEligibleCycleDelayMs -ne 90000L -or
+        $eligibleCycleDelay -gt [long]$observer.cadence.maximumEligibleCycleDelayMs) {
+        throw 'Ticket 06 task-removal Hangeul cycle did not start in order within 90 seconds of its actual foreground eligibility event.'
     }
 
     $serviceBefore = $Evidence.serviceState.beforeTaskRemoval
