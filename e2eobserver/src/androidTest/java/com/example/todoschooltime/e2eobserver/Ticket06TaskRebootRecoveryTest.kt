@@ -382,9 +382,11 @@ class Ticket06TaskRebootRecoveryTest {
             launchActualSubjectApp(context, HANGEUL_APP_PACKAGE)
             waitForActualForegroundAndConnectedService(automation, context, foregroundCursor, HANGEUL_APP_PACKAGE)
         }
+        val completionCursor = firstPostBootCycle.last().getLong("sequence")
         val completedFixture = awaitFixtureState(apiBaseUrl, runId, CADENCE_TIMEOUT_MS) { snapshot ->
-            val requests = snapshot.getJSONArray("requests").objects()
-            requests.any { it.getLong("sequence") > firstPostBootCycle.last().getLong("sequence") && it.getString("path") == HANGEUL_REPORT_PATH && it.optInt("servedReportCount", -1) == TARGET_HANGEUL }
+            eligibleHangeulCycleAfter(snapshot.getJSONArray("requests").objects(), completionCursor)
+                ?.lastOrNull()
+                ?.optInt("servedReportCount", -1) == TARGET_HANGEUL
         }
         val completed = waitForProductState(context, CADENCE_TIMEOUT_MS) {
             val notification = it.getJSONArray("notificationEvents").objects().any { event ->
@@ -403,10 +405,26 @@ class Ticket06TaskRebootRecoveryTest {
             ?: throw AssertionError("The baseline status notification was not present after the new completion")
         assertTrue("The updated notification must show the new completion", activeCompletionNotification.optString("bigText").contains("$TARGET_HANGEUL/$TARGET_HANGEUL"))
 
-        val completionCycle = fullCycleAfter(completedFixture.getJSONArray("requests").objects(), firstPostBootCycle.last().getLong("sequence"))
-            ?: throw AssertionError("The later Hangeul achievement did not follow a full eligible request cycle")
+        val completedFixtureRequests = completedFixture.getJSONArray("requests").objects()
+        val completionCycle = eligibleHangeulCycleAfter(completedFixtureRequests, completionCursor)
+            ?: throw AssertionError("The later Hangeul achievement did not follow one exact five-request eligible cycle")
+        assertSuccessfulFakeFixtureRequests(
+            completionCycle,
+            JSONObject().put("hangeul", TARGET_HANGEUL),
+            Ticket06EligibleSubjectCycle.HANGEUL_PATHS,
+        )
         val postBootBaselineSignin = firstSigninDispatchAfter(state, 0L)
         val completionSignin = firstSigninDispatchForPackageAfter(completed, HANGEUL_APP_PACKAGE, postBootBaselineSignin.getLong("elapsedRealtimeMs"))
+        val allCompletionDispatches = completed.getJSONArray("httpRequestDispatchEvents").objects()
+        val completionDispatchCycle = eligibleHangeulCycleAfter(
+            allCompletionDispatches,
+            completionSignin.getLong("sequence") - 1L,
+        ) ?: throw AssertionError("The later Hangeul achievement did not dispatch one exact five-request eligible cycle")
+        completionDispatchCycle.forEach { event ->
+            assertEquals(HANGEUL_APP_PACKAGE, event.getString("foregroundPackage"))
+            assertTrue("The actual monitor lease was absent at dispatch $event", event.getBoolean("serviceLeaseAttached"))
+            assertTrue("The eligible foreground event followed dispatch $event", event.getLong("foregroundEventElapsedRealtimeMs") <= event.getLong("elapsedRealtimeMs"))
+        }
         val bootDispatches = state.getJSONArray("httpRequestDispatchEvents").objects()
         val fixturePathCounts = firstPostBootCycle.groupingBy { it.getString("path") }.eachCount()
         val dispatchPathCounts = bootDispatches.groupingBy { it.getString("path") }.eachCount()
@@ -447,6 +465,12 @@ class Ticket06TaskRebootRecoveryTest {
             .put("foreground", JSONObject()
                 .put("packageName", completionSignin.getString("foregroundPackage"))
                 .put("eligibleRequests", completionCycle.size)
+                .put("requestPaths", JSONArray(completionCycle.map { it.getString("path") }))
+                .put("responseStatuses", JSONArray(completionCycle.map { it.getInt("responseStatus") }))
+                .put("servedReportCounts", JSONArray(completionCycle.filter { it.getString("path") in REPORT_PATHS }.map { it.getInt("servedReportCount") }))
+                .put("dispatchPaths", JSONArray(completionDispatchCycle.map { it.getString("path") }))
+                .put("dispatchForegroundPackages", JSONArray(completionDispatchCycle.map { it.getString("foregroundPackage") }))
+                .put("dispatchServiceLeases", JSONArray(completionDispatchCycle.map { it.getBoolean("serviceLeaseAttached") }))
                 .put("actualLeaseAttachedAtDispatch", completionSignin.getBoolean("serviceLeaseAttached")))
             .put("postBootRequestPaths", JSONArray(firstPostBootCycle.map { it.getString("path") }))
             .put("productAlertSoundOrHeadsUpTested", false)
@@ -518,8 +542,12 @@ class Ticket06TaskRebootRecoveryTest {
 
     private fun baselineCounts() = JSONObject().put("hangeul", 2).put("math", TARGET_MATH).put("english", 7)
 
-    private fun assertSuccessfulFakeFixtureRequests(requests: List<JSONObject>, counts: JSONObject) {
-        assertEquals(EXPECTED_PATHS, requests.map { it.getString("path") })
+    private fun assertSuccessfulFakeFixtureRequests(
+        requests: List<JSONObject>,
+        counts: JSONObject,
+        expectedPaths: List<String> = EXPECTED_PATHS,
+    ) {
+        assertEquals(expectedPaths, requests.map { it.getString("path") })
         requests.forEach { request ->
             assertEquals("POST", request.getString("method"))
             assertEquals(200, request.getInt("responseStatus"))
@@ -579,6 +607,22 @@ class Ticket06TaskRebootRecoveryTest {
         state.getJSONArray("httpRequestDispatchEvents").objects().firstOrNull {
             it.optString("path") == SIGN_IN_PATH && it.optString("foregroundPackage") == packageName && it.optLong("elapsedRealtimeMs") > elapsedAfter
         } ?: throw AssertionError("No actual eligible $packageName sign-in dispatch followed the requested cycle")
+
+    private fun eligibleHangeulCycleAfter(requests: List<JSONObject>, afterSequence: Long): List<JSONObject>? {
+        val bySequence = requests.associateBy { it.getLong("sequence") }
+        val cycle = findFirstExactTicket06RequestCycleAfter(
+            requests = requests.map { request ->
+                Ticket06RequestPathEvidence(
+                    sequence = request.getLong("sequence"),
+                    path = request.getString("path"),
+                )
+            },
+            afterSequence = afterSequence,
+            expectedPaths = Ticket06EligibleSubjectCycle.HANGEUL_PATHS,
+        ) ?: return null
+        if (cycle.any { it.sequence !in bySequence }) return null
+        return cycle.map { bySequence.getValue(it.sequence) }
+    }
 
     private fun fullCycleAfter(requests: List<JSONObject>, afterSequence: Long): List<JSONObject>? {
         val later = requests.filter { it.optLong("sequence") > afterSequence }.sortedBy { it.getLong("sequence") }

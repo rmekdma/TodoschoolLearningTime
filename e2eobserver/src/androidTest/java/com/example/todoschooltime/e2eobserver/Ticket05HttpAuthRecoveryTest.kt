@@ -961,13 +961,7 @@ class Ticket05HttpAuthRecoveryTest {
             MATH_REPORT_PATH,
             ENGLISH_REPORT_PATH,
         )
-        val REGULAR_HANGEUL_PATHS = listOf(
-            SIGN_IN_PATH,
-            HANGEUL_CATALOG_PATH,
-            MATH_CATALOG_PATH,
-            ENGLISH_CATALOG_PATH,
-            HANGEUL_REPORT_PATH,
-        )
+        val REGULAR_HANGEUL_PATHS = Ticket06EligibleSubjectCycle.HANGEUL_PATHS
         val REGULAR_ENGLISH_PATHS = listOf(
             SIGN_IN_PATH,
             HANGEUL_CATALOG_PATH,

@@ -185,7 +185,23 @@ $post = [pscustomobject]@{
     interval = [pscustomobject]@{ minutes = 1; persistedExplicitly = $true }
     baseline = [pscustomobject]@{ complete = $true; successfulSubjects = 3; alreadyCompleteSubjects = @("수학"); completionAlertRequested = $false }
     laterCompletion = [pscustomobject]@{ subject = "한글"; completionAlertRequested = $true; notificationIdReused = $true; notificationManagerCallReturned = $true }
-    foreground = [pscustomobject]@{ packageName = "com.enuma.todohangeul"; eligibleRequests = 4; actualLeaseAttachedAtDispatch = $true }
+    foreground = [pscustomobject]@{
+        packageName = "com.enuma.todohangeul"
+        eligibleRequests = 5
+        requestPaths = @(
+            "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
+            "/v3/todoschool/report/daily/hangeul"
+        )
+        responseStatuses = @(200, 200, 200, 200, 200)
+        servedReportCounts = @(6)
+        dispatchPaths = @(
+            "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
+            "/v3/todoschool/report/daily/hangeul"
+        )
+        dispatchForegroundPackages = @("com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul")
+        dispatchServiceLeases = @($true, $true, $true, $true, $true)
+        actualLeaseAttachedAtDispatch = $true
+    }
 }
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $diagnosticsProducerSource = Get-Content -LiteralPath (Join-Path $repositoryRoot "app/src/debug/java/com/example/todoschooltime/LearningMonitorDiagnosticsProvider.kt") -Raw
@@ -364,6 +380,53 @@ Assert-Ticket06BootRejected "manual product Activity launch" $bootValidSeed $man
 $earlyCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
 $earlyCycleCandidate.postReboot.baseline.fixtureRequestStartSequence = 20
 Assert-Ticket06BootRejected "post-boot cycle before the pre-reboot fixture cursor" $bootValidSeed $earlyCycleCandidate "did not follow the pre-reboot fixture cursor"
+
+$eligibleCycleMessage = "exact five-request Hangeul foreground cycle"
+$wrongSubjectCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
+$wrongSubjectPaths = @($wrongSubjectCycleCandidate.postReboot.foreground.requestPaths)
+$wrongSubjectPaths[-1] = "/v3/todoschool/report/daily/english"
+$wrongSubjectCycleCandidate.postReboot.foreground.requestPaths = $wrongSubjectPaths
+Assert-Ticket06BootRejected "eligible foreground cycle for the wrong subject" $bootValidSeed $wrongSubjectCycleCandidate $eligibleCycleMessage
+
+$wrongOrderCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
+$wrongOrderPaths = @($wrongOrderCycleCandidate.postReboot.foreground.requestPaths)
+$wrongOrderPaths[1], $wrongOrderPaths[2] = $wrongOrderPaths[2], $wrongOrderPaths[1]
+$wrongOrderCycleCandidate.postReboot.foreground.requestPaths = $wrongOrderPaths
+Assert-Ticket06BootRejected "eligible foreground cycle with requests out of order" $bootValidSeed $wrongOrderCycleCandidate $eligibleCycleMessage
+
+$missingCycleRequestCandidate = Copy-Ticket06TestObject $bootValidSeed
+$missingCycleRequestCandidate.postReboot.foreground.requestPaths = @($bootValidSeed.postReboot.foreground.requestPaths | Select-Object -First 4)
+$missingCycleRequestCandidate.postReboot.foreground.eligibleRequests = 4
+Assert-Ticket06BootRejected "eligible foreground cycle missing a request" $bootValidSeed $missingCycleRequestCandidate $eligibleCycleMessage
+
+$extraCycleRequestCandidate = Copy-Ticket06TestObject $bootValidSeed
+$extraCycleRequestCandidate.postReboot.foreground.requestPaths = @($bootValidSeed.postReboot.foreground.requestPaths) + "/v3/todoschool/report/daily/math"
+$extraCycleRequestCandidate.postReboot.foreground.eligibleRequests = 6
+Assert-Ticket06BootRejected "eligible foreground cycle with an extra request" $bootValidSeed $extraCycleRequestCandidate $eligibleCycleMessage
+
+$wrongDispatchCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
+$wrongDispatchPaths = @($wrongDispatchCycleCandidate.postReboot.foreground.dispatchPaths)
+$wrongDispatchPaths[-1] = "/v3/todoschool/report/daily/english"
+$wrongDispatchCycleCandidate.postReboot.foreground.dispatchPaths = $wrongDispatchPaths
+Assert-Ticket06BootRejected "eligible dispatch cycle for the wrong subject" $bootValidSeed $wrongDispatchCycleCandidate $eligibleCycleMessage
+
+$wrongSourceCycleCandidate = Copy-Ticket06TestObject $bootValidSeed
+$wrongSourcePackages = @($wrongSourceCycleCandidate.postReboot.foreground.dispatchForegroundPackages)
+$wrongSourcePackages[2] = "com.example.todoschooltime.debug"
+$wrongSourceCycleCandidate.postReboot.foreground.dispatchForegroundPackages = $wrongSourcePackages
+Assert-Ticket06BootRejected "eligible dispatch cycle attributed to a non-Todo package" $bootValidSeed $wrongSourceCycleCandidate $eligibleCycleMessage
+
+$failedFixtureResponseCandidate = Copy-Ticket06TestObject $bootValidSeed
+$failedFixtureResponseCandidate.postReboot.foreground.responseStatuses = @(200, 200, 500, 200, 200)
+Assert-Ticket06BootRejected "eligible fixture cycle with a failed server response" $bootValidSeed $failedFixtureResponseCandidate $eligibleCycleMessage
+
+$wrongServedReportCountCandidate = Copy-Ticket06TestObject $bootValidSeed
+$wrongServedReportCountCandidate.postReboot.foreground.servedReportCounts = @(5)
+Assert-Ticket06BootRejected "eligible fixture cycle with a wrong served report count" $bootValidSeed $wrongServedReportCountCandidate $eligibleCycleMessage
+
+$failedMonitorLeaseCandidate = Copy-Ticket06TestObject $bootValidSeed
+$failedMonitorLeaseCandidate.postReboot.foreground.dispatchServiceLeases = @($true, $true, $false, $true, $true)
+Assert-Ticket06BootRejected "eligible dispatch cycle without the real monitor lease" $bootValidSeed $failedMonitorLeaseCandidate $eligibleCycleMessage
 
 $taskRemovalRemainsSeparate = $bootEvidence | Get-Member -Name taskRemovalMechanism -ErrorAction SilentlyContinue
 if ($null -ne $taskRemovalRemainsSeparate) { throw "Ticket 06 reboot-only summary falsely claimed a task-removal mechanism." }

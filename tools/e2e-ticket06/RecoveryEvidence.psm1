@@ -292,10 +292,33 @@ function Assert-Ticket06BootRecoveryEvidence {
         (ConvertTo-Json -InputObject $Preparation.targets -Compress -Depth 4)) {
         throw 'Ticket 06 reboot-only registration, target counts, or explicitly saved common interval changed across reboot.'
     }
+    $expectedHangeulCyclePaths = @(
+        '/v3/account/signin', '/v3/todohangeul/user', '/v3/math/user', '/v3/english/user',
+        '/v3/todoschool/report/daily/hangeul'
+    )
+    $actualEligibleRequestPaths = @($PostReboot.foreground.requestPaths | ForEach-Object { [string]$_ })
+    $actualResponseStatuses = @($PostReboot.foreground.responseStatuses | ForEach-Object { [int]$_ })
+    $actualServedReportCounts = @($PostReboot.foreground.servedReportCounts | ForEach-Object { [int]$_ })
+    $actualEligibleDispatchPaths = @($PostReboot.foreground.dispatchPaths | ForEach-Object { [string]$_ })
+    $actualDispatchPackages = @($PostReboot.foreground.dispatchForegroundPackages | ForEach-Object { [string]$_ })
+    $actualDispatchLeases = @($PostReboot.foreground.dispatchServiceLeases)
+    $expectedDispatchPackages = @('com.enuma.todohangeul', 'com.enuma.todohangeul', 'com.enuma.todohangeul', 'com.enuma.todohangeul', 'com.enuma.todohangeul')
+    $dispatchLeasesAreExplicitlyTrue = $actualDispatchLeases.Count -eq $expectedHangeulCyclePaths.Count -and
+        @($actualDispatchLeases | Where-Object { $_ -isnot [bool] -or -not $_ }).Count -eq 0
     if ($PostReboot.foreground.packageName -cne 'com.enuma.todohangeul' -or
-        [int]$PostReboot.foreground.eligibleRequests -lt 1 -or
+        [int]$PostReboot.foreground.eligibleRequests -ne $expectedHangeulCyclePaths.Count -or
+        $actualEligibleRequestPaths.Count -ne $expectedHangeulCyclePaths.Count -or
+        [string]::Join("`n", $actualEligibleRequestPaths) -cne [string]::Join("`n", $expectedHangeulCyclePaths) -or
+        $actualResponseStatuses.Count -ne $expectedHangeulCyclePaths.Count -or
+        @($actualResponseStatuses | Where-Object { $_ -ne 200 }).Count -ne 0 -or
+        $actualServedReportCounts.Count -ne 1 -or [int]$actualServedReportCounts[0] -ne [int]$PostReboot.targets.hangeul -or
+        $actualEligibleDispatchPaths.Count -ne $expectedHangeulCyclePaths.Count -or
+        [string]::Join("`n", $actualEligibleDispatchPaths) -cne [string]::Join("`n", $expectedHangeulCyclePaths) -or
+        $actualDispatchPackages.Count -ne $expectedHangeulCyclePaths.Count -or
+        [string]::Join("`n", $actualDispatchPackages) -cne [string]::Join("`n", $expectedDispatchPackages) -or
+        -not $dispatchLeasesAreExplicitlyTrue -or
         -not $PostReboot.foreground.actualLeaseAttachedAtDispatch) {
-        throw 'Ticket 06 reboot-only case did not prove an eligible real Todo foreground request with the actual service lease.'
+        throw 'Ticket 06 reboot-only case did not prove the exact five-request Hangeul foreground cycle with the actual service lease.'
     }
     if ($PostReboot.laterCompletion.subject -cne '한글' -or
         -not $PostReboot.laterCompletion.completionAlertRequested -or
