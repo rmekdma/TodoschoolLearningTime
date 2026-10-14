@@ -566,7 +566,7 @@ function Assert-Ticket06TaskRemovalEvidence {
     }
 
     $baselineEndSequence = [long]$observer.baseline.fixtureRequestEndSequence
-    $postRemovalStartSequence = [long]$task.postRemovalFixtureRequestStartSequence
+    $postRemovalStartSequence = [long]$observer.postRemovalFixtureRequestStartSequence
     $postRemovalCycle = @($Evidence.fixture.requests |
         Where-Object { [long]$_.sequence -ge $postRemovalStartSequence -and [long]$_.sequence -lt ($postRemovalStartSequence + 5L) } |
         Sort-Object { [long]$_.sequence })
@@ -580,11 +580,11 @@ function Assert-Ticket06TaskRemovalEvidence {
         $cycleResponsesSuccessful = @($postRemovalCycle | Where-Object { [int]$_.responseStatus -ne 200 }).Count -eq 0 -and
             [int]$postRemovalCycle[-1].servedReportCount -eq 2
     }
-    $dispatchForegroundPackages = @($task.postRemovalDispatchForegroundPackages | ForEach-Object { [string]$_ })
-    $dispatchServiceLeases = @($task.postRemovalDispatchServiceLeases | ForEach-Object { $_ })
-    $postRemovalDispatchPaths = @($task.postRemovalDispatchPaths | ForEach-Object { [string]$_ })
-    $postRemovalDispatchSequences = @($task.postRemovalDispatchSequences | ForEach-Object { [long]$_ })
-    $expectedPostRemovalDispatchSequences = @((0..4) | ForEach-Object { [long]$task.postRemovalDispatchStartSequence + [long]$_ })
+    $dispatchForegroundPackages = @($observer.postRemovalDispatchForegroundPackages | ForEach-Object { [string]$_ })
+    $dispatchServiceLeases = @($observer.postRemovalDispatchServiceLeases | ForEach-Object { $_ })
+    $postRemovalDispatchPaths = @($observer.postRemovalDispatchPaths | ForEach-Object { [string]$_ })
+    $postRemovalDispatchSequences = @($observer.postRemovalDispatchSequences | ForEach-Object { [long]$_ })
+    $expectedPostRemovalDispatchSequences = @((0..4) | ForEach-Object { [long]$observer.postRemovalDispatchStartSequence + [long]$_ })
     if ($Evidence.fixture.runId -cne $RunId -or $Evidence.fixture.scenario -cne 'ticket06' -or
         $baselineEndSequence -lt 1 -or
         $postRemovalStartSequence -le $baselineEndSequence -or
@@ -594,11 +594,11 @@ function Assert-Ticket06TaskRemovalEvidence {
         [string]::Join("`n", $postRemovalPaths) -cne [string]::Join("`n", $expectedPaths) -or
         [string]::Join("`n", $postRemovalPathsFromFixture) -cne [string]::Join("`n", $postRemovalPaths) -or
         -not $cycleResponsesSuccessful -or
-        [string]$task.postRemovalForegroundPackage -cne 'com.enuma.todohangeul' -or
-        -not $task.postRemovalServiceLeaseAttachedAtDispatch -or
+        [string]$observer.postRemovalForegroundPackage -cne 'com.enuma.todohangeul' -or
+        -not $observer.postRemovalServiceLeaseAttachedAtDispatch -or
         [string]$observer.cadence.foregroundPackage -cne 'com.enuma.todohangeul' -or
         -not $observer.cadence.serviceLeaseAttachedAtDispatch -or
-        [long]$task.postRemovalDispatchStartSequence -lt 1 -or
+        [long]$observer.postRemovalDispatchStartSequence -lt 1 -or
         [string]::Join(',', $postRemovalDispatchSequences) -cne [string]::Join(',', $expectedPostRemovalDispatchSequences) -or
         [string]::Join("`n", $postRemovalDispatchPaths) -cne [string]::Join("`n", $expectedPaths) -or
         $dispatchForegroundPackages.Count -ne 5 -or

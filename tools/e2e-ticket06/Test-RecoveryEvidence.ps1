@@ -277,17 +277,6 @@ $pre = [pscustomobject]@{
         otherTaskIdsAfterRemoval = @(1220)
         taskAbsentAfterRemoval = $true
         forceStopUsed = $false
-        postRemovalFixtureRequestStartSequence = 8
-        postRemovalDispatchStartSequence = 8
-        postRemovalDispatchSequences = @(8, 9, 10, 11, 12)
-        postRemovalForegroundPackage = "com.enuma.todohangeul"
-        postRemovalServiceLeaseAttachedAtDispatch = $true
-        postRemovalDispatchPaths = @(
-            "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
-            "/v3/todoschool/report/daily/hangeul"
-        )
-        postRemovalDispatchForegroundPackages = @("com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul")
-        postRemovalDispatchServiceLeases = @($true, $true, $true, $true, $true)
     }
     registration = @("테스트 아이")
     targets = [pscustomobject]@{ hangeul = 6; math = 5; english = 8 }
@@ -306,6 +295,17 @@ $pre = [pscustomobject]@{
         "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
         "/v3/todoschool/report/daily/hangeul"
     )
+    postRemovalFixtureRequestStartSequence = 8
+    postRemovalDispatchStartSequence = 8
+    postRemovalDispatchSequences = @(8, 9, 10, 11, 12)
+    postRemovalForegroundPackage = "com.enuma.todohangeul"
+    postRemovalServiceLeaseAttachedAtDispatch = $true
+    postRemovalDispatchPaths = @(
+        "/v3/account/signin", "/v3/todohangeul/user", "/v3/math/user", "/v3/english/user",
+        "/v3/todoschool/report/daily/hangeul"
+    )
+    postRemovalDispatchForegroundPackages = @("com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul", "com.enuma.todohangeul")
+    postRemovalDispatchServiceLeases = @($true, $true, $true, $true, $true)
 }
 $post = [pscustomobject]@{
     runId = $runId
@@ -775,10 +775,37 @@ $unanchoredTaskFixture = Copy-Ticket06TestObject $taskEvidence
 $unanchoredTaskFixture.fixture.requests[7].sequence = 9
 Assert-Ticket06TaskRejected "a fixture cycle with a missing sequence" $taskEvidence $unanchoredTaskFixture "does not prove one successful exact five-request Hangeul foreground cycle"
 
+$nestedOnlyTaskCycle = Copy-Ticket06TestObject $taskEvidence
+$observerCycleFieldNames = @(
+    "postRemovalRequestPaths",
+    "postRemovalFixtureRequestStartSequence",
+    "postRemovalDispatchStartSequence",
+    "postRemovalDispatchSequences",
+    "postRemovalForegroundPackage",
+    "postRemovalServiceLeaseAttachedAtDispatch",
+    "postRemovalDispatchPaths",
+    "postRemovalDispatchForegroundPackages",
+    "postRemovalDispatchServiceLeases"
+)
+foreach ($fieldName in $observerCycleFieldNames) {
+    $fieldValue = $nestedOnlyTaskCycle.taskRemoval.$fieldName
+    $nestedOnlyTaskCycle.taskRemoval.taskRemoval | Add-Member -MemberType NoteProperty -Name $fieldName -Value $fieldValue -Force
+    [void]$nestedOnlyTaskCycle.taskRemoval.PSObject.Properties.Remove($fieldName)
+}
+Assert-Ticket06TaskRejected "a task cycle moved to the wrong nested observer object" $taskEvidence $nestedOnlyTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$missingTaskDispatchSequences = Copy-Ticket06TestObject $taskEvidence
+[void]$missingTaskDispatchSequences.taskRemoval.PSObject.Properties.Remove("postRemovalDispatchSequences")
+Assert-Ticket06TaskRejected "a missing observer dispatch sequence list" $taskEvidence $missingTaskDispatchSequences "does not prove one successful exact five-request Hangeul foreground cycle"
+
+$alteredTaskDispatchSequences = Copy-Ticket06TestObject $taskEvidence
+$alteredTaskDispatchSequences.taskRemoval.postRemovalDispatchSequences[2] = 99
+Assert-Ticket06TaskRejected "an altered observer dispatch sequence" $taskEvidence $alteredTaskDispatchSequences "does not prove one successful exact five-request Hangeul foreground cycle"
+
 $wrongSubjectTaskCycle = Copy-Ticket06TestObject $taskEvidence
 $wrongSubjectTaskCycle.fixture.requests[11].path = "/v3/todoschool/report/daily/english"
 $wrongSubjectTaskCycle.taskRemoval.postRemovalRequestPaths[-1] = "/v3/todoschool/report/daily/english"
-$wrongSubjectTaskCycle.taskRemoval.taskRemoval.postRemovalDispatchPaths[-1] = "/v3/todoschool/report/daily/english"
+$wrongSubjectTaskCycle.taskRemoval.postRemovalDispatchPaths[-1] = "/v3/todoschool/report/daily/english"
 Assert-Ticket06TaskRejected "a post-removal cycle for the wrong subject" $taskEvidence $wrongSubjectTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $extraSubjectTaskCycle = Copy-Ticket06TestObject $taskEvidence
@@ -794,11 +821,11 @@ $wrongOrderTaskCycle.taskRemoval.postRemovalRequestPaths[1], $wrongOrderTaskCycl
 Assert-Ticket06TaskRejected "a post-removal cycle with requests out of order" $taskEvidence $wrongOrderTaskCycle "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $wrongTaskDispatchSource = Copy-Ticket06TestObject $taskEvidence
-$wrongTaskDispatchSource.taskRemoval.taskRemoval.postRemovalDispatchForegroundPackages[2] = "com.example.todoschooltime.debug"
+$wrongTaskDispatchSource.taskRemoval.postRemovalDispatchForegroundPackages[2] = "com.example.todoschooltime.debug"
 Assert-Ticket06TaskRejected "a post-removal cycle attributed to the wrong foreground app" $taskEvidence $wrongTaskDispatchSource "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $missingTaskDispatchLease = Copy-Ticket06TestObject $taskEvidence
-$missingTaskDispatchLease.taskRemoval.taskRemoval.postRemovalDispatchServiceLeases[2] = $false
+$missingTaskDispatchLease.taskRemoval.postRemovalDispatchServiceLeases[2] = $false
 Assert-Ticket06TaskRejected "a post-removal dispatch without the monitor lease" $taskEvidence $missingTaskDispatchLease "does not prove one successful exact five-request Hangeul foreground cycle"
 
 $failedTaskCycleResponse = Copy-Ticket06TestObject $taskEvidence
