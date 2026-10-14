@@ -46,13 +46,6 @@ android {
             applicationIdSuffix = ".debug"
             buildConfigField("String", "API_BASE_URL", "\"$debugApiBaseUrl\"")
         }
-        create("e2e") {
-            initWith(getByName("debug"))
-            applicationIdSuffix = ".e2e"
-            versionNameSuffix = "-e2e"
-            isDebuggable = true
-            matchingFallbacks += listOf("debug")
-        }
         release {
             isMinifyEnabled = false
             isDebuggable = false

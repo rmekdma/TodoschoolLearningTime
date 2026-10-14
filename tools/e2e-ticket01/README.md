@@ -14,13 +14,19 @@ Copy-Item tools/e2e-ticket01/config.example.json tools/e2e-ticket01/config.json
 
 You can also pass `-DeviceSerial <serial>`. With one connected device the script selects it. If several are connected, it uses the configured serial or the project tablet serial `T811MA256GB23418064398`; otherwise it stops before building or installing anything.
 
-The script builds and tests the debug, e2e, and release variants. It checks APK package IDs, INTERNET permission, the debug-only network security configuration, and the compiled URL literals before installing the debug APK and test APK with `adb install -r`. It then starts the fixture server, verifies readiness, adds an `adb reverse` mapping only when needed, and runs the instrumentation screen check directly so the debug package and its app data remain installed. The runner wakes the display, but stops if the device still shows a secure lock screen; unlock it manually before retrying. It reads the server request log and the Activity screenshot from run-specific instrumentation log chunks into an ignored folder under `build/e2e-ticket01/`. On exit it stops only its own server process and removes only the reverse mapping it created. It does not clear app data, uninstall apps, or grant or revoke permissions.
+The script runs the debug unit tests, builds the debug and release APKs, and checks APK package IDs, INTERNET permission, the debug-only network security configuration, and the compiled URL literals before installing the debug APK and test APK with `adb install -r`. Observer scenarios also build the external observer APKs. The runner starts the fixture server, verifies readiness, adds an `adb reverse` mapping only when needed, and runs the selected screen or observer check. The runner wakes the display, but stops if the device still shows a secure lock screen; unlock it manually before retrying. It reads the server request log and any Activity screenshot from run-specific instrumentation log chunks into an ignored folder under `build/e2e-ticket01/`. On exit it stops only its own server process and removes only the reverse mapping it created. It does not clear app data, uninstall apps, or grant or revoke permissions.
 
 ## Installed app and data isolation
 
 The test APK uses `com.example.todoschooltime.debug`, its own Android application sandbox, preferences, and Android Keystore namespace. The installed production package remains `com.example.todoschooltime`; the workflow records its APK path before and after the test and fails if it changed. The test signs in with `ticket01@example.test` and a fixed fake password. Do not enter a real TodoSchool account in this debug app.
 
-The `e2e` build remains `com.example.todoschooltime.e2e`. It continues to use `E2eFakeRepository` and the existing broadcast API documented in [`../../E2E_TEST_API.md`](../../E2E_TEST_API.md); that variant removes INTERNET permission. The Ticket 01 server is separate and does not replace the old harness.
+The supported server-backed workflows use the production debug app and its real HTTP repository with a local fixture. Test data comes from the fixture and app UI. The external observer is a separate read-only app; it reads diagnostics and Android state without changing product decisions or settings. See [the integration test guide](../../INTEGRATION_TESTING.md) for supported paths and coverage limits.
+
+## Device continuity and date coverage
+
+The Ticket 01 screen workflow installs or updates the debug app and instrumentation APK, then runs product instrumentation. Instrumentation can restart the product app process and interrupt its accessibility service, so run it only on an isolated device. On a prepared device whose service must remain attached, use the observer `-RefreshObserver` and `-RunPrepared` paths documented by Tickets 03 and 05; those paths verify and reuse the prepared product APK without reinstalling it.
+
+The server-backed scenarios use the device's actual date and `DateHelper`'s `Asia/Seoul` calendar. They do not advance the app clock or device clock. `DateHelperTest` and `LearningMonitorEngineTest` retain fake-clock regression coverage for Seoul date boundaries and engine reevaluation. App-level runtime date advancement is not covered by these server scenarios.
 
 ## Addresses and network policy
 

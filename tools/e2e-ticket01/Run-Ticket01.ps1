@@ -67,7 +67,6 @@ $apiBaseUrl = "http://127.0.0.1:$serverPort"
 $debugApplicationId = "com.example.todoschooltime.debug"
 $testApplicationId = "com.example.todoschooltime.debug.test"
 $releaseApplicationId = "com.example.todoschooltime"
-$e2eApplicationId = "com.example.todoschooltime.e2e"
 $observerApplicationId = "com.example.todoschooltime.e2eobserver"
 $observerTestApplicationId = "$observerApplicationId.test"
 $observerAccessibilityLabel = "토도 학습 감시 · 로컬 테스트"
@@ -1261,7 +1260,6 @@ try {
         $gradleTasks = @(
             ":app:assembleDebug",
             ":app:assembleDebugAndroidTest",
-            ":app:assembleE2e",
             ":app:assembleRelease",
             ":app:lintDebug",
             ":app:lintRelease",
@@ -1279,7 +1277,6 @@ try {
         $gradleTasks = @(
             ":app:assembleDebug",
             ":app:assembleDebugAndroidTest",
-            ":app:assembleE2e",
             ":app:assembleRelease"
         )
         if ($usesExternalObserver) { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
@@ -1287,10 +1284,8 @@ try {
     } else {
         $gradleTasks = @(
             ":app:testDebugUnitTest",
-            ":app:testE2eUnitTest",
             ":app:assembleDebug",
             ":app:assembleDebugAndroidTest",
-            ":app:assembleE2e",
             ":app:assembleRelease",
             ":app:lintDebug",
             ":app:lintRelease"
@@ -1303,10 +1298,9 @@ try {
     $debugApk = Join-Path $repositoryRoot "app\build\outputs\apk\debug\app-debug.apk"
     $testApk = Join-Path $repositoryRoot "app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk"
     $releaseApk = Join-Path $repositoryRoot "app\build\outputs\apk\release\app-release.apk"
-    $e2eApk = Join-Path $repositoryRoot "app\build\outputs\apk\e2e\app-e2e.apk"
     $observerApk = Join-Path $repositoryRoot "e2eobserver\build\outputs\apk\debug\e2eobserver-debug.apk"
     $observerTestApk = Join-Path $repositoryRoot "e2eobserver\build\outputs\apk\androidTest\debug\e2eobserver-debug-androidTest.apk"
-    foreach ($apk in @($debugApk, $testApk, $releaseApk, $e2eApk)) {
+    foreach ($apk in @($debugApk, $testApk, $releaseApk)) {
         if (-not (Test-Path -LiteralPath $apk)) { throw "Expected APK was not built: $apk" }
     }
     if (($usesExternalObserver -or $PrepareDevice -or $RunPrepared -or $RefreshObserver) -and
@@ -1319,7 +1313,6 @@ try {
     $observerBadging = if (Test-Path -LiteralPath $observerApk) { (& $aaptPath dump badging $observerApk 2>&1) -join "`n" } else { "" }
     $observerTestBadging = if (Test-Path -LiteralPath $observerTestApk) { (& $aaptPath dump badging $observerTestApk 2>&1) -join "`n" } else { "" }
     $releaseBadging = (& $aaptPath dump badging $releaseApk 2>&1) -join "`n"
-    $e2eBadging = (& $aaptPath dump badging $e2eApk 2>&1) -join "`n"
     if ($debugBadging -notmatch "package: name='$([regex]::Escape($debugApplicationId))'") {
         throw "Built debug APK has an unexpected application ID; refusing device installation."
     }
@@ -1331,9 +1324,6 @@ try {
     }
     if ($testBadging -notmatch "package: name='$([regex]::Escape($testApplicationId))'") {
         throw "Built instrumentation APK has an unexpected application ID."
-    }
-    if ($e2eBadging -notmatch "package: name='$([regex]::Escape($e2eApplicationId))'") {
-        throw "Existing E2E APK package identity changed."
     }
     if ($usesExternalObserver -and
         ($observerBadging -notmatch "package: name='com.example.todoschooltime.e2eobserver'" -or
@@ -1396,10 +1386,6 @@ try {
     if ($releasePermissions -notmatch "android.permission.INTERNET" -or
         $debugPermissions -notmatch "android.permission.INTERNET") {
         throw "Release and debug APKs must both keep INTERNET permission."
-    }
-    $e2ePermissions = (& $aaptPath dump permissions $e2eApk 2>&1) -join "`n"
-    if ($e2ePermissions -match "android.permission.INTERNET") {
-        throw "The existing fake E2E APK unexpectedly regained INTERNET permission."
     }
     if ($usesExternalObserver) {
         $observerPermissions = (& $aaptPath dump permissions $observerApk 2>&1) -join "`n"

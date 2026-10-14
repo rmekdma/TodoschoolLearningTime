@@ -44,10 +44,10 @@ Android logcat의 단일 항목 크기 제한 때문에 structured result는 run
 .\tools\e2e-ticket03\Test-ResultChunks.ps1
 ```
 
-저장소 루트에서 전체 검증은 다음 명령으로 실행합니다.
+저장소 루트에서 전체 검증은 앱 debug/release와 외부 observer를 포함해 다음 명령으로 실행합니다.
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest :app:testE2eUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleE2e :app:assembleRelease :app:lintDebug :app:lintRelease :e2eobserver:assembleDebug :e2eobserver:assembleDebugAndroidTest
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:assembleRelease :app:lintDebug :app:lintRelease :e2eobserver:assembleDebug :e2eobserver:assembleDebugAndroidTest
 ```
 
 실행 결과는 `build/e2e-ticket03/<run-id>/` 아래에 저장됩니다. `ticket03-result.json`은 실제 foreground event sequence, 주기 요청, 초기 전체 기준점, 관찰 창, 사용한 기기 API·설정 간격, screen wake lock 근거 및 무음 한계를 담습니다. `observer-result-logcat.txt`에는 wake lock 획득·해제와 foreground cursor/package 기록이 포함됩니다. `server-requests.json`과 `server-requests-final.json`에는 fixture 요청과 in-flight 상태가 기록됩니다. `observer-lifecycle-samples.json` 및 product service 전후 dump는 observer 실행 내내 실제 제품 PID와 접근성 연결이 유지되었는지 보여 줍니다.
