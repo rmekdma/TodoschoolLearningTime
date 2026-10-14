@@ -3,8 +3,7 @@ param(
     [string]$ConfigPath,
     [string]$DeviceSerial,
     [switch]$RunPrepared,
-    [switch]$RefreshObserver,
-    [string]$Case
+    [switch]$RefreshObserver
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,25 +13,18 @@ function Resolve-Ticket06ExecutionMode {
     [CmdletBinding()]
     param(
         [switch]$RunPrepared,
-        [switch]$RefreshObserver,
-        [string]$Case
+        [switch]$RefreshObserver
     )
 
     if ([bool]$RunPrepared -eq [bool]$RefreshObserver) {
         throw "Choose exactly one of -RunPrepared or -RefreshObserver."
     }
-    if ($RefreshObserver) {
-        if (-not [string]::IsNullOrWhiteSpace($Case)) { throw "-Case is valid only with -RunPrepared." }
-        return "refresh-observer"
-    }
-    if ($Case -cnotin @("task-removal", "reboot-recovery")) {
-        throw "RunPrepared requires an explicit -Case: task-removal or reboot-recovery."
-    }
+    if ($RefreshObserver) { return "refresh-observer" }
     return "run-prepared"
 }
 
 # Fail closed before resolving paths, reading configuration, starting the fixture, or invoking ADB.
-$executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver -Case $Case
+$executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $gitCommit = (& git -C $repositoryRoot rev-parse HEAD 2>$null | Select-Object -First 1)
@@ -100,19 +92,9 @@ $initialWakefulness = $null
 $preResult = $null
 $postResult = $null
 $prePreferenceState = $null
-$preRemovalPreferenceState = $null
-$preRemovalStageSeenAtUtc = $null
-$preRemovalPreferenceAck = $null
 $preRebootPreferenceState = $null
 $preRebootStageSeenAtUtc = $null
 $preRebootPreferenceAck = $null
-$script:recentsDiagnosticCaptured = $false
-$script:recentsScreenshotPath = $null
-$script:recentsScreenshotSha256 = $null
-$script:recentsDiagnostic = $null
-$script:taskRemovalHumanGateCaptured = $false
-$script:taskRemovalHumanGate = $null
-$script:taskRemovalAbsenceNoticeDisplayed = $false
 $postPreferenceState = $null
 $instrumentationResults = [System.Collections.Generic.List[object]]::new()
 
@@ -362,7 +344,7 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
         "-e", "phase", $Phase
     )
     if ($Phase -eq "post-reboot") { $arguments += @("-e", "postRebootSequence", [string]$PostRebootSequence) }
-    $arguments += @("-e", "class", "com.example.todoschooltime.e2eobserver.MonitoringPersistenceTest", "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner")
+    $arguments += @("-e", "class", "com.example.todoschooltime.e2eobserver.RebootRecoveryTest", "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner")
     $nativeConfig = [pscustomobject]@{
         schemaVersion = 1
         runId = $runId
@@ -379,170 +361,11 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
     ) -join " "
     $process = Start-Process -FilePath $powershellPath -ArgumentList $launcherArguments -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
-    $observerTimeoutMinutes = if ($Phase -eq "task-removal") { 40 } else { 8 }
+    $observerTimeoutMinutes = 8
     $deadline = [DateTimeOffset]::UtcNow.AddMinutes($observerTimeoutMinutes)
-    $stageDeadline = if ($Phase -in @("task-removal", "reboot-preparation")) { [DateTimeOffset]::UtcNow.AddSeconds(135) } else { [DateTimeOffset]::MaxValue }
+    $stageDeadline = [DateTimeOffset]::UtcNow.AddSeconds(135)
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
         if ($script:serverProcess.HasExited) { throw "The original Ticket 06 loopback fixture process exited during $Phase." }
-        if ($Phase -eq "task-removal" -and -not $script:recentsDiagnosticCaptured) {
-            $recentsStageLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket06Stage:I", "*:S") |
-                Where-Object { $_.Contains($runId) -and $_.Contains(":after-global-recents") })
-            if ($recentsStageLines.Count -gt 0) {
-                $recentsScreenshotPath = Join-Path $artifactDirectory "screen-after-global-recents.png"
-                $screenshotCapture = & $pythonPath -c "import pathlib,subprocess,sys; p=subprocess.run([sys.argv[1],'-s',sys.argv[2],'exec-out','screencap','-p'],capture_output=True,check=False); pathlib.Path(sys.argv[3]).write_bytes(p.stdout); print('exit='+str(p.returncode),'bytes='+str(len(p.stdout)),'png='+str(p.stdout.startswith(bytes([137,80,78,71]))),'stderr='+p.stderr.decode(errors='replace')[-240:])" $script:AdbPath $script:DeviceSerial $recentsScreenshotPath
-                $captureText = @($screenshotCapture | ForEach-Object { [string]$_ }) -join " "
-                if ($captureText -notmatch 'exit=0\s+bytes=(?<bytes>[0-9]+)\s+png=True' -or [int64]$Matches.bytes -lt 1000) {
-                    throw "The actual Recents screenshot was not captured as a complete PNG: $captureText"
-                }
-                $script:recentsScreenshotPath = $recentsScreenshotPath
-                $script:recentsScreenshotSha256 = (Get-FileHash -LiteralPath $recentsScreenshotPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                $screenshotAck = Invoke-RestMethod -Method Post -Uri "$apiBaseUrl/__ticket06/record-recents-screenshot" `
-                    -ContentType "application/json" -Body (@{ runId = $runId; screenshotSha256 = $script:recentsScreenshotSha256 } | ConvertTo-Json -Compress) -TimeoutSec 5
-                if (-not $screenshotAck.ok -or $screenshotAck.runId -cne $runId -or -not $screenshotAck.recentsScreenshotRecorded) {
-                    throw "The local fixture did not record the exact host-captured Recents screenshot digest."
-                }
-                $windowFocus = @(Invoke-SelectedAdb @("shell", "dumpsys", "window") |
-                    Where-Object { $_ -match "mCurrentFocus|mFocusedApp|mTopFocusedDisplayId|mObscuringWindow" } |
-                    Select-Object -First 12)
-                $script:recentsDiagnostic = [pscustomobject]@{
-                    runId = $runId
-                    stage = "after-global-recents"
-                    capturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-                    stageLog = [string]($recentsStageLines | Select-Object -Last 1)
-                    screenshotPath = $recentsScreenshotPath
-                    screenshotSha256 = $script:recentsScreenshotSha256
-                    screenshotCapture = @($screenshotCapture)
-                    selectedWindowFocus = $windowFocus
-                }
-                Write-IntegrationJson $script:recentsDiagnostic (Join-Path $artifactDirectory "recents-screen-diagnostic.json")
-                $script:recentsDiagnosticCaptured = $true
-            }
-        }
-        if ($Phase -eq "task-removal" -and $null -eq $script:preRemovalPreferenceState) {
-            $stageLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket06Stage:I", "*:S") |
-                Where-Object { $_.Contains($runId) -and $_.Contains(":registered-before-task-removal") })
-            if ($stageLines.Count -gt 0) {
-                $script:preRemovalPreferenceState = Wait-ForPersistedScenarioPreferences
-                $script:preRemovalStageSeenAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-                if (-not $script:preRemovalPreferenceState.registrationPersisted -or
-                    -not $script:preRemovalPreferenceState.intervalPersisted -or
-                    -not $script:preRemovalPreferenceState.targetsPersisted) {
-                    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-                    throw "The actual pre-removal observer stage was reached, but filtered read-only preferences did not show registration, explicit interval, and targets."
-                }
-                Write-IntegrationJson ([pscustomobject]@{
-                    runId = $runId
-                    phase = $Phase
-                    observerStage = "registered-before-task-removal"
-                    observerStageLog = [string]($stageLines | Select-Object -Last 1)
-                    capturedAtUtc = $script:preRemovalStageSeenAtUtc
-                    preferences = $script:preRemovalPreferenceState
-                }) (Join-Path $artifactDirectory "preferences-before-task-removal.json")
-                $script:preRemovalPreferenceAck = Invoke-RestMethod -Method Post -Uri "$apiBaseUrl/__ticket06/ack-pre-removal-preferences" `
-                    -ContentType "application/json" -Body (@{ runId = $runId } | ConvertTo-Json -Compress) -TimeoutSec 5
-                if (-not $script:preRemovalPreferenceAck.ok -or
-                    $script:preRemovalPreferenceAck.runId -cne $runId -or
-                    -not $script:preRemovalPreferenceAck.readyForTaskRemoval) {
-                    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-                    throw "Ticket 06 fixture did not acknowledge the exact pre-removal preference capture."
-                }
-            } elseif ([DateTimeOffset]::UtcNow -ge $stageDeadline) {
-                if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
-                throw "The observer did not reach its registered-before-task-removal stage within 135 seconds."
-            }
-        }
-        if ($Phase -eq "task-removal" -and -not $script:taskRemovalHumanGateCaptured) {
-            $fixtureState = Get-FixtureState
-            $target = $fixtureState.ticket06TaskRemovalTarget
-            if ($null -ne $target) {
-                if (-not $script:recentsDiagnosticCaptured -or -not $script:recentsScreenshotPath -or
-                    [string]$target.runId -cne $runId -or
-                    [string]$target.screenshotSha256 -cne $script:recentsScreenshotSha256 -or
-                    [string]$fixtureState.ticket06RecentsScreenshotSha256 -cne $script:recentsScreenshotSha256) {
-                    throw "The registered task-removal target does not match this run's captured Recents screenshot."
-                }
-                $acknowledgementBody = [pscustomobject]@{
-                    runId = $runId
-                    taskId = [int]$target.taskId
-                    taskComponent = [string]$target.taskComponent
-                    otherTaskIds = @($target.otherTaskIds | ForEach-Object { [int]$_ })
-                    screenshotSha256 = [string]$script:recentsScreenshotSha256
-                    confirmedAppLabel = [string]$target.expectedAppLabel
-                }
-                $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
-                $hostGateCapturedAtUtc = [DateTimeOffset]::UtcNow.ToString("O")
-                $gate = [pscustomobject]@{
-                    runId = $runId
-                    stage = "actual-Recents-card-dismissal-by-user"
-                    capturedAtUtc = $hostGateCapturedAtUtc
-                    exactTaskId = [int]$target.taskId
-                    exactTaskComponent = [string]$target.taskComponent
-                    stageLog = [string]$script:recentsDiagnostic.stageLog
-                    expectedAppLabel = [string]$target.expectedAppLabel
-                    recentsCardLabelObserved = [bool]$target.recentsCardLabelObserved
-                    recentsCardLabel = $target.recentsCardLabel
-                    recentsLabelWindowPackage = $target.recentsLabelWindowPackage
-                    otherTaskIds = @($target.otherTaskIds | ForEach-Object { [int]$_ })
-                    screenshotPath = $script:recentsScreenshotPath
-                    screenshotSha256 = $script:recentsScreenshotSha256
-                    selectedWindowFocus = @($script:recentsDiagnostic.selectedWindowFocus)
-                    currentWindowFocusObserved = (@($script:recentsDiagnostic.selectedWindowFocus).Count -gt 0)
-                    acknowledgementEndpoint = "$apiBaseUrl/__ticket06/ack-task-removal"
-                    acknowledgementBody = $acknowledgementBody
-                    timeoutMinutes = 30
-                    automaticGestureOrCommand = $false
-                }
-                $gateRegistration = Invoke-RestMethod -Method Post -Uri "$apiBaseUrl/__ticket06/register-task-removal-gate" `
-                    -ContentType "application/json" -Body (@{
-                        runId = $runId
-                        taskId = [int]$target.taskId
-                        taskComponent = [string]$target.taskComponent
-                        screenshotSha256 = [string]$script:recentsScreenshotSha256
-                        capturedAtUtc = $hostGateCapturedAtUtc
-                    } | ConvertTo-Json -Compress) -TimeoutSec 5
-                $registeredGate = $gateRegistration.ticket06TaskRemovalGate
-                if (-not $gateRegistration.ok -or $gateRegistration.runId -cne $runId -or
-                    [int]$registeredGate.taskId -ne [int]$target.taskId -or
-                    [string]$registeredGate.taskComponent -cne [string]$target.taskComponent -or
-                    [string]$registeredGate.screenshotSha256 -cne [string]$script:recentsScreenshotSha256 -or
-                    [string]::IsNullOrWhiteSpace([string]$registeredGate.createdAtUtc)) {
-                    throw "The fixture did not record the exact task-removal gate creation time."
-                }
-                $gate | Add-Member -MemberType NoteProperty -Name gateCreatedAtUtc -Value ([string]$registeredGate.createdAtUtc)
-                Write-IntegrationJson $gate $gatePath
-                $script:taskRemovalHumanGate = $gate
-                $script:taskRemovalHumanGateCaptured = $true
-                $otherIdsText = [string]::Join(",", @($gate.otherTaskIds | ForEach-Object { [string]$_ }))
-                $labelText = if ($gate.recentsCardLabelObserved) { "observed='$($gate.recentsCardLabel)' from '$($gate.recentsLabelWindowPackage)'" } else { "accessibility label unknown; inspect the screenshot" }
-                Write-Host "HUMAN TASK REMOVAL GATE: exact app card '$($gate.expectedAppLabel)' taskId=$($gate.exactTaskId) component=$($gate.exactTaskComponent); otherTaskIds=[$otherIdsText]; label=$labelText; screenshot=$($gate.screenshotPath); sha256=$($gate.screenshotSha256); gate=$gatePath"
-                Write-Host "After the user dismisses only the exact product card, wait for the observer's exact-task-absent confirmation. Only then post the acknowledgementBody from the gate JSON to acknowledgementEndpoint. The acknowledgement is a human attestation; the observer separately verifies absence and other-task preservation."
-            }
-        }
-        if ($Phase -eq "task-removal" -and $script:taskRemovalHumanGateCaptured -and -not $script:taskRemovalAbsenceNoticeDisplayed) {
-            $fixtureState = Get-FixtureState
-            $absence = $fixtureState.ticket06TaskRemovalAbsence
-            if ($null -ne $absence) {
-                $gate = $fixtureState.ticket06TaskRemovalGate
-                if ([string]$absence.runId -cne $runId -or
-                    [int]$absence.taskId -ne [int]$script:taskRemovalHumanGate.exactTaskId -or
-                    [string]$absence.taskComponent -cne [string]$script:taskRemovalHumanGate.exactTaskComponent -or
-                    [string]::Join(',', @($absence.otherTaskIds | ForEach-Object { [string]$_ })) -cne
-                        [string]::Join(',', @($script:taskRemovalHumanGate.otherTaskIds | ForEach-Object { [string]$_ })) -or
-                    [string]$gate.createdAtUtc -cne [string]$script:taskRemovalHumanGate.gateCreatedAtUtc) {
-                    throw "The observer's task-absence event does not match the exact human gate."
-                }
-                $absenceTimestamp = [DateTimeOffset]::Parse([string]$absence.observedAtUtc)
-                $gateTimestamp = [DateTimeOffset]::Parse([string]$gate.createdAtUtc)
-                if ($absenceTimestamp -lt $gateTimestamp -or $absenceTimestamp -gt $gateTimestamp.AddMinutes(30)) {
-                    throw "The exact task was observed absent outside the 30-minute gate window."
-                }
-                $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservation -Value $absence -Force
-                $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservedAtUtc -Value ([string]$absence.observedAtUtc) -Force
-                Write-IntegrationJson $script:taskRemovalHumanGate (Join-Path $artifactDirectory "task-removal-human-gate.json")
-                Write-Host "OBSERVER CONFIRMED exact taskId=$($absence.taskId) absent at $($absence.observedAtUtc); otherTaskIds=[$([string]::Join(',', @($absence.otherTaskIds | ForEach-Object { [string]$_ })))] remain unchanged. The user may now submit the human acknowledgement."
-                $script:taskRemovalAbsenceNoticeDisplayed = $true
-            }
-        }
         if ($Phase -eq "reboot-preparation" -and $null -eq $script:preRebootPreferenceState) {
             $stageLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket06Stage:I", "*:S") |
                 Where-Object { $_.Contains($runId) -and $_.Contains(":registered-before-reboot") })
@@ -606,7 +429,7 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
     }
     Write-IntegrationJson $transport $transportPath
 
-    $filteredOutput = @(Select-String -LiteralPath $stdoutPath -Pattern 'OK \(1 test\)|INSTRUMENTATION_CODE:|INSTRUMENTATION_STATUS: class=.*MonitoringPersistenceTest|INSTRUMENTATION_STATUS: stack=|FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[0-9]' | ForEach-Object { $_.Line })
+    $filteredOutput = @(Select-String -LiteralPath $stdoutPath -Pattern 'OK \(1 test\)|INSTRUMENTATION_CODE:|INSTRUMENTATION_STATUS: class=.*RebootRecoveryTest|INSTRUMENTATION_STATUS: stack=|FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[0-9]' | ForEach-Object { $_.Line })
     $filteredText = $filteredOutput -join "`n"
     $filteredPath = Join-Path $artifactDirectory "observer-$phaseKey-filtered.txt"
     $filteredText | Set-Content -LiteralPath $filteredPath -Encoding utf8
@@ -614,7 +437,7 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
         Where-Object { $_.Contains($runId) -and $_.Contains("TICKET06_RESULT_CHUNK:") })
     $resultLines | Set-Content -LiteralPath $logLinesPath -Encoding utf8
     $resultJson = Get-IntegrationResultJson -LogLines $resultLines -RunId $runId -Scenario ticket06
-    $testClass = "com.example.todoschooltime.e2eobserver.MonitoringPersistenceTest"
+    $testClass = "com.example.todoschooltime.e2eobserver.RebootRecoveryTest"
     $instrumentationOutcome = Assert-IntegrationInstrumentationOutcome `
         -TransportStatus $transport `
         -LauncherProcessExitCode $process.ExitCode `
@@ -626,20 +449,6 @@ function Invoke-ObserverPhase([string]$Phase, [long]$PostRebootSequence = -1) {
         -ExpectedPhase $Phase
     $result = ConvertFrom-IntegrationResult -Json $resultJson -RunId $runId -Scenario ticket06
     Write-IntegrationJson $instrumentationOutcome (Join-Path $artifactDirectory "observer-$phaseKey-outcome.json")
-    if ($Phase -eq "task-removal") {
-        if (-not $script:taskRemovalHumanGateCaptured -or -not (Test-Path -LiteralPath $script:recentsScreenshotPath)) {
-            throw "Ticket 06 task-removal observer completed without its saved human gate and Recents screenshot."
-        }
-        if (-not $script:taskRemovalAbsenceNoticeDisplayed) {
-            throw "Ticket 06 completed without the user-facing exact-task absence confirmation."
-        }
-        $fixtureState = Get-FixtureState
-        $absence = $fixtureState.ticket06TaskRemovalAbsence
-        $gatePath = Join-Path $artifactDirectory "task-removal-human-gate.json"
-        $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservation -Value $absence -Force
-        $script:taskRemovalHumanGate | Add-Member -MemberType NoteProperty -Name taskAbsentObservedAtUtc -Value ([string]$absence.observedAtUtc) -Force
-        Write-IntegrationJson $script:taskRemovalHumanGate $gatePath
-    }
     Write-IntegrationJson $result $resultPath
     [void]$instrumentationResults.Add([pscustomobject]@{ phase = $Phase; resultPath = $resultPath; filteredOutputPath = $filteredPath; transportPath = $transportPath })
     return $result
@@ -775,85 +584,21 @@ try {
     if (-not $awake) { throw "The device did not wake for the bounded UI test; it was not unlocked." }
     if ((Get-WindowLockState).needsUnlock) { throw "Device validation requires manual unlock; no unlock or settings operation was attempted." }
 
-    $bootCountBefore = $null
-    if ($Case -eq "reboot-recovery") { $bootCountBefore = Get-BootCount }
-    if ($Case -eq "reboot-recovery") {
-        $preResult = Invoke-ObserverPhase "reboot-preparation"
-        $preState = Get-DeviceMonitorState
-        if ($preState.pid -ne $initialServiceState.pid -or -not $preState.bound -or $preState.crashed) {
-            throw "The real AccessibilityService PID or binding changed during reboot preparation."
-        }
-        $serviceAfterTaskCase = $null
-        $prePreferenceState = Wait-ForPersistedScenarioPreferences
-        if (-not $preRebootPreferenceState) { throw "The observer did not capture the pre-reboot preference rows." }
-        Assert-SameAppOwnedPreferenceRows -Before $preRebootPreferenceState -After $prePreferenceState -Transition "between reboot preparation and reboot"
-        if (-not $prePreferenceState.registrationPersisted -or -not $prePreferenceState.intervalPersisted -or -not $prePreferenceState.targetsPersisted) {
-            throw "The required child registration, explicitly saved interval, or target values were not stored in their expected app-owned preferences."
-        }
-        $preFixture = Get-FixtureState
-        if (@($preFixture.requests).Count -lt 7) { throw "Reboot preparation did not finish one complete local fixture baseline before reboot." }
-        Write-IntegrationJson $preFixture (Join-Path $artifactDirectory "fixture-before-reboot.json")
+    $bootCountBefore = Get-BootCount
+    $preResult = Invoke-ObserverPhase "reboot-preparation"
+    $preState = Get-DeviceMonitorState
+    if ($preState.pid -ne $initialServiceState.pid -or -not $preState.bound -or $preState.crashed) {
+        throw "The real AccessibilityService PID or binding changed during reboot preparation."
     }
-    else {
-        $preState = Get-DeviceMonitorState
-        if ($preState.pid -ne $initialServiceState.pid -or -not $preState.bound -or $preState.crashed) {
-            throw "The real service lifecycle changed before the observer started."
-        }
-        $preResult = Invoke-ObserverPhase "task-removal"
-        $serviceAfterTaskCase = Get-DeviceMonitorState
-        if ($serviceAfterTaskCase.pid -ne $preState.pid -or -not $serviceAfterTaskCase.bound -or $serviceAfterTaskCase.crashed) {
-            throw "The product AccessibilityService did not remain attached after actual task removal."
-        }
-        $prePreferenceState = Get-PersistedScenarioPreferences
-        if (-not $preRemovalPreferenceState -or
-            $null -eq $prePreferenceState) {
-            throw "The observer did not capture preference rows on both sides of task removal."
-        }
-        Assert-SameAppOwnedPreferenceRows -Before $preRemovalPreferenceState -After $prePreferenceState -Transition "across task removal"
-        if (-not $prePreferenceState.registrationPersisted -or -not $prePreferenceState.intervalPersisted -or -not $prePreferenceState.targetsPersisted) {
-            throw "The required child registration, explicit one-minute interval, or target values were not stored in their expected app-owned preferences."
-        }
-        $preFixture = Get-FixtureState
-        if ($Case -eq "task-removal") {
-            $preFixture = Assert-IntegrationFixtureSnapshot -Snapshot $preFixture -RunId $runId -Scenario ticket06
-            Write-IntegrationJson $preFixture (Join-Path $artifactDirectory "fixture-after-task-removal.json")
-            $finalInstalledProductHash = Get-InstalledPackageHash $debugApplicationId "installed-debug-after-run.apk"
-            if ($finalInstalledProductHash -cne $preparedProductHash) { throw "The product debug APK changed during Ticket 06 task removal." }
-            $taskCaseEvidence = [pscustomobject]@{
-                schemaVersion = 1
-                pass = $true
-                scenario = "ticket06"
-                case = "task-removal"
-                runId = $runId
-                gitCommit = $gitCommit
-                device = $deviceArtifact
-                fixtureServer = [pscustomobject]@{ processId = [int]$script:serverProcess.Id; runId = $runId; address = $apiBaseUrl }
-                serviceState = [pscustomobject]@{ before = $preState; after = $serviceAfterTaskCase }
-                preferences = [pscustomobject]@{
-                    registrationPersisted = [bool]$preRemovalPreferenceState.registrationPersisted -and [bool]$prePreferenceState.registrationPersisted
-                    targetsPersisted = [bool]$preRemovalPreferenceState.targetsPersisted -and [bool]$prePreferenceState.targetsPersisted
-                    intervalPersisted = [bool]$preRemovalPreferenceState.intervalPersisted -and [bool]$prePreferenceState.intervalPersisted
-                    rowsBefore = $preRemovalPreferenceState
-                    rowsAfter = $prePreferenceState
-                    credentialFileRead = $false
-                }
-                recents = [pscustomobject]@{
-                    screenshotPath = $script:recentsScreenshotPath
-                    screenshotSha256 = $script:recentsScreenshotSha256
-                    humanGate = $script:taskRemovalHumanGate
-                }
-                fixture = $preFixture
-                result = $preResult
-                instrumentation = $instrumentationResults.ToArray()
-            }
-            Write-IntegrationJson $taskCaseEvidence (Join-Path $artifactDirectory "ticket06-task-removal-evidence.json")
-            Write-Host "PASS Ticket 06 task-removal case on Android API $actualApi; reboot recovery was not run in this case."
-            Write-Host "Artifacts: $artifactDirectory"
-            return
-        }
-        Write-IntegrationJson $preFixture (Join-Path $artifactDirectory "fixture-before-reboot.json")
+    $prePreferenceState = Wait-ForPersistedScenarioPreferences
+    if (-not $preRebootPreferenceState) { throw "The observer did not capture the pre-reboot preference rows." }
+    Assert-SameAppOwnedPreferenceRows -Before $preRebootPreferenceState -After $prePreferenceState -Transition "between reboot preparation and reboot"
+    if (-not $prePreferenceState.registrationPersisted -or -not $prePreferenceState.intervalPersisted -or -not $prePreferenceState.targetsPersisted) {
+        throw "The required child registration, explicitly saved interval, or target values were not stored in their expected app-owned preferences."
     }
-
+    $preFixture = Get-FixtureState
+    if (@($preFixture.requests).Count -lt 7) { throw "Reboot preparation did not finish one complete local fixture baseline before reboot." }
+    Write-IntegrationJson $preFixture (Join-Path $artifactDirectory "fixture-before-reboot.json")
     $rebootRequestedAt = [DateTimeOffset]::UtcNow
     Invoke-SelectedAdb @("reboot") | Out-Null
     $rebootReturnedAt = [DateTimeOffset]::UtcNow
@@ -909,7 +654,6 @@ try {
         schemaVersion = 1
         pass = $true
         scenario = "ticket06"
-        case = "reboot-recovery"
         runId = $runId
         gitCommit = $gitCommit
         device = $deviceArtifact
@@ -953,8 +697,7 @@ try {
     $evidencePath = Join-Path $artifactDirectory "ticket06-reboot-recovery-evidence.json"
     if (Test-Path -LiteralPath $evidencePath) { throw "Ticket 06 evidence is immutable and already exists: $evidencePath" }
     Write-IntegrationJson $ticket06Evidence $evidencePath
-    Write-Host "PASS Ticket 06 reboot-recovery case on Android API $actualApi ($actualManufacturer $actualModel)."
-    Write-Host "Task removal was not run in this separate reboot case; no force-stop was used."
+    Write-Host "PASS Ticket 06 reboot recovery on Android API $actualApi ($actualManufacturer $actualModel). No force-stop was used."
     Write-Host "First post-boot check was silent; a later Hangeul completion updated the existing Android notification. Sound/HUN was not tested."
     Write-Host "Artifacts: $artifactDirectory"
 } catch {

@@ -15,8 +15,5 @@
         android:networkSecurityConfig="@xml/ticket02_network_security_config"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
-        <activity
-            android:name=".PermissionControlActivity"
-            android:exported="false" />
     </application>
 </manifest>

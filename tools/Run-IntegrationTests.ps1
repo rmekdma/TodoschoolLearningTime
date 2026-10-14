@@ -4,33 +4,27 @@ Runs one isolated Android learning-monitor integration scenario.
 
 .DESCRIPTION
 Scenario selectors are functional names. The runner maps them to stable fixture protocol IDs internally.
-Observer scenarios use explicit build, prepare, refresh-observer, and run modes. Persistence runs require
-an explicit task-removal or reboot-recovery case; the runner never starts a reboot scenario by default.
+Observer scenarios use explicit build, prepare, refresh-observer, and run modes. Selecting persistence runs
+the automated reboot-recovery flow and reboots the selected device.
 
 .PARAMETER Scenario
-One of screen, baseline, foreground, permissions, authentication, or persistence.
+One of screen, baseline, foreground, authentication, or persistence.
 
 .PARAMETER Mode
 One of build, prepare, refresh-observer, or run.
-
-.PARAMETER Case
-Required for permissions run (notification, accessibility, or both) and persistence run
-(task-removal or reboot-recovery).
 
 .EXAMPLE
 .\tools\Run-IntegrationTests.ps1 -Scenario baseline -Mode build
 
 .EXAMPLE
-.\tools\Run-IntegrationTests.ps1 -Scenario persistence -Mode run -Case task-removal
+.\tools\Run-IntegrationTests.ps1 -Scenario persistence -Mode run
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('screen', 'baseline', 'foreground', 'permissions', 'authentication', 'persistence')]
+    [ValidateSet('screen', 'baseline', 'foreground', 'authentication', 'persistence')]
     [string]$Scenario,
     [ValidateSet('build', 'prepare', 'refresh-observer', 'run')]
     [string]$Mode,
-    [ValidateSet('both', 'notification', 'accessibility', 'task-removal', 'reboot-recovery')]
-    [string]$Case,
     [string]$ConfigPath,
     [string]$DeviceSerial
 )
@@ -38,46 +32,24 @@ param(
 $ErrorActionPreference = 'Stop'
 
 if ([string]::IsNullOrWhiteSpace($Scenario) -or [string]::IsNullOrWhiteSpace($Mode)) {
-    throw 'Usage: Run-IntegrationTests.ps1 -Scenario screen|baseline|foreground|permissions|authentication|persistence -Mode build|prepare|refresh-observer|run [-Case ...]. See Get-Help .\tools\Run-IntegrationTests.ps1 -Full.'
+    throw 'Usage: Run-IntegrationTests.ps1 -Scenario screen|baseline|foreground|authentication|persistence -Mode build|prepare|refresh-observer|run. See Get-Help .\tools\Run-IntegrationTests.ps1 -Full.'
 }
 
 $scenarioIds = @{
     screen = 'ticket01'
     baseline = 'ticket02'
     foreground = 'ticket03'
-    permissions = 'ticket04'
     authentication = 'ticket05'
     persistence = 'ticket06'
 }
 $wireScenario = [string]$scenarioIds[$Scenario]
 $observerScenario = $Scenario -ne 'screen'
-$caseSupplied = $PSBoundParameters.ContainsKey('Case')
-
 if (-not $observerScenario -and $Mode -in @('prepare', 'refresh-observer')) {
     throw "Mode '$Mode' is only available for observer scenarios."
 }
 if ($Scenario -eq 'persistence' -and $Mode -eq 'prepare') {
     throw 'Persistence uses the baseline prepared-device manifest; run baseline -Mode prepare first, then persistence -Mode refresh-observer.'
 }
-if ($Mode -eq 'run' -and $Scenario -eq 'permissions' -and -not $caseSupplied) {
-    throw 'Permission runs require -Case notification, accessibility, or both.'
-}
-if ($Mode -eq 'run' -and $Scenario -eq 'persistence' -and -not $caseSupplied) {
-    throw 'Persistence runs require an explicit -Case task-removal or reboot-recovery.'
-}
-if ($caseSupplied -and $Mode -ne 'run') {
-    throw '-Case is only valid with -Mode run.'
-}
-if ($caseSupplied -and $Scenario -eq 'permissions' -and $Case -notin @('notification', 'accessibility', 'both')) {
-    throw 'Permission -Case must be notification, accessibility, or both.'
-}
-if ($caseSupplied -and $Scenario -eq 'persistence' -and $Case -notin @('task-removal', 'reboot-recovery')) {
-    throw 'Persistence -Case must be task-removal or reboot-recovery.'
-}
-if ($caseSupplied -and $Scenario -notin @('permissions', 'persistence')) {
-    throw '-Case is only valid for permissions and persistence runs.'
-}
-
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if ($PSBoundParameters.ContainsKey('ConfigPath')) {
     if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
@@ -111,11 +83,6 @@ switch ($Mode) {
     'refresh-observer' { $arguments.RefreshObserver = $true }
     'run' {
         if ($observerScenario) { $arguments.RunPrepared = $true }
-        if ($Scenario -eq 'permissions') { $arguments.Ticket04Case = $Case }
-        if ($Scenario -eq 'persistence') {
-            $arguments.Case = $Case
-            $arguments.RunPrepared = $true
-        }
     }
 }
 

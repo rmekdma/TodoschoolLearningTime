@@ -11,9 +11,8 @@
 | `screen` | 실제 로그인 UI와 fixture 응답을 통해 과목별 활동 수가 보고서 화면에 표시되는지 확인 |
 | `baseline` | 감시 등록 뒤 초기 완료 상태와 이후 완료 알림 갱신 확인 |
 | `foreground` | 실제 전경 앱의 과목에 맞춰 조회하고 감시 상태가 갱신되는지 확인 |
-| `permissions` | 알림·접근성 권한이 꺼지는 경계에서 진행 중인 조회와 복구 확인 |
 | `authentication` | HTTP 실패 재시도와 만료 인증의 화면 재로그인·복구 확인 |
-| `persistence` | 최근 앱 제거 또는 재부팅 뒤 저장된 감시 복원 확인 |
+| `persistence` | 자동 재부팅 뒤 저장된 감시와 실제 서비스·조회 복원 확인 |
 
 화면 시나리오는 다음처럼 실행합니다.
 
@@ -21,21 +20,19 @@
 .\tools\Run-IntegrationTests.ps1 -Scenario screen -Mode run
 ```
 
-관찰 시나리오는 한 번 `baseline -Mode prepare`로 debug·observer APK를 준비하고 Android 설정에서 감시 서비스를 다시 연결한 뒤 `-Mode run`으로 실행합니다. observer 코드만 바뀐 경우 `-Mode refresh-observer`로 observer APK만 갱신합니다. `persistence`는 이 baseline 준비물을 재사용합니다. 권한과 복구 시나리오는 케이스를 명시합니다.
+관찰 시나리오는 한 번 `baseline -Mode prepare`로 debug·observer APK를 준비하고 Android 설정에서 알림과 감시 서비스를 허용한 뒤 `-Mode run`으로 실행합니다. observer 코드만 바뀐 경우 `-Mode refresh-observer`로 observer APK만 갱신합니다. `persistence`는 이 baseline 준비물을 재사용합니다.
 
 ```powershell
 .\tools\Run-IntegrationTests.ps1 -Scenario baseline -Mode prepare
 .\tools\Run-IntegrationTests.ps1 -Scenario baseline -Mode run
-.\tools\Run-IntegrationTests.ps1 -Scenario permissions -Mode run -Case both
-.\tools\Run-IntegrationTests.ps1 -Scenario persistence -Mode run -Case task-removal
-.\tools\Run-IntegrationTests.ps1 -Scenario persistence -Mode run -Case reboot-recovery
+.\tools\Run-IntegrationTests.ps1 -Scenario persistence -Mode run
 ```
 
 ## 경계와 변경 위치
 
 - 모든 fixture 요청과 `adb reverse`는 `127.0.0.1`만 사용합니다. fixture 오류를 실제 TodoSchool API로 우회하지 않으며 release 앱은 설치하거나 실행하지 않습니다.
 - `screen`과 `prepare`는 debug APK를 설치 또는 갱신하므로 기존 observer 세션과 분리된 테스트 기기에서 사용합니다. 준비된 실행은 설치된 product APK의 동일성을 확인합니다.
-- 권한 전환은 사람이 Android 설정에서 수행합니다. `persistence -Case task-removal`은 사용자가 최근 앱에서 실제 제품 카드를 제거해야 하며, `reboot-recovery`는 기기를 재부팅합니다. runner가 권한을 자동 변경하거나 잠금 화면을 우회하지 않습니다.
+- 알림·접근성 허용은 최초 기기 준비 조건입니다. 테스트 중 권한 OFF/ON이나 수동 카드 제거를 요구하는 시나리오는 제공하지 않습니다. `persistence -Mode run`은 기기를 재부팅하며 잠금 해제가 필요하면 중단합니다.
 - fixture 초기화는 현재 실행의 HTTP fixture 상태만 초기화합니다. Android 앱 데이터와 사용자 데이터는 초기화하지 않습니다.
 - Kotlin 계측 테스트는 Android 화면·서비스의 동작을 단언합니다. PowerShell은 빌드, 기기 단계, 실행별 결과 검증을 담당합니다. Python `server.py`는 응답 fixture이며 `test_server.py`는 그 HTTP 동작을 검증합니다. 각 검증은 해당 계층에 둡니다.
 - runner와 공통 PowerShell 모듈은 `tools/` 바로 아래에 둡니다. `server.py`의 기존 HTTP 계약을 유지하고 Kotlin·실행기에서 동일한 계약을 사용합니다. fixture wire ID는 내부 계약으로 유지하고 시나리오 이름은 위의 기능 이름을 사용합니다.

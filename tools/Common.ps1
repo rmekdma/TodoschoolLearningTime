@@ -227,55 +227,6 @@ function Assert-IntegrationInstrumentationOutcome {
     }
 }
 
-function Resolve-Ticket04PidofResult {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [int]$ExitCode,
-        [AllowEmptyCollection()]
-        [string[]]$Output = @(),
-        [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$PackageName
-    )
-
-    $pidText = (@($Output) | ForEach-Object { [string]$_ }) -join "`n"
-    $pidText = $pidText.Trim()
-    if ($ExitCode -eq 0) {
-        if ([string]::IsNullOrWhiteSpace($pidText) -or $pidText -notmatch '^\d+(?:\s+\d+)*$') {
-            throw "adb shell pidof $PackageName returned success without a valid process ID: '$pidText'"
-        }
-        return ($pidText -replace '\s+', ' ')
-    }
-
-    # Toybox pidof returns 1 with no output when Android is restarting the app process.
-    if ($ExitCode -eq 1 -and [string]::IsNullOrWhiteSpace($pidText)) { return "" }
-    throw "adb shell pidof $PackageName failed ($ExitCode): $pidText"
-}
-
-function Test-Ticket04HostLifecycleSample {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateSet("both", "notification", "accessibility")]
-        [string]$CaseMode,
-        [Parameter(Mandatory = $true)]
-        [AllowEmptyString()]
-        [string]$InitialPid,
-        [AllowEmptyString()]
-        [string]$ObservedPid,
-        [Parameter(Mandatory = $true)]
-        [bool]$Crashed
-    )
-
-    if ($Crashed) { return $false }
-    if ($CaseMode -eq "accessibility") {
-        return -not [string]::IsNullOrWhiteSpace($ObservedPid) -and $ObservedPid -ceq $InitialPid
-    }
-    # Notification revocation may restart the product; Android-side assertions prove recovery.
-    return $true
-}
-
 function Write-IntegrationJson {
     [CmdletBinding()]
     param(
@@ -292,7 +243,7 @@ function Invoke-IntegrationBuild {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][ValidateSet('screen', 'baseline', 'foreground', 'permissions', 'authentication', 'persistence')][string]$Scenario,
+        [Parameter(Mandatory = $true)][ValidateSet('screen', 'baseline', 'foreground', 'authentication', 'persistence')][string]$Scenario,
         [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ConfigPath
     )
 

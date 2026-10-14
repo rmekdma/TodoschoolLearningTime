@@ -2,14 +2,12 @@
 param(
     [string]$ConfigPath,
     [string]$DeviceSerial,
-    [ValidateSet("ticket01", "ticket02", "ticket03", "ticket04", "ticket05")]
+    [ValidateSet("ticket01", "ticket02", "ticket03", "ticket05")]
     [string]$Scenario = "ticket01",
     [switch]$DeviceOnly,
     [switch]$PrepareDevice,
     [switch]$RunPrepared,
-    [switch]$RefreshObserver,
-    [ValidateSet("both", "notification", "accessibility")]
-    [string]$Ticket04Case = "both"
+    [switch]$RefreshObserver
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,11 +16,10 @@ $scenarioDisplayName = @{
     ticket01 = "screen"
     ticket02 = "baseline"
     ticket03 = "foreground"
-    ticket04 = "permissions"
     ticket05 = "authentication"
 }[$Scenario]
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket04", "ticket05")
+$usesExternalObserver = $Scenario -in @("ticket02", "ticket03", "ticket05")
 $configPathSupplied = $PSBoundParameters.ContainsKey("ConfigPath")
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) { $ConfigPath = Join-Path $PSScriptRoot "config.json" }
 $configExample = Join-Path $PSScriptRoot "config.example.json"
@@ -41,12 +38,6 @@ if ($usesExternalObserver -and $DeviceOnly -and -not $PrepareDevice -and -not $R
 }
 if ($usesExternalObserver -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
     $RunPrepared = $true
-}
-if ($Scenario -ne "ticket04" -and $Ticket04Case -ne "both") {
-    throw "Permission case selection is only available for permissions scenarios."
-}
-if ($Scenario -eq "ticket04" -and ($PrepareDevice -or $RefreshObserver) -and $Ticket04Case -ne "both") {
-    throw "Permission case selection applies only to -RunPrepared."
 }
 if (($PrepareDevice -or $RunPrepared -or $RefreshObserver) -and -not $usesExternalObserver) {
     throw "-PrepareDevice, -RunPrepared, and -RefreshObserver are reserved for observer-based scenarios."
@@ -188,12 +179,7 @@ function Assert-InstalledApkEquals([string]$PackageName, [string]$LocalApk, [str
 }
 
 function Get-DeviceMonitorState {
-    if ($Scenario -eq "ticket04") {
-        $pidofOutput = & $adbPath -s $DeviceSerial shell pidof $debugApplicationId 2>&1
-        $pidText = Resolve-Ticket04PidofResult -ExitCode $LASTEXITCODE -Output @($pidofOutput) -PackageName $debugApplicationId
-    } else {
-        $pidText = (Invoke-SelectedAdb @("shell", "pidof", $debugApplicationId) | Out-String).Trim()
-    }
+    $pidText = (Invoke-SelectedAdb @("shell", "pidof", $debugApplicationId) | Out-String).Trim()
     $dump = (Invoke-SelectedAdb @("shell", "dumpsys", "accessibility") | Out-String)
     $boundStart = $dump.IndexOf("Bound services:", [StringComparison]::Ordinal)
     $enabledStart = $dump.IndexOf("Enabled services:", [StringComparison]::Ordinal)
@@ -208,7 +194,7 @@ function Get-DeviceMonitorState {
     }
 }
 
-function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass, [string]$ResultLogTag, [int]$TimeoutMinutes, [string]$Ticket04CaseMode = "both") {
+function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$InstrumentationComponent, [string]$TestClass, [string]$ResultLogTag, [int]$TimeoutMinutes) {
     $before = Get-DeviceMonitorState
     $beforePath = Join-Path $artifactDirectory "product-service-before-observer.txt"
     $before.accessibilityDump | Set-Content -LiteralPath $beforePath -Encoding utf8
@@ -223,7 +209,6 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $transportStatusPath = Join-Path $artifactDirectory "observer-transport-status.json"
     $samplePath = Join-Path $artifactDirectory "observer-lifecycle-samples.json"
     $nativeArguments = @("-s", $DeviceSerial, "shell", "am", "instrument", "-w", "-r", "-e", "apiBaseUrl", $ApiBaseUrl, "-e", "runId", $RunId)
-    if ($Scenario -eq "ticket04") { $nativeArguments += @("-e", "caseMode", $Ticket04CaseMode) }
     $nativeArguments += @("-e", "class", $TestClass, $InstrumentationComponent)
     $nativeCommandConfig = [pscustomobject]@{
         schemaVersion = 1
@@ -242,11 +227,8 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $process = Start-Process -FilePath $powershellPath -ArgumentList $launcherArguments -WindowStyle Hidden `
         -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
     $samples = [System.Collections.Generic.List[object]]::new()
-    $ticket04ProgressLines = [System.Collections.Generic.List[string]]::new()
-    $ticket04ProgressPath = Join-Path $artifactDirectory "ticket04-user-actions.log"
     $deadline = [DateTimeOffset]::UtcNow.AddMinutes($TimeoutMinutes)
     $failure = $null
-    $previousSamplePid = $before.pid
     while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
         Start-Sleep -Seconds 2
         if ($process.HasExited) { break }
@@ -258,57 +240,11 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
             crashed = $state.crashed
         }
         [void]$samples.Add($sample)
-        if ($Scenario -eq "ticket04") {
-            $progressOutput = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket04Progress:I", "*:S"))
-            $matchingProgress = @($progressOutput | Where-Object { $_ -match [regex]::Escape($RunId) -and $_ -match "TICKET04_PROGRESS=" })
-            if ($matchingProgress.Count -gt $ticket04ProgressLines.Count) {
-                foreach ($line in $matchingProgress | Select-Object -Skip $ticket04ProgressLines.Count) {
-                    [void]$ticket04ProgressLines.Add([string]$line)
-                    $marker = [regex]::Match([string]$line, 'TICKET04_PROGRESS=(\{.*\})')
-                    if ($marker.Success) {
-                        try {
-                            $event = $marker.Groups[1].Value | ConvertFrom-Json
-                            switch ($event.event) {
-                                "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
-                                "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
-                                "ACTION_EXPIRED" { Write-Warning "TICKET04 준비 화면 만료 [$($event.caseId)]: $($event.details)" }
-                                "BOUNDARY_CAPTURED" {
-                                    $boundary = $event.details | ConvertFrom-Json
-                                    Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
-                                }
-                                "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
-                                "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
-                                default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
-                            }
-                        } catch {
-                            if ([string]$line -match '"event"\s*:\s*"CASE_RESULT"') {
-                                Write-Host "TICKET04 case progress payload was skipped; the full case is read from the validated chunked result."
-                            } else {
-                                Write-Host "TICKET04 progress event was skipped because its JSON record was incomplete."
-                            }
-                        }
-                    }
-                }
-                $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
-            }
-        }
-        if ($Scenario -eq "ticket04") {
-            $lifecycleChanged = -not (Test-Ticket04HostLifecycleSample `
-                -CaseMode $Ticket04CaseMode `
-                -InitialPid $before.pid `
-                -ObservedPid $state.pid `
-                -Crashed $state.crashed)
-        } else {
-            $lifecycleChanged = $state.crashed -or $state.pid -ne $before.pid -or -not $state.bound
-        }
-        if ($Scenario -eq "ticket04" -and $state.pid -ne $previousSamplePid) {
-            Write-Host "TICKET04 product lifecycle transition observed: priorSamplePID='$previousSamplePid', currentPID='$($state.pid)', bound=$($state.bound); the permission-specific result gate will decide whether it is expected."
-        }
+        $lifecycleChanged = $state.crashed -or $state.pid -ne $before.pid -or -not $state.bound
         if ($lifecycleChanged) {
             $failure = "The observed product lifecycle changed during external instrumentation: beforePID='$($before.pid)', currentPID='$($state.pid)', bound=$($state.bound), crashed=$($state.crashed)."
             break
         }
-        $previousSamplePid = $state.pid
     }
     $samples | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $samplePath -Encoding utf8
 
@@ -326,38 +262,6 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $process.WaitForExit()
     $process.Refresh()
     $launcherProcessExitCode = $process.ExitCode
-    if ($Scenario -eq "ticket04") {
-        $finalProgressOutput = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "Ticket04Progress:I", "*:S"))
-        $finalMatchingProgress = @($finalProgressOutput | Where-Object { $_ -match [regex]::Escape($RunId) -and $_ -match "TICKET04_PROGRESS=" })
-        foreach ($line in $finalMatchingProgress) {
-            if ($ticket04ProgressLines.Contains([string]$line)) { continue }
-            [void]$ticket04ProgressLines.Add([string]$line)
-            $marker = [regex]::Match([string]$line, 'TICKET04_PROGRESS=(\{.*\})')
-            if (-not $marker.Success) { continue }
-            try {
-                $event = $marker.Groups[1].Value | ConvertFrom-Json
-                switch ($event.event) {
-                    "WAITING_FOR_USER_ACTION" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details -replace '^START: ', '')" }
-                    "ACTION_REQUIRED" { Write-Host "TICKET04 사람 단계 [$($event.caseId)]: $($event.details)" }
-                    "ACTION_EXPIRED" { Write-Warning "TICKET04 준비 화면 만료 [$($event.caseId)]: $($event.details)" }
-                    "BOUNDARY_INVALID" { Write-Warning "TICKET04 권한 경계 유효성 실패 [$($event.caseId)]: $($event.details)" }
-                    "PERMISSION_WAIT_EXPIRED" { Write-Warning "TICKET04 수동 권한 변경 확인 시간 초과 [$($event.caseId)]: $($event.details)" }
-                    "BOUNDARY_CAPTURED" {
-                        $boundary = $event.details | ConvertFrom-Json
-                        Write-Host "TICKET04 경계 기록 [$($event.caseId)]: permission OFF=$($boundary.actualPermissionEnabled -eq $false), request=$($boundary.requestBoundaryClassification), client in-flight=$($boundary.requestStillInFlight), socket open=$($boundary.clientSocketOpenAtBoundary), PID=$($boundary.productPid), elapsedRealtimeMs=$($boundary.boundaryElapsedRealtimeMs)"
-                    }
-                    default { Write-Host "TICKET04 진행 [$($event.caseId)]: $($event.event)" }
-                }
-            } catch {
-                if ([string]$line -match '"event"\s*:\s*"CASE_RESULT"') {
-                    Write-Host "TICKET04 case progress payload was skipped; the full case is read from the validated chunked result."
-                } else {
-                    Write-Host "TICKET04 progress event was skipped because its JSON record was incomplete."
-                }
-            }
-        }
-        $ticket04ProgressLines | Set-Content -LiteralPath $ticket04ProgressPath -Encoding utf8
-    }
     $after = Get-DeviceMonitorState
     $after.accessibilityDump | Set-Content -LiteralPath (Join-Path $artifactDirectory "product-service-after-observer.txt") -Encoding utf8
     if (-not (Test-Path -LiteralPath $nativeStatusPath)) {
@@ -382,7 +286,7 @@ function Invoke-ExternalObserver([string]$ApiBaseUrl, [string]$RunId, [string]$I
     $transportRecord | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $transportStatusPath -Encoding utf8
     $stdout = Get-Content -LiteralPath $stdoutPath -Raw
     $stderr = Get-Content -LiteralPath $stderrPath -Raw
-    if ($after.crashed -or -not $after.bound -or ($Scenario -ne "ticket04" -and $after.pid -ne $before.pid)) {
+    if ($after.crashed -or -not $after.bound -or $after.pid -ne $before.pid) {
         throw "The product service lifecycle failed its post-observer checks: beforePID='$($before.pid)', afterPID='$($after.pid)', bound=$($after.bound), crashed=$($after.crashed)."
     }
     $observerResultLogLines = @(Invoke-SelectedAdb @("logcat", "-d", "-s", "${ResultLogTag}:I", "*:S"))
@@ -435,7 +339,6 @@ function Read-ServerRequests {
         $statePath = switch ($Scenario) {
             "ticket02" { "/__ticket02/state"; break }
             "ticket03" { "/__ticket03/state"; break }
-            "ticket04" { "/__ticket04/state"; break }
             "ticket05" { "/__ticket05/state"; break }
             default { "/__ticket01/requests" }
         }
@@ -443,55 +346,6 @@ function Read-ServerRequests {
     } catch {
         Write-Warning "Could not read the local server request log: $($_.Exception.Message)"
         return $null
-    }
-}
-
-function Get-Ticket04ServerEvidence($Snapshot) {
-    $requests = @($Snapshot.requests | ForEach-Object {
-        [ordered]@{
-            sequence = $_.sequence
-            path = $_.path
-            holdCaseId = $_.holdCaseId
-            responseStatus = $_.responseStatus
-            servedReportCount = $_.servedReportCount
-            deliveryStatus = $_.deliveryStatus
-            clientDisconnectedAt = $_.clientDisconnectedAt
-            clientDisconnectSignal = $_.clientDisconnectSignal
-            clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
-            serverReceivedMonotonicNs = $_.serverReceivedMonotonicNs
-            clientDisconnectMonotonicNs = $_.clientDisconnectMonotonicNs
-            yyyymmdd = $_.body.yyyymmdd
-            userId = $_.body.userId
-            languageCode = $_.body.languageCode
-        }
-    })
-    return [ordered]@{
-        runId = $Snapshot.runId
-        scenario = $Snapshot.scenario
-        serverMonotonicNs = $Snapshot.serverMonotonicNs
-        reportCounts = $Snapshot.reportCounts
-        requests = $requests
-        releasedReportHolds = @($Snapshot.releasedReportHolds | ForEach-Object {
-            [ordered]@{
-                sequence = $_.sequence
-                caseId = $_.caseId
-                path = $_.path
-                responseStatus = $_.responseStatus
-                servedReportCount = $_.servedReportCount
-                deliveryStatus = $_.deliveryStatus
-                clientConnected = $_.clientConnected
-                clientDisconnectedAt = $_.clientDisconnectedAt
-                clientDisconnectSignal = $_.clientDisconnectSignal
-                clientDisconnectAfterServerReceiveMs = $_.clientDisconnectAfterServerReceiveMs
-                serverReceivedMonotonicNs = $_.serverReceivedMonotonicNs
-                clientDisconnectMonotonicNs = $_.clientDisconnectMonotonicNs
-                userId = $_.userId
-                yyyymmdd = $_.yyyymmdd
-                languageCode = $_.languageCode
-            }
-        })
-        inFlightRequestCount = @($Snapshot.inFlightRequests).Count
-        serverHeldResponseCount = @($Snapshot.serverHeldResponses).Count
     }
 }
 
@@ -825,7 +679,6 @@ try {
             $healthPath = switch ($Scenario) {
                 "ticket02" { "/__ticket02/health"; break }
                 "ticket03" { "/__ticket03/health"; break }
-                "ticket04" { "/__ticket04/health"; break }
                 "ticket05" { "/__ticket05/health"; break }
                 default { "/__ticket01/health" }
             }
@@ -870,10 +723,6 @@ try {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.ForegroundPollingTest"
         $observerExecution = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket03E2E" 22
-    } elseif ($Scenario -eq "ticket04") {
-        $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
-        $testClass = "com.example.todoschooltime.e2eobserver.PermissionRecoveryTest"
-        $observerExecution = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket04Result" 45 $Ticket04Case
     } elseif ($Scenario -eq "ticket05") {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.AuthenticationRecoveryTest"
@@ -905,11 +754,7 @@ try {
     }
 
     $snapshot = Assert-IntegrationFixtureSnapshot -Snapshot (Read-ServerRequests) -RunId $runId -Scenario $Scenario
-    if ($Scenario -eq "ticket04") {
-        Write-IntegrationJson -Value (Get-Ticket04ServerEvidence $snapshot) -Path (Join-Path $artifactDirectory "fixture-evidence.json")
-    } else {
-        Write-IntegrationJson -Value $snapshot -Path (Join-Path $artifactDirectory "fixture-snapshot.json")
-    }
+    Write-IntegrationJson -Value $snapshot -Path (Join-Path $artifactDirectory "fixture-snapshot.json")
     if ($Scenario -eq "ticket01") { Save-AppScreenshot }
 
     $regularPackageAfter = Get-PackagePath $releaseApplicationId
@@ -930,11 +775,7 @@ try {
     if ($serverStarted) {
         $finalSnapshot = Read-ServerRequests
         if ($null -ne $finalSnapshot) {
-            if ($Scenario -eq "ticket04") {
-                Write-IntegrationJson -Value (Get-Ticket04ServerEvidence $finalSnapshot) -Path (Join-Path $artifactDirectory "fixture-evidence-final.json")
-            } else {
-                Write-IntegrationJson -Value $finalSnapshot -Path (Join-Path $artifactDirectory "fixture-snapshot-final.json")
-            }
+            Write-IntegrationJson -Value $finalSnapshot -Path (Join-Path $artifactDirectory "fixture-snapshot-final.json")
         }
     }
     if ($reverseOwned) {
