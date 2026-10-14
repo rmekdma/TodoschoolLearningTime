@@ -3,10 +3,13 @@ Import-Module (Join-Path $PSScriptRoot "InstrumentationOutcome.psm1") -Force
 
 $runId = "0123456789abcdef0123456789abcdef"
 $goodOutputLines = @(
+    "",
     "INSTRUMENTATION_STATUS_CODE: 0",
     "INSTRUMENTATION_STATUS: class=com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest",
+    "",
     "OK (1 test)",
-    "INSTRUMENTATION_CODE: -1"
+    "INSTRUMENTATION_CODE: -1",
+    ""
 )
 $goodOutput = @(Get-Ticket05InstrumentationOutput -Lines $goodOutputLines) -join "`n"
 $goodResult = '{"runId":"0123456789abcdef0123456789abcdef","scenario":"ticket05"}'
@@ -31,10 +34,13 @@ Assert-Rejected { Assert-Ticket05InstrumentationOutcome $goodStatus 2 $goodOutpu
 Assert-Rejected { Assert-Ticket05InstrumentationOutcome $goodStatus 0 $goodOutput '{"runId":"0123456789abcdef0123456789abcdef","scenario":"ticket04"}' $runId } "a structured result from another scenario"
 
 $conflictingOutputLines = @(
+    "",
     "INSTRUMENTATION_STATUS_CODE: -2",
     "INSTRUMENTATION_STATUS: class=com.example.todoschooltime.e2eobserver.Ticket05HttpAuthRecoveryTest",
+    "FAILURES!!!",
     "OK (1 test)",
-    "INSTRUMENTATION_CODE: -1"
+    "INSTRUMENTATION_CODE: -1",
+    ""
 )
 $filteredConflictingOutput = @(Get-Ticket05InstrumentationOutput -Lines $conflictingOutputLines) -join "`n"
 if ($filteredConflictingOutput -notmatch 'INSTRUMENTATION_STATUS_CODE:\s*-2') {

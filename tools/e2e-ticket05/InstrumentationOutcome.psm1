@@ -1,6 +1,6 @@
 function Get-Ticket05InstrumentationOutput {
     [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string[]]$Lines)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string[]]$Lines)
 
     $patterns = @(
         'OK \(1 test\)',
