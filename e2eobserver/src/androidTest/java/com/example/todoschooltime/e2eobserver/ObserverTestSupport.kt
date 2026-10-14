@@ -75,10 +75,6 @@ internal fun JSONArray.strings(): List<String> = buildList {
     for (index in 0 until length()) add(getString(index))
 }
 
-internal fun JSONArray.ints(): List<Int> = buildList {
-    for (index in 0 until length()) add(getInt(index))
-}
-
 internal fun eventsAfter(events: JSONArray, sequence: Long): List<JSONObject> =
     events.objects().filter { it.optLong("sequence") > sequence }
 

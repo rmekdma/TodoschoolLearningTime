@@ -3,7 +3,6 @@ package com.example.todoschooltime.e2eobserver
 import android.app.Instrumentation
 import android.app.UiAutomation
 import android.content.Intent
-import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -25,6 +24,8 @@ import org.junit.runner.RunWith
 /** Observes reboot preparation and boot restoration from a separate, non-product process. */
 @RunWith(AndroidJUnit4::class)
 class RebootRecoveryTest {
+    private val accessibilitySupport = ObserverAccessibilitySupport(pollIntervalMs = POLL_INTERVAL_MS, searchWindowRoots = true)
+
     @Test
     fun runRequestedPhase() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -531,88 +532,26 @@ class RebootRecoveryTest {
         ObserverTestSupport.fixtureRequest(apiBaseUrl, method, path, SERVER_TIMEOUT_MS, body)
 
 
-    private fun setField(field: AccessibilityNodeInfo, value: String) {
-        val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) }
-        assertTrue("Could not enter text into an actual app field", field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args))
-    }
+    private fun setField(field: AccessibilityNodeInfo, value: String) =
+        accessibilitySupport.setField(field, value, "Could not enter text into an actual app field")
 
-    private fun clickDescription(automation: UiAutomation, description: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.contentDescription?.toString() == description && it.isClickable }
-        assertTrue("Could not tap '$description'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickDescription(automation: UiAutomation, description: String) =
+        accessibilitySupport.clickDescription(automation, description, TIMEOUT_MS, "Could not tap '" + description + "'")
 
-    private fun clickText(automation: UiAutomation, text: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.text?.toString() == text && it.isClickable }
-        assertTrue("Could not tap '$text'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickText(automation: UiAutomation, text: String) =
+        accessibilitySupport.clickText(automation, text, TIMEOUT_MS, "Could not tap '" + text + "'")
 
     private fun waitForNode(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo =
-        findNodeOrNull(automation, timeoutMs, predicate) ?: throw AssertionError("Timed out waiting for an actual UI element")
+        accessibilitySupport.waitForNode(automation, timeoutMs, predicate, "Timed out waiting for an actual UI element")
 
-    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
-        do {
-            accessibilityRoots(automation).forEach { root -> findNode(root, predicate)?.let { return it } }
-            SystemClock.sleep(POLL_INTERVAL_MS)
-        } while (SystemClock.uptimeMillis() < deadline)
-        return null
-    }
+    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? =
+        accessibilitySupport.findNodeOrNull(automation, timeoutMs, predicate)
 
-    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
-        val root = findNodeOrNull(automation, timeoutMs) { predicate(it) }?.let { automation.rootInActiveWindow }
-            ?: throw AssertionError("The actual UI did not expose the expected editable fields")
-        val result = mutableListOf<AccessibilityNodeInfo>()
-        collectNodes(root, predicate, result)
-        return result
-    }
+    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> =
+        accessibilitySupport.findAllNodes(automation, timeoutMs, predicate, "The actual UI did not expose the expected editable fields")
 
-    private fun findNode(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) return node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-        return null
-    }
-
-    private fun collectNodes(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean, result: MutableList<AccessibilityNodeInfo>) {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) result += node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-    }
-
-    private fun visibleText(automation: UiAutomation): List<String> {
-        val result = mutableListOf<String>()
-        accessibilityRoots(automation).forEach { root ->
-            val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-            while (pending.isNotEmpty()) {
-                val node = pending.removeFirst()
-                node.text?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-                node.contentDescription?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-                for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-            }
-        }
-        return result
-    }
-
-    private fun accessibilityRoots(automation: UiAutomation): List<AccessibilityNodeInfo> = buildList {
-        automation.rootInActiveWindow?.let(::add)
-        try {
-            automation.windows.mapNotNull { it.root }.forEach(::add)
-        } catch (_: SecurityException) {
-            // The active root remains useful when a device does not expose interactive window roots.
-        }
-    }
-
-    private fun accessibilityWindowPackages(automation: UiAutomation): List<String> = try {
-        automation.windows.mapNotNull { it.root?.packageName?.toString() }.distinct().take(8)
-    } catch (_: SecurityException) {
-        emptyList()
-    }
+    private fun visibleText(automation: UiAutomation): List<String> =
+        accessibilitySupport.visibleText(automation)
 
     private fun emitStructuredResult(result: JSONObject, runId: String) {
         assertEquals(runId, result.getString("runId"))

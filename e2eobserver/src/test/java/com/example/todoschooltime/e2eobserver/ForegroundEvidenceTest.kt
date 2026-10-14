@@ -55,6 +55,32 @@ class ForegroundEvidenceTest {
     }
 
     @Test
+    fun ignoresForegroundChangesBeforeTheStableWindowButRejectsChangesAfterIt() {
+        val events = listOf(
+            ForegroundEventEvidence(329, "com.enuma.todoenglish"),
+            ForegroundEventEvidence(330, "com.android.launcher3"),
+            ForegroundEventEvidence(331, "com.enuma.todoenglish"),
+            ForegroundEventEvidence(332, "com.enuma.todoenglish"),
+        )
+
+        assertEquals(
+            events.drop(2),
+            foregroundEventsAfterCursor(
+                events = events,
+                expectedPackage = "com.enuma.todoenglish",
+                afterSequence = 330,
+            ),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            foregroundEventsAfterCursor(
+                events = events + ForegroundEventEvidence(333, "com.android.launcher3"),
+                expectedPackage = "com.enuma.todoenglish",
+                afterSequence = 330,
+            )
+        }
+    }
+
+    @Test
     fun rejectsLeavingTheExpectedForegroundPackageAfterTheWindowStarts() {
         val events = listOf(
             ForegroundEventEvidence(182, "com.enuma.todohangeul"),

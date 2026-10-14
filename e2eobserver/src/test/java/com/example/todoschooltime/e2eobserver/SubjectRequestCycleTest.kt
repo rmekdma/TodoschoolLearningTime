@@ -20,57 +20,32 @@ class SubjectRequestCycleTest {
     }
 
     @Test
-    fun rejectsAReportForTheWrongSubject() {
+    fun rejectsMalformedSubjectRequestPathSequences() {
         val wrongSubject = SubjectRequestCycle.HANGEUL_PATHS.dropLast(1) + "/v3/todoschool/report/daily/english"
-
-        assertNull(
-            findFirstExactSubjectRequestCycleAfter(
-                requests = requests(wrongSubject, firstSequence = 8L),
-                afterSequence = 7L,
-                expectedPaths = SubjectRequestCycle.HANGEUL_PATHS,
-            ),
-        )
-    }
-
-    @Test
-    fun rejectsAMissingRequest() {
-        assertNull(
-            findFirstExactSubjectRequestCycleAfter(
-                requests = requests(SubjectRequestCycle.HANGEUL_PATHS.dropLast(1), firstSequence = 8L),
-                afterSequence = 7L,
-                expectedPaths = SubjectRequestCycle.HANGEUL_PATHS,
-            ),
-        )
-    }
-
-    @Test
-    fun rejectsAnExtraRequestBeforeTheNextCycleBoundary() {
+        val missingRequest = SubjectRequestCycle.HANGEUL_PATHS.dropLast(1)
         val extraRequest = SubjectRequestCycle.HANGEUL_PATHS + "/v3/todoschool/report/daily/math"
-
-        assertNull(
-            findFirstExactSubjectRequestCycleAfter(
-                requests = requests(extraRequest, firstSequence = 8L),
-                afterSequence = 7L,
-                expectedPaths = SubjectRequestCycle.HANGEUL_PATHS,
-            ),
-        )
-    }
-
-    @Test
-    fun rejectsRequestsPresentedInTheWrongOrder() {
         val wrongOrder = SubjectRequestCycle.HANGEUL_PATHS.toMutableList().apply {
             val firstCatalog = this[1]
             this[1] = this[2]
             this[2] = firstCatalog
         }
-
-        assertNull(
-            findFirstExactSubjectRequestCycleAfter(
-                requests = requests(wrongOrder, firstSequence = 8L),
-                afterSequence = 7L,
-                expectedPaths = SubjectRequestCycle.HANGEUL_PATHS,
-            ),
+        val malformedCases: List<Pair<String, List<String>>> = listOf(
+            "wrong report subject" to wrongSubject,
+            "missing request" to missingRequest,
+            "extra request" to extraRequest,
+            "wrong request order" to wrongOrder,
         )
+
+        malformedCases.forEach { (description, paths) ->
+            assertNull(
+                description,
+                findFirstExactSubjectRequestCycleAfter(
+                    requests = requests(paths, firstSequence = 8L),
+                    afterSequence = 7L,
+                    expectedPaths = SubjectRequestCycle.HANGEUL_PATHS,
+                ),
+            )
+        }
     }
 
     @Test

@@ -532,7 +532,7 @@ try {
         $releaseManifest -notmatch "android:usesCleartextTraffic.*\(type 0x12\)0x0") {
         throw "Debug and release APKs must both declare cleartext traffic disabled by default."
     }
-    $debugNetworkConfig = (& $aaptPath dump xmltree $debugApk "res/xml/ticket01_network_security_config.xml" 2>&1) -join "`n"
+    $debugNetworkConfig = (& $aaptPath dump xmltree $debugApk "res/xml/local_test_network_security_config.xml" 2>&1) -join "`n"
     if ($debugNetworkConfig -notmatch "E: base-config[\s\S]*?cleartextTrafficPermitted.*0x0" -or
         $debugNetworkConfig -notmatch "E: domain-config[\s\S]*?cleartextTrafficPermitted.*0xffffffff" -or
         $debugNetworkConfig -notmatch 'C: "127\.0\.0\.1"' -or
@@ -550,7 +550,7 @@ try {
         if ($observerPermissions -notmatch "android.permission.INTERNET") {
             throw "External observer APK needs INTERNET permission to call only the host-mapped loopback fixture."
         }
-        $observerNetworkConfig = (& $aaptPath dump xmltree $observerApk "res/xml/ticket02_network_security_config.xml" 2>&1) -join "`n"
+        $observerNetworkConfig = (& $aaptPath dump xmltree $observerApk "res/xml/local_test_network_security_config.xml" 2>&1) -join "`n"
         if ($observerNetworkConfig -notmatch "E: base-config[\s\S]*?cleartextTrafficPermitted.*0x0" -or
             $observerNetworkConfig -notmatch "E: domain-config[\s\S]*?cleartextTrafficPermitted.*0xffffffff" -or
             $observerNetworkConfig -notmatch 'C: "127\.0\.0\.1"' -or

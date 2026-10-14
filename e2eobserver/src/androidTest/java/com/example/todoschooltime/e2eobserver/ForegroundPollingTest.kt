@@ -3,7 +3,6 @@ package com.example.todoschooltime.e2eobserver
 import android.app.Instrumentation
 import android.app.UiAutomation
 import android.content.Intent
-import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityNodeInfo
@@ -28,6 +27,7 @@ import org.junit.runner.RunWith
 /** Exercises real accessibility foreground events while an independent package observes the product. */
 @RunWith(AndroidJUnit4::class)
 class ForegroundPollingTest {
+    private val accessibilitySupport = ObserverAccessibilitySupport(pollIntervalMs = POLL_INTERVAL_MS)
     private var screenWakeLock: PowerManager.WakeLock? = null
     private var screenWakeAutomation: UiAutomation? = null
     private var stayAwakeEvidence: JSONObject? = null
@@ -478,6 +478,7 @@ class ForegroundPollingTest {
             unexpectedTransitionReports.isEmpty(),
         )
         val foregroundObservedAtElapsedMs = observationStart.getLong("observationWindowStartedAtElapsedRealtimeMs")
+        val stableWindowForegroundCursor = observationStart.getLong("foregroundEventCursorAtWindowStart")
         val foregroundObservedAtUtc = Instant.now().toString()
         val requestState = if (requestsDuringTransition.any { it.optString("path") == path }) {
             observationStart.getJSONObject("fixtureStateAtWindowStart")
@@ -540,7 +541,7 @@ class ForegroundPollingTest {
             foregroundState,
             automation,
             expectedPackage,
-            afterForegroundSequence = foregroundEventSequence - 1,
+            afterForegroundSequence = stableWindowForegroundCursor,
         )
 
         val subjectName = SUBJECT_NAMES.getValue(subjectKey)
@@ -558,7 +559,7 @@ class ForegroundPollingTest {
             appliedForeground,
             automation,
             expectedPackage,
-            afterForegroundSequence = foregroundEventSequence - 1,
+            afterForegroundSequence = stableWindowForegroundCursor,
         )
         val cycleDispatchEvents = appliedForeground.getJSONArray("httpRequestDispatchEvents").objects().filter {
             it.getLong("sequence") > requestDispatchCursorBeforeTransition
@@ -1259,72 +1260,26 @@ class ForegroundPollingTest {
         ObserverTestSupport.fixtureRequest(apiBaseUrl, method, path, SERVER_TIMEOUT_MS, body)
 
 
-    private fun setField(field: AccessibilityNodeInfo, value: String) {
-        val arguments = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) }
-        assertTrue("Could not enter text in the product UI", field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
-    }
+    private fun setField(field: AccessibilityNodeInfo, value: String) =
+        accessibilitySupport.setField(field, value, "Could not enter text in the product UI")
 
-    private fun clickDescription(automation: UiAutomation, description: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.contentDescription?.toString() == description && it.isClickable }
-        assertTrue("Could not tap '$description'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickDescription(automation: UiAutomation, description: String) =
+        accessibilitySupport.clickDescription(automation, description, TIMEOUT_MS, "Could not tap '" + description + "'")
 
-    private fun clickText(automation: UiAutomation, text: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.text?.toString() == text && it.isClickable }
-        assertTrue("Could not tap '$text'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickText(automation: UiAutomation, text: String) =
+        accessibilitySupport.clickText(automation, text, TIMEOUT_MS, "Could not tap '" + text + "'")
 
     private fun waitForNode(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo =
-        findNodeOrNull(automation, timeoutMs, predicate) ?: throw AssertionError("Timed out waiting for a product UI control")
+        accessibilitySupport.waitForNode(automation, timeoutMs, predicate, "Timed out waiting for a product UI control")
 
-    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
-        do {
-            automation.rootInActiveWindow?.let { root -> findNode(root, predicate)?.let { return it } }
-            SystemClock.sleep(POLL_INTERVAL_MS)
-        } while (SystemClock.uptimeMillis() < deadline)
-        return null
-    }
+    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? =
+        accessibilitySupport.findNodeOrNull(automation, timeoutMs, predicate)
 
-    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
-        val root = findNodeOrNull(automation, timeoutMs) { predicate(it) }?.let { automation.rootInActiveWindow }
-            ?: throw AssertionError("No active window contains the requested UI fields")
-        val result = mutableListOf<AccessibilityNodeInfo>()
-        collectNodes(root, predicate, result)
-        return result
-    }
+    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> =
+        accessibilitySupport.findAllNodes(automation, timeoutMs, predicate, "No active window contains the requested UI fields")
 
-    private fun findNode(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) return node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-        return null
-    }
-
-    private fun collectNodes(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean, results: MutableList<AccessibilityNodeInfo>) {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) results += node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-    }
-
-    private fun visibleText(automation: UiAutomation): List<String> {
-        val root = automation.rootInActiveWindow ?: return emptyList()
-        val result = mutableListOf<String>()
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            node.text?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-            node.contentDescription?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-        return result
-    }
+    private fun visibleText(automation: UiAutomation): List<String> =
+        accessibilitySupport.visibleText(automation)
 
     private fun assertForegroundPackageStayedActive(
         state: JSONObject,

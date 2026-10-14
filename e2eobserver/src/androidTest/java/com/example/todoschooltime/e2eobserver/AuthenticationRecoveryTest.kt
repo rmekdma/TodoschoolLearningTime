@@ -4,7 +4,6 @@ import android.app.Instrumentation
 import android.app.UiAutomation
 import android.content.ComponentName
 import android.content.Intent
-import android.os.Bundle
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
@@ -25,6 +24,8 @@ import org.junit.runner.RunWith
 /** Exercises real repository HTTP outcomes from a separate process while the product service remains bound. */
 @RunWith(AndroidJUnit4::class)
 class AuthenticationRecoveryTest {
+    private val accessibilitySupport = ObserverAccessibilitySupport(pollIntervalMs = POLL_INTERVAL_MS)
+
     @Test
     fun temporaryHttpFailureRetriesAndAuthenticationExpiryRequiresUiLogin() {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -716,72 +717,26 @@ class AuthenticationRecoveryTest {
         ObserverTestSupport.fixtureRequest(apiBaseUrl, method, path, SERVER_TIMEOUT_MS, body)
 
 
-    private fun setField(field: AccessibilityNodeInfo, value: String) {
-        val arguments = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) }
-        assertTrue("Could not enter text into an app field", field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments))
-    }
+    private fun setField(field: AccessibilityNodeInfo, value: String) =
+        accessibilitySupport.setField(field, value, "Could not enter text into an app field")
 
-    private fun clickDescription(automation: UiAutomation, description: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.contentDescription?.toString() == description && it.isClickable }
-        assertTrue("Could not tap '$description'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickDescription(automation: UiAutomation, description: String) =
+        accessibilitySupport.clickDescription(automation, description, TIMEOUT_MS, "Could not tap '" + description + "'")
 
-    private fun clickText(automation: UiAutomation, text: String) {
-        val node = waitForNode(automation, TIMEOUT_MS) { it.text?.toString() == text && it.isClickable }
-        assertTrue("Could not tap '$text'", node.performAction(AccessibilityNodeInfo.ACTION_CLICK))
-    }
+    private fun clickText(automation: UiAutomation, text: String) =
+        accessibilitySupport.clickText(automation, text, TIMEOUT_MS, "Could not tap '" + text + "'")
 
     private fun waitForNode(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo =
-        findNodeOrNull(automation, timeoutMs, predicate) ?: throw AssertionError("Timed out waiting for an app view")
+        accessibilitySupport.waitForNode(automation, timeoutMs, predicate, "Timed out waiting for an app view")
 
-    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val deadline = SystemClock.uptimeMillis() + timeoutMs
-        do {
-            automation.rootInActiveWindow?.let { root -> findNode(root, predicate)?.let { return it } }
-            SystemClock.sleep(POLL_INTERVAL_MS)
-        } while (SystemClock.uptimeMillis() < deadline)
-        return null
-    }
+    private fun findNodeOrNull(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? =
+        accessibilitySupport.findNodeOrNull(automation, timeoutMs, predicate)
 
-    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
-        val root = findNodeOrNull(automation, timeoutMs) { predicate(it) }?.let { automation.rootInActiveWindow }
-            ?: throw AssertionError("No active window contains the requested app fields")
-        val result = mutableListOf<AccessibilityNodeInfo>()
-        collectNodes(root, predicate, result)
-        return result
-    }
+    private fun findAllNodes(automation: UiAutomation, timeoutMs: Long, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> =
+        accessibilitySupport.findAllNodes(automation, timeoutMs, predicate, "No active window contains the requested app fields")
 
-    private fun findNode(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) return node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-        return null
-    }
-
-    private fun collectNodes(root: AccessibilityNodeInfo, predicate: (AccessibilityNodeInfo) -> Boolean, results: MutableList<AccessibilityNodeInfo>) {
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            if (predicate(node)) results += node
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-    }
-
-    private fun visibleText(automation: UiAutomation): List<String> {
-        val root = automation.rootInActiveWindow ?: return emptyList()
-        val result = mutableListOf<String>()
-        val pending = ArrayDeque<AccessibilityNodeInfo>().apply { addLast(root) }
-        while (pending.isNotEmpty()) {
-            val node = pending.removeFirst()
-            node.text?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-            node.contentDescription?.toString()?.takeIf(String::isNotBlank)?.let(result::add)
-            for (index in 0 until node.childCount) node.getChild(index)?.let(pending::addLast)
-        }
-        return result
-    }
+    private fun visibleText(automation: UiAutomation): List<String> =
+        accessibilitySupport.visibleText(automation)
 
     private fun subject(state: JSONObject, subjectName: String): JSONObject =
         state.getJSONObject("children").getJSONObject(CHILD_NAME).getJSONObject("subjects").getJSONObject(subjectName)

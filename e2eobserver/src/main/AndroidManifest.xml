@@ -12,7 +12,7 @@
     <application
         android:allowBackup="false"
         android:label="학습 감시 E2E 검사"
-        android:networkSecurityConfig="@xml/ticket02_network_security_config"
+        android:networkSecurityConfig="@xml/local_test_network_security_config"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
     </application>
