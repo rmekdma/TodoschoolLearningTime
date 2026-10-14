@@ -12,7 +12,7 @@ Copy-Item tools/e2e-ticket01/config.example.json tools/e2e-ticket01/config.json
 .\tools\e2e-ticket02\Run-Ticket02.ps1 -PrepareDevice
 ```
 
-`-PrepareDevice`는 필요한 debug, instrumentation, E2E, release 및 observer APK를 빌드하고 debug 앱·observer·observer 테스트를 기기에 설치한 뒤 준비 manifest를 기록합니다. debug/release lint도 실행하지만 전체 unit test suite는 실행하지 않습니다. 이 단계에서는 임시 서버를 시작하거나 시나리오를 실행하지 않습니다.
+`-PrepareDevice`는 필요한 debug, instrumentation, release 및 외부 observer APK를 빌드하고 debug 앱·observer·observer 테스트를 기기에 설치한 뒤 준비 manifest를 기록합니다. debug/release lint도 실행하지만 전체 unit test suite는 실행하지 않습니다. 이 단계에서는 임시 서버를 시작하거나 시나리오를 실행하지 않습니다.
 
 설치가 끝난 뒤 기기에서 직접 다음을 준비합니다. 앱 레이블은 `토도 학습시간 · 로컬 테스트`, 접근성 서비스 레이블은 `토도 학습 감시 · 로컬 테스트`입니다.
 

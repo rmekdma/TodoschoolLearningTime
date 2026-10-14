@@ -21,6 +21,19 @@ The separate observer package is `com.example.todoschooltime.e2eobserver`. The d
 
 The runner configuration in `tools/e2e-ticket01/config.json` controls device selection, local fixture port, and Java/Python paths. See [Ticket 01](tools/e2e-ticket01/README.md) for setup and the default-port build property.
 
+## Replaced fake controls and retained coverage
+
+The retired `e2e` app variant and its broadcast command API have no supported invocation path. Scenario setup now uses the debug app UI and a run-scoped HTTP fixture; observation uses the separate read-only observer. Fixture reset clears only that run's server state and never resets app preferences or product data.
+
+| Retired harness behavior | Current replacement and coverage |
+| --- | --- |
+| Fake account, catalog, and report responses (`E2eFakeRepository`) | The loopback fixture feeds the real HTTP repository. Ticket 01 covers sign-in, catalog, and report screens; Ticket 03 verifies reports follow the foreground subject; Ticket 05 covers HTTP 500, expired authentication, UI sign-in, and recovery. |
+| `setReport` count, outcome, and delay inputs | Fixture report counts and held responses exercise real HTTP callbacks. Ticket 01 and Ticket 03 cover report inputs and cadence; Ticket 04 covers a pending request and permission boundary; Ticket 05 covers server and authentication failures. `LearningMonitorEngineTest` retains delayed stale-response and rejected-authentication regressions. |
+| Register/unregister, target and interval changes, and app `reset` | Scenarios perform supported actions through the real debug UI. Tickets 03 and 06 cover registration and removal; Ticket 06 covers target/interval setup and reboot restoration. `LearningMonitorEngineTest`, `TargetCountStoreTest`, and `SubjectSubscriptionTest` retain engine and persistence coverage. A fixture reset is not an app-state reset. |
+| `getState` for engine, service, permission, and active notification state | The debug-only `LearningMonitorDiagnosticsProvider` reads the real engine snapshot and Android state. `Ticket02ProviderDiagnosticsTest` and `LearningMonitorDiagnosticsTest` exercise the read-only diagnostics contract. |
+| `getEvents`/`clearEvents`, fake query audit, and notification audit | The observer reads real foreground and HTTP-dispatch events, notification requests, service lease, and Android active notifications. The fixture records received paths and in-flight requests. `LearningMonitorDiagnosticsTest` covers the debug event cursor and release exclusion; no fake event buffer or clear command remains. |
+| App fake clock and `advanceDate` | Server scenarios use the device's current date and do not advance either clock. `DateHelperTest` and `LearningMonitorEngineTest` keep fake-clock coverage for Seoul date boundaries, date reevaluation, and stale results. App-level runtime date advancement remains unobserved. |
+
 ## Date coverage and limits
 
 Device scenarios use the device's actual date through `DateHelper`'s `Asia/Seoul` calendar; the server fixture does not advance the app or device clock. `DateHelperTest` and `LearningMonitorEngineTest` retain fake-clock coverage for Seoul date boundaries, date reevaluation, and stale result handling. Runtime date advancement inside the app is not observed by the server-backed scenarios.

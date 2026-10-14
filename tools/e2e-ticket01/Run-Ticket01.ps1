@@ -1404,7 +1404,7 @@ try {
     & $pythonPath (Join-Path $PSScriptRoot "inspect_apks.py") `
         --debug-apk $debugApk --release-apk $releaseApk --api-base-url $apiBaseUrl
     if ($LASTEXITCODE -ne 0) { throw "Debug/release API URL artifact inspection failed." }
-    Write-Host "PASS debug and release APK settings; existing fake E2E app ID and no-INTERNET boundary remain intact."
+    Write-Host "PASS debug/release APK identity, INTERNET permission, API URL, and network-policy checks."
 
     # Ticket 03 intentionally reuses Ticket 02's prepared package identities and product APK.
     $preparedDeviceDirectory = Join-Path $repositoryRoot "build\e2e-ticket02"
