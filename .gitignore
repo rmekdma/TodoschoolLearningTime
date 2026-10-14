@@ -4,7 +4,8 @@ build/
 
 # Local configuration file (sdk path, etc)
 local.properties
-tools/e2e-ticket01/config.json
+tools/config.json
+tools/__pycache__/
 
 # Log/OS Files
 *.log

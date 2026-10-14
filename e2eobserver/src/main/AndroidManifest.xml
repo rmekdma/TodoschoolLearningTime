@@ -16,7 +16,7 @@
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
-            android:name=".Ticket04ControlActivity"
+            android:name=".PermissionControlActivity"
             android:exported="false" />
     </application>
 </manifest>
