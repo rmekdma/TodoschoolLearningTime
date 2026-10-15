@@ -4,11 +4,10 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.DatePickerDialog
 import android.content.DialogInterface
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.text.InputFilter
 import android.text.InputType
 import android.text.SpannableStringBuilder
@@ -21,6 +20,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
+import android.provider.Settings
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -31,16 +31,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
-import java.security.KeyStore
 import java.time.LocalDate
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 import kotlin.math.ceil
 import kotlin.math.roundToInt
 
@@ -48,7 +39,12 @@ class MainActivity : Activity() {
     private var learningDate: LocalDate = DateHelper.today()
     private val requestTracker = AsyncRequestTracker()
     private val targetCountStore by lazy { TargetCountStore(this) }
+    private val learningMonitor by lazy { (application as TodoSchoolApplication).learningMonitor }
+    private val learningMonitorScreenUseCases by lazy { (application as TodoSchoolApplication).learningMonitorScreenUseCases }
     private var currentResult: LearningResult? = null
+    private var monitorSnapshot: LearningMonitorSnapshot = LearningMonitorSnapshot()
+    private var monitorSubscription: MonitorSubscription? = null
+    private var screenRequest: LearningReportRequestHandle? = null
 
     private lateinit var rootLayout: LinearLayout
     private lateinit var topNavLayout: LinearLayout
@@ -56,6 +52,9 @@ class MainActivity : Activity() {
     private lateinit var datePickerButton: TextView
     private lateinit var nextDateButton: TextView
     private lateinit var checkedAtView: TextView
+    private lateinit var intervalButton: TextView
+    private lateinit var monitorStatusView: TextView
+    private lateinit var monitorSettingsButton: TextView
     private lateinit var swipeRefreshLayout: SwipeRefreshLayout
     private lateinit var childrenContainer: LinearLayout
     private lateinit var errorView: TextView
@@ -77,7 +76,29 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        learningMonitorScreenUseCases.reevaluateMonitoringDate()
         updateDateNavUi()
+        monitorSubscription?.close()
+        monitorSubscription = learningMonitor.observe { snapshot ->
+            if (isFinishing || isDestroyed || snapshot.revision < monitorSnapshot.revision) return@observe
+            monitorSnapshot = snapshot
+            updateMonitorControls()
+            currentResult?.let(::renderChildren)
+        }
+        updateMonitorControls()
+    }
+
+    override fun onPause() {
+        monitorSubscription?.close()
+        monitorSubscription = null
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        requestTracker.nextRequestId()
+        screenRequest?.cancel()
+        screenRequest = null
+        super.onDestroy()
     }
 
     private fun setupSystemBars() {
@@ -214,9 +235,143 @@ class MainActivity : Activity() {
 
         rootLayout.addView(topNavLayout)
         rootLayout.addView(checkedAtView)
+        buildMonitorControls()
         rootLayout.addView(swipeRefreshLayout)
 
         setContentView(rootLayout)
+    }
+
+    private fun buildMonitorControls() {
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(4), dp(20), dp(8))
+        }
+        val buttons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        intervalButton = TextView(this).apply {
+            textSize = 14f
+            setTextColor(Color.rgb(30, 30, 30))
+            minimumHeight = dp(44)
+            gravity = Gravity.CENTER_VERTICAL
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(8), 0, dp(16), 0)
+            setOnClickListener { showMonitorIntervalDialog() }
+        }
+        monitorSettingsButton = TextView(this).apply {
+            text = "감시 설정"
+            textSize = 14f
+            setTextColor(Color.rgb(30, 30, 30))
+            minimumHeight = dp(44)
+            gravity = Gravity.CENTER
+            isClickable = true
+            isFocusable = true
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener {
+                if (monitorSnapshot.authenticationRequired) {
+                    askCredentials("로그인이 만료되어 아이별 감시를 일시 중지했습니다. 다시 로그인해주세요.")
+                } else {
+                    showMonitorSetupDialog()
+                }
+            }
+        }
+        buttons.addView(intervalButton)
+        buttons.addView(monitorSettingsButton)
+        monitorStatusView = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.rgb(110, 110, 110))
+            setPadding(dp(8), 0, dp(8), dp(4))
+        }
+        controls.addView(buttons)
+        controls.addView(monitorStatusView)
+        rootLayout.addView(controls)
+    }
+
+    private fun updateMonitorControls() {
+        if (!::intervalButton.isInitialized) return
+        intervalButton.text = "감시 간격 ${monitorSnapshot.intervalMinutes}분"
+        val executionStatus = learningMonitorScreenUseCases.refreshExecutionConditions()
+        monitorSettingsButton.text = if (monitorSnapshot.authenticationRequired) "다시 로그인" else "감시 설정"
+        val accessibilityText = when {
+            !executionStatus.accessibilityEnabled -> "접근성 설정 필요"
+            monitorSnapshot.serviceLeaseAttached -> "접근성 연결됨"
+            else -> "접근성 연결 대기"
+        }
+        val notificationText = if (executionStatus.notificationsEnabled) "알림 사용 가능" else "알림 권한 필요"
+        val stateText = when {
+            monitorSnapshot.authenticationRequired -> "다시 로그인 필요"
+            monitorSnapshot.monitoringPaused -> "감시 일시 중지"
+            monitorSnapshot.connectionWaiting -> "연결 대기 중"
+            monitorSnapshot.foregroundObservationPending && monitorSnapshot.serviceLeaseAttached &&
+                executionStatus.permissionsReady -> "전면 앱 확인 대기"
+            else -> null
+        }
+        monitorStatusView.text = listOfNotNull(accessibilityText, notificationText, stateText).joinToString(" · ")
+    }
+
+    private fun showMonitorSetupDialog() {
+        val executionStatus = learningMonitorScreenUseCases.inspectExecutionStatus()
+        val message = buildString {
+            append("아이별 감시를 계속 실행하려면 접근성 서비스와 알림을 허용하세요.\n\n")
+            append("접근성: ")
+            append(if (executionStatus.accessibilityEnabled) "설정됨" else "설정 필요")
+            append(if (executionStatus.accessibilityEnabled && monitorSnapshot.serviceLeaseAttached) " · 연결됨" else if (executionStatus.accessibilityEnabled) " · 연결 대기" else "")
+            append("\n알림: ")
+            append(if (executionStatus.notificationsEnabled) "사용 가능" else "설정 필요")
+            if (monitorSnapshot.authenticationRequired) {
+                append("\n감시 상태: 로그인 다시 필요")
+            } else if (monitorSnapshot.monitoringPaused) {
+                append("\n감시 상태: 권한을 허용하면 자동으로 다시 시작합니다.")
+            } else if (monitorSnapshot.connectionWaiting) {
+                append("\n감시 상태: 접근성 서비스 연결 대기 중")
+            } else if (monitorSnapshot.foregroundObservationPending && monitorSnapshot.serviceLeaseAttached &&
+                executionStatus.permissionsReady) {
+                append("\n감시 상태: 전면 앱 확인 대기")
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("감시 설정")
+            .setMessage(message)
+            .setPositiveButton("접근성 설정") { _, _ ->
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+            .setNeutralButton("앱 알림 설정") { _, _ ->
+                startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                })
+            }
+            .setNegativeButton("닫기", null)
+            .show()
+    }
+
+    private fun showMonitorIntervalDialog() {
+        val accountId = currentResult?.accountId.orEmpty()
+        if (accountId.isBlank()) {
+            Toast.makeText(this, "로그인 후 감시 간격을 설정할 수 있습니다.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(monitorSnapshot.intervalMinutes.toString())
+            setSelection(text.length)
+            setPadding(dp(24), dp(12), dp(24), dp(8))
+        }
+        AlertDialog.Builder(this)
+            .setTitle("공통 감시 간격 (분)")
+            .setMessage("1 이상의 정수를 입력하세요.")
+            .setView(input)
+            .setPositiveButton("저장") { _, _ ->
+                val minutes = MonitorIntervalParser.parse(input.text.toString())
+                if (minutes == null) {
+                    Toast.makeText(this, "1 이상의 정수를 입력해주세요.", Toast.LENGTH_SHORT).show()
+                } else {
+                    learningMonitor.setIntervalMinutes(accountId, minutes)
+                }
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     private fun updateDateNavUi() {
@@ -336,7 +491,7 @@ class MainActivity : Activity() {
                 } else {
                     val credentials = Credentials(email, password)
                     CredentialStore(this).save(credentials)
-                    loadLearningTime(credentials, learningDate)
+                    loadLearningTime(credentials, learningDate, humanReauthentication = true)
                 }
             }
             .setNegativeButton("취소") { _, _ ->
@@ -345,7 +500,11 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun loadLearningTime(credentials: Credentials, targetDate: LocalDate) {
+    private fun loadLearningTime(
+        credentials: Credentials,
+        targetDate: LocalDate,
+        humanReauthentication: Boolean = false,
+    ) {
         val requestId = requestTracker.nextRequestId()
 
         checkedAtView.text = "확인 중..."
@@ -355,40 +514,66 @@ class MainActivity : Activity() {
         errorView.visibility = View.GONE
         errorView.text = ""
 
-        Thread {
-            try {
-                val result = TodoSchoolClient().load(credentials.email, credentials.password, targetDate)
-                runOnUiThread {
-                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
-                        return@runOnUiThread
-                    }
-                    currentResult = result
-                    setNavButtonsEnabled(true)
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                    checkedAtView.text = result.checkedAt
-                    renderChildren(result)
+        screenRequest = learningMonitorScreenUseCases.loadScreenReport(
+            email = credentials.email,
+            password = credentials.password,
+            date = targetDate,
+        ) { outcome ->
+            runOnUiThread {
+                if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
+                    return@runOnUiThread
                 }
-            } catch (e: Exception) {
-                runOnUiThread {
-                    if (!requestTracker.isLatest(requestId) || isFinishing || isDestroyed) {
-                        return@runOnUiThread
+                when (outcome) {
+                    is LearningReportRequestOutcome.Finished -> when (val result = outcome.result) {
+                        is LearningRepositoryResult.Success -> {
+                            currentResult = result.value
+                            if (result.value.accountId.isNotBlank()) {
+                                if (humanReauthentication) {
+                                    learningMonitorScreenUseCases.credentialsReauthenticated(
+                                        result.value.accountId,
+                                        credentials.email,
+                                        credentials.password,
+                                    )
+                                } else {
+                                    learningMonitorScreenUseCases.credentialsAccepted(
+                                        result.value.accountId,
+                                        credentials.email,
+                                        credentials.password,
+                                    )
+                                }
+                            }
+                            setNavButtonsEnabled(true)
+                            progressBar.visibility = View.GONE
+                            swipeRefreshLayout.isRefreshing = false
+                            checkedAtView.text = result.value.checkedAt
+                            renderChildren(result.value)
+                        }
+                        is LearningRepositoryResult.TemporaryFailure -> showLearningFailure(result.error)
+                        is LearningRepositoryResult.AuthenticationDenied -> showLearningFailure(result.error)
                     }
-                    setNavButtonsEnabled(true)
-                    progressBar.visibility = View.GONE
-                    swipeRefreshLayout.isRefreshing = false
-                    childrenContainer.removeAllViews()
-                    checkedAtView.text = "확인 실패"
-                    errorView.visibility = View.VISIBLE
-                    errorView.text = "학습시간을 불러오지 못했습니다.\n${e.message ?: e.javaClass.simpleName}"
-
-                    if (e is AuthenticationException) {
-                        CredentialStore(this).clear()
-                        askCredentials("로그인에 실패했습니다. 이메일과 비밀번호를 다시 입력하세요.")
-                    }
+                    LearningReportRequestOutcome.Invalidated -> showLearningFailure(
+                        LearningRepositoryException("인증 정보가 변경되어 조회 결과를 표시할 수 없습니다. 다시 조회해주세요."),
+                    )
+                    LearningReportRequestOutcome.Superseded,
+                    LearningReportRequestOutcome.Cancelled -> Unit
                 }
             }
-        }.start()
+        }
+    }
+
+    private fun showLearningFailure(error: Exception) {
+        setNavButtonsEnabled(true)
+        progressBar.visibility = View.GONE
+        swipeRefreshLayout.isRefreshing = false
+        childrenContainer.removeAllViews()
+        checkedAtView.text = "확인 실패"
+        errorView.visibility = View.VISIBLE
+        errorView.text = "학습시간을 불러오지 못했습니다.\n${error.message ?: error.javaClass.simpleName}"
+
+        if (error is LearningAuthenticationDeniedException) {
+            CredentialStore(this).clear()
+            askCredentials("로그인에 실패했습니다. 이메일과 비밀번호를 다시 입력하세요.")
+        }
     }
 
     private fun renderChildren(result: LearningResult) {
@@ -404,7 +589,7 @@ class MainActivity : Activity() {
                 }
             }
 
-            // 1행: 아이 이름 + ⚙️ 설정 버튼
+            // 1행: 아이 이름 + 아이별 감시 + 목표 설정
             val headerLayout = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -421,11 +606,35 @@ class MainActivity : Activity() {
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
-                maxWidth = dp(240)
+                maxWidth = dp(190)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                 )
+            }
+
+            val registered = currentResult?.accountId == monitorSnapshot.accountId &&
+                child.name in monitorSnapshot.registeredChildren
+            val monitoringButton = TextView(this).apply {
+                text = if (registered) "🔔" else "🔕"
+                textSize = 16f
+                contentDescription = if (registered) "${child.name} 감시 해제" else "${child.name} 감시 등록"
+                if (outValue.resourceId != 0) setBackgroundResource(outValue.resourceId)
+                gravity = Gravity.CENTER
+                minimumWidth = dp(48)
+                minimumHeight = dp(48)
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    val accountId = currentResult?.accountId.orEmpty()
+                    if (accountId.isBlank()) {
+                        Toast.makeText(this@MainActivity, "로그인 후 감시를 등록할 수 있습니다.", Toast.LENGTH_SHORT).show()
+                    } else if (registered) {
+                        learningMonitor.unregisterChild(accountId, child.name)
+                    } else {
+                        learningMonitor.registerChild(accountId, child.name)
+                    }
+                }
             }
 
             val settingsButton = TextView(this).apply {
@@ -452,6 +661,7 @@ class MainActivity : Activity() {
             }
 
             headerLayout.addView(nameView)
+            headerLayout.addView(monitoringButton)
             headerLayout.addView(settingsButton)
 
             // 2행: ${minutes}분
@@ -510,6 +720,7 @@ class MainActivity : Activity() {
     }
 
     private fun showTargetCountDialog(child: ChildLearningInfo) {
+        val dialogAccountId = currentResult?.accountId?.takeIf(String::isNotBlank)
         val savedCounts = targetCountStore.getTargetCounts(child.name)
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -597,228 +808,11 @@ class MainActivity : Activity() {
             }
 
             targetCountStore.saveTargetCounts(child.name, newTargets)
+            dialogAccountId?.let { accountId ->
+                learningMonitor.setTargetCounts(accountId, child.name, newTargets)
+            }
             currentResult?.let { renderChildren(it) }
             dialog.dismiss()
         }
-    }
-}
-
-private data class Credentials(
-    val email: String,
-    val password: String,
-)
-
-private class TodoSchoolClient {
-    private data class Subject(
-        val name: String,
-        val usersPath: String,
-        val reportPath: String,
-    )
-
-    private val subjects = listOf(
-        Subject("한글", "/v3/todohangeul/user", "/v3/todoschool/report/daily/hangeul"),
-        Subject("수학", "/v3/math/user", "/v3/todoschool/report/daily/math"),
-        Subject("영어", "/v3/english/user", "/v3/todoschool/report/daily/english"),
-    )
-
-    fun load(email: String, password: String, date: LocalDate = DateHelper.today()): LearningResult {
-        val login = signIn(email, password)
-        val token = login.optString("authToken").ifBlank { login.optString("sessionId") }
-        if (token.isBlank()) throw AuthenticationException("로그인 토큰을 받지 못했습니다.")
-
-        val accountId = login.opt("accountId")
-            ?: throw IllegalStateException("accountId를 받지 못했습니다.")
-        val yyyymmdd = DateHelper.toYyyyMmDd(date)
-        val checkedAt = DateHelper.formatCheckedAt(DateHelper.nowZoned())
-
-        val totals = LinkedHashMap<String, Long>()
-        val subjectsByChild = LinkedHashMap<String, MutableList<SubjectProgress>>()
-        val childOrder = mutableListOf<String>()
-
-        subjects.forEach { subject ->
-            val users = post(
-                path = subject.usersPath,
-                body = JSONObject().put("user", JSONObject().put("accountId", accountId)),
-                token = token,
-            ) as? JSONArray ?: throw IllegalStateException("${subject.name}: 아이 목록 형식이 예상과 다릅니다.")
-
-            for (i in 0 until users.length()) {
-                val user = users.getJSONObject(i)
-                val userName = user.optString("name").trim()
-                if (userName.isBlank()) continue
-
-                if (!TodoSchoolDataParser.isSubscribed(user)) {
-                    continue
-                }
-
-                val userId = user.optString("userId").ifBlank { user.opt("userId")?.toString().orEmpty() }
-
-                if (userName !in childOrder) {
-                    childOrder.add(userName)
-                }
-
-                val report = post(
-                    path = subject.reportPath,
-                    body = JSONObject()
-                        .put("userId", userId)
-                        .put("yyyymmdd", yyyymmdd)
-                        .put("languageCode", "ko"),
-                    token = token,
-                ) as? JSONObject
-
-                val seconds = ReportParser.extractLearningSeconds(report)
-                val progress = TodoSchoolDataParser.parseSubjectProgress(subject.name, user, report)
-
-                totals[userName] = (totals[userName] ?: 0L) + seconds
-                if (progress != null) {
-                    subjectsByChild.getOrPut(userName) { mutableListOf() }.add(progress)
-                }
-            }
-        }
-
-        val names = childOrder.distinct()
-        if (names.isEmpty()) throw IllegalStateException("아이 정보를 찾지 못했습니다.")
-
-        val children = names.map { name ->
-            val minutes = ceil((totals[name] ?: 0L) / 60.0).toInt()
-            val subjectList = subjectsByChild[name] ?: emptyList()
-            ChildLearningInfo(name = name, minutes = minutes, subjects = subjectList)
-        }
-
-        return LearningResult(checkedAt, children)
-    }
-
-    private fun signIn(email: String, password: String): JSONObject {
-        val body = JSONObject()
-            .put("accountType", "personal")
-            .put("getSessionId", true)
-            .put("product", "todoschool")
-            .put("packageName", "com.enuma.todoschool")
-            .put("fromWeb", true)
-            .put("countryCode", "ko")
-            .put("email", email)
-            .put("password", password)
-
-        try {
-            return post("/v3/account/signin", body, null) as? JSONObject
-                ?: throw AuthenticationException("로그인 응답 형식이 예상과 다릅니다.")
-        } catch (e: HttpException) {
-            if (e.statusCode == 401 || e.statusCode == 403) {
-                throw AuthenticationException("이메일 또는 비밀번호가 맞지 않습니다.")
-            }
-            throw e
-        }
-    }
-
-    private fun post(path: String, body: JSONObject, token: String?): Any? {
-        val connection = (URL(API_BASE + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 15_000
-            readTimeout = 15_000
-            doOutput = true
-            setRequestProperty("Accept", "application/json, text/plain, */*")
-            setRequestProperty("Content-Type", "application/json")
-            if (token != null) setRequestProperty("Authorization", "Bearer $token")
-        }
-
-        try {
-            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val responseText = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-
-            if (code !in 200..299) throw HttpException(code, "$path: HTTP $code")
-
-            val json = JSONObject(responseText)
-            if (!json.optBoolean("result", false)) {
-                if (path == "/v3/account/signin") throw AuthenticationException("로그인에 실패했습니다.")
-                return null
-            }
-            return json.opt("data")
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    companion object {
-        private const val API_BASE = "https://api.todomath.com"
-    }
-}
-
-private class HttpException(
-    val statusCode: Int,
-    message: String,
-) : Exception(message)
-
-private class AuthenticationException(message: String) : Exception(message)
-
-private class CredentialStore(private val activity: Activity) {
-    private val prefs = activity.getSharedPreferences(PREFS_NAME, Activity.MODE_PRIVATE)
-
-    fun save(credentials: Credentials) {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val json = JSONObject().apply {
-            put("email", credentials.email)
-            put("password", credentials.password)
-        }.toString()
-        val encrypted = cipher.doFinal(json.toByteArray(Charsets.UTF_8))
-        prefs.edit()
-            .putString(KEY_IV, android.util.Base64.encodeToString(cipher.iv, android.util.Base64.NO_WRAP))
-            .putString(KEY_CIPHERTEXT, android.util.Base64.encodeToString(encrypted, android.util.Base64.NO_WRAP))
-            .apply()
-    }
-
-    fun load(): Credentials? {
-        val ivText = prefs.getString(KEY_IV, null) ?: return null
-        val encryptedText = prefs.getString(KEY_CIPHERTEXT, null) ?: return null
-
-        return try {
-            val cipher = Cipher.getInstance(TRANSFORMATION)
-            val iv = android.util.Base64.decode(ivText, android.util.Base64.NO_WRAP)
-            val encrypted = android.util.Base64.decode(encryptedText, android.util.Base64.NO_WRAP)
-            cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(128, iv))
-            val jsonString = String(cipher.doFinal(encrypted), Charsets.UTF_8)
-            val json = JSONObject(jsonString)
-            val email = json.optString("email")
-            val password = json.optString("password")
-            if (email.isNotBlank() && password.isNotBlank()) {
-                Credentials(email, password)
-            } else {
-                null
-            }
-        } catch (_: Exception) {
-            clear()
-            null
-        }
-    }
-
-    fun clear() {
-        prefs.edit().clear().apply()
-    }
-
-    private fun getOrCreateKey(): SecretKey {
-        val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
-
-        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        keyGenerator.init(
-            KeyGenParameterSpec.Builder(
-                KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-            )
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build(),
-        )
-        return keyGenerator.generateKey()
-    }
-
-    companion object {
-        private const val PREFS_NAME = "credentials"
-        private const val KEY_ALIAS = "todoschool_learning_time_credentials"
-        private const val KEY_IV = "credentials_iv"
-        private const val KEY_CIPHERTEXT = "credentials_ciphertext"
-        private const val TRANSFORMATION = "AES/GCM/NoPadding"
     }
 }

@@ -15,4 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "TodoschoolLearningTime"
-include(":app")
+include(":app", ":e2eobserver")

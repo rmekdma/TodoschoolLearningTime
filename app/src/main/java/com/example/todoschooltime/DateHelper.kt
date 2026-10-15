@@ -1,5 +1,6 @@
 package com.example.todoschooltime
 
+import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
@@ -22,6 +23,12 @@ object DateHelper {
 
     fun nowZoned(zoneId: ZoneId = SEOUL_ZONE): ZonedDateTime {
         return ZonedDateTime.now(zoneId)
+    }
+
+    fun millisUntilNextSeoulMidnight(now: ZonedDateTime = nowZoned()): Long {
+        val seoulNow = now.withZoneSameInstant(SEOUL_ZONE)
+        val nextMidnight = seoulNow.toLocalDate().plusDays(1).atStartOfDay(SEOUL_ZONE)
+        return Duration.between(seoulNow, nextMidnight).toMillis().coerceAtLeast(1L)
     }
 
     fun formatDisplayDate(date: LocalDate): String {
@@ -48,8 +55,4 @@ object DateHelper {
         return currentDate == today
     }
 }
-
-fun LocalDate.canGoNext(today: LocalDate = DateHelper.today()): Boolean = DateHelper.canGoNext(this, today)
-
-fun LocalDate.isToday(today: LocalDate = DateHelper.today()): Boolean = DateHelper.isToday(this, today)
 

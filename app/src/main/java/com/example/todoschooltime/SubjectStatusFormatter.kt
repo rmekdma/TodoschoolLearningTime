@@ -3,9 +3,6 @@ package com.example.todoschooltime
 object SubjectStatusFormatter {
     const val CHECKMARK = "✔"
 
-    val DEFAULT_TARGET_COUNTS: Map<String, Int>
-        get() = TargetDefaults.DEFAULT_COUNTS
-
     fun defaultTargetCount(subjectName: String): Int =
         TargetDefaults.defaultCount(subjectName)
 

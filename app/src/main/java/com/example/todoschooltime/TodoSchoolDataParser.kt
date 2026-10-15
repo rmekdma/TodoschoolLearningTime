@@ -9,14 +9,4 @@ object TodoSchoolDataParser {
         val userId = userJson.opt("userId")?.toString()?.trim() ?: return false
         return userId.isNotBlank() && userId != "null"
     }
-
-    fun parseSubjectProgress(
-        subjectName: String,
-        userJson: JSONObject?,
-        reportJson: JSONObject?,
-    ): SubjectProgress? {
-        if (!isSubscribed(userJson)) return null
-        val count = ReportParser.extractActivityCount(subjectName, reportJson)
-        return SubjectProgress(name = subjectName, count = count)
-    }
 }

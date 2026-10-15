@@ -5,7 +5,6 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -41,16 +40,24 @@ class DateNavigationTest {
     }
 
     @Test
+    fun nextSeoulMidnightUsesSeoulCalendarDateForNonSeoulInputs() {
+        val utcNow = ZonedDateTime.of(
+            2026, 10, 10, 16, 0, 0, 0,
+            ZoneId.of("UTC"),
+        )
+
+        assertEquals(23L * 60L * 60L * 1_000L, DateHelper.millisUntilNextSeoulMidnight(utcNow))
+    }
+
+    @Test
     fun testMaxDateEpochMillisIsEndOfDay() {
         val today = LocalDate.of(2026, 9, 7)
         val maxMillis = DateHelper.maxDateEpochMillis(today, seoulZone)
 
-        val expected = today.atTime(LocalTime.MAX).atZone(seoulZone).toInstant().toEpochMilli()
-        assertEquals(expected, maxMillis)
+        assertEquals(1_788_793_199_999L, maxMillis)
 
-        // Verify that today 23:59:59.999999999 is included and next day start is strictly after maxMillis
-        val nextDayStart = today.plusDays(1).atStartOfDay(seoulZone).toInstant().toEpochMilli()
-        assertTrue(maxMillis < nextDayStart)
+        // In Seoul, the next midnight is 2026-09-07 15:00 UTC.
+        assertEquals(1_788_793_200_000L, maxMillis + 1L)
         val todayNoon = today.atTime(12, 0).atZone(seoulZone).toInstant().toEpochMilli()
         assertTrue(todayNoon < maxMillis)
     }
@@ -83,11 +90,10 @@ class DateNavigationTest {
     fun testMidnightBoundaryMaxDateEpochMillis() {
         val today = LocalDate.of(2026, 12, 31)
         val maxMillis = DateHelper.maxDateEpochMillis(today, seoulZone)
-        val endOfDayZonedDateTime = ZonedDateTime.of(today, LocalTime.MAX, seoulZone)
-        assertEquals(endOfDayZonedDateTime.toInstant().toEpochMilli(), maxMillis)
+        assertEquals(1_798_729_199_999L, maxMillis)
 
-        val nextYearFirstMilli = ZonedDateTime.of(LocalDate.of(2027, 1, 1), LocalTime.MIN, seoulZone).toInstant().toEpochMilli()
-        assertEquals(nextYearFirstMilli - 1, maxMillis / 1_000_000 * 1_000_000 + (maxMillis % 1_000_000))
+        val nextYearFirstMilli = 1_798_729_200_000L
+        assertEquals(nextYearFirstMilli - 1, maxMillis)
         assertTrue(maxMillis < nextYearFirstMilli)
     }
 }

@@ -50,17 +50,6 @@ class SubjectStatusFormatterTest {
     }
 
     @Test
-    fun testFormatStatusExcludesUnsubscribedSubjects() {
-        // Child subscribed only to Hangeul and English
-        val subjects = listOf(
-            SubjectProgress("한글", 6),
-            SubjectProgress("영어", 4),
-        )
-        val status = SubjectStatusFormatter.formatStatus(subjects)
-        assertEquals("✔ 한글 (6/6), 영어 (4/8)", status)
-    }
-
-    @Test
     fun testFormatStatusAllZeroActivities() {
         val subjects = listOf(
             SubjectProgress("한글", 0),
@@ -85,7 +74,6 @@ class SubjectStatusFormatterTest {
 
     @Test
     fun testFormatStatusEmptyList() {
-        val status = SubjectStatusFormatter.formatStatus(emptyList())
-        assertEquals("", status)
+        assertEquals("", SubjectStatusFormatter.formatStatus(emptyList()))
     }
 }

@@ -30,11 +30,15 @@ Android Studio에서 프로젝트를 열거나 터미널에서 다음 명령어�
 ```
 생성 경로: `app/build/outputs/apk/debug/app-debug.apk`
 
+Debug는 실제 `LearningReportRepository` HTTP 경로를 테스트하기 위해 기본 주소로 PC의 임시 서버 `http://127.0.0.1:18765`를 사용하며, 앱 ID는 `com.example.todoschooltime.debug`입니다. 통합 시나리오 실행 방법과 기기 주의사항은 [`tools/AGENTS.md`](tools/AGENTS.md)를 참고하세요. 서버가 없거나 주소가 맞지 않으면 조회에 실패하며 실제 TodoSchool API로 전환되지 않습니다.
+
 ### Release APK 빌드
 ```bash
 ./gradlew assembleRelease
 ```
 생성 경로: `app/build/outputs/apk/release/app-release.apk`
+
+Release는 기존 HTTPS 주소 `https://api.todomath.com`을 사용합니다. 로컬 fixture 기반 통합 시나리오는 release 앱을 기기에 설치하거나 실행하지 않습니다.
 
 ### 최신 릴리즈 다운로드
 [GitHub Releases](https://github.com/rmekdma/TodoschoolLearningTime/releases)에서 사전 빌드된 최신 APK 파일을 다운로드받아 기기에 바로 설치할 수 있습니다.
