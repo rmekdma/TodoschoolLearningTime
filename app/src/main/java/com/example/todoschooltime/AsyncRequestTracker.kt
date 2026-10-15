@@ -12,8 +12,4 @@ class AsyncRequestTracker {
     fun isLatest(requestId: Long): Boolean {
         return lastRequestId.get() == requestId
     }
-
-    fun currentRequestId(): Long {
-        return lastRequestId.get()
-    }
 }

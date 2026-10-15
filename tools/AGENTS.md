@@ -32,8 +32,8 @@
 
 - 모든 fixture 요청과 `adb reverse`는 `127.0.0.1`만 사용합니다. fixture 오류를 실제 TodoSchool API로 우회하지 않으며 release 앱은 설치하거나 실행하지 않습니다.
 - `screen`과 `prepare`는 debug APK를 설치 또는 갱신하므로 기존 observer 세션과 분리된 테스트 기기에서 사용합니다. 준비된 실행은 설치된 product APK의 동일성을 확인합니다.
-- 알림(POST_NOTIFICATIONS)·접근성 허용은 최초 기기 준비 조건입니다. 테스트 중 권한 OFF/ON이나 수동 카드 제거를 요구하는 시나리오는 제공하지 않습니다. `persistence -Mode run`은 기기를 재부팅하며 잠금 해제가 필요하면 중단합니다.
+- 알림(POST_NOTIFICATIONS)·접근성 허용은 최초 기기 준비 조건입니다. 자동 관찰을 실행하기 전 사용자가 `학습 상태` 알림 채널을 켜고 중요도를 MIN 또는 LOW, 진동을 끔으로 설정해야 합니다. Android 채널 중요도에서 LOW 이하는 소리가 나지 않으며, observer는 OS가 보고하는 채널 활성 상태·중요도·진동을 확인하고 준비되지 않았으면 시나리오를 거부합니다. 채널의 소리 URI가 남아 있는 것만으로는 준비 실패가 아닙니다. 이 테스트 준비는 제품의 기본 HIGH 알림 정책과 별개이며 제품 기본값을 낮추지 않습니다. 테스트 중 권한 OFF/ON이나 수동 카드 제거를 요구하는 시나리오는 제공하지 않습니다. `persistence -Mode run`은 기기를 재부팅하며 잠금 해제가 필요하면 중단합니다.
 - fixture 초기화는 현재 실행의 HTTP fixture 상태만 초기화합니다. Android 앱 데이터와 사용자 데이터는 초기화하지 않습니다.
 - Kotlin 계측 테스트는 Android 화면·서비스의 동작을 단언합니다. PowerShell은 빌드, 기기 단계, 실행별 결과 검증을 담당합니다. Python `server.py`는 응답 fixture이며 `test_server.py`는 그 HTTP 동작을 검증합니다. 각 검증은 해당 계층에 둡니다.
-- runner와 공통 PowerShell 모듈은 `tools/` 바로 아래에 둡니다. `server.py`의 기존 HTTP 계약을 유지하고 Kotlin·실행기에서 동일한 계약을 사용합니다. fixture wire ID는 내부 계약으로 유지하고 시나리오 이름은 위의 기능 이름을 사용합니다.
+- runner와 공통 PowerShell 모듈은 `tools/` 바로 아래에 둡니다. 현재 다섯 시나리오가 쓰는 HTTP 계약은 `server.py`, Kotlin, 실행기에서 함께 갱신하고 실제 localhost 요청·응답으로 검증합니다. 기능 이름은 실행 선택자이고 활성 fixture wire ID는 내부 값입니다.
 - Windows PowerShell 5.1에서 한글이 포함된 `.ps1`을 수정할 때 UTF-8 BOM을 유지합니다. ADB 로그는 현재 실행의 run ID와 필요한 tag로 필터링해 필요한 끝부분만 기록합니다.

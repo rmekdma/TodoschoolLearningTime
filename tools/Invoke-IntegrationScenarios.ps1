@@ -4,7 +4,6 @@ param(
     [string]$DeviceSerial,
     [ValidateSet("ticket01", "ticket02", "ticket03", "ticket05")]
     [string]$Scenario = "ticket01",
-    [switch]$DeviceOnly,
     [switch]$PrepareDevice,
     [switch]$RunPrepared,
     [switch]$RefreshObserver
@@ -28,14 +27,8 @@ $configFile = if (Test-Path -LiteralPath $ConfigPath -PathType Leaf) { (Resolve-
 } else { (Resolve-Path -LiteralPath $configExample).Path }
 $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json
 
-if ($DeviceOnly -and ($PrepareDevice -or $RunPrepared -or $RefreshObserver)) {
-    throw "Choose only one phase: -PrepareDevice, -RunPrepared, -RefreshObserver, or legacy -DeviceOnly."
-}
 if ($PrepareDevice -and ($RunPrepared -or $RefreshObserver)) { throw "Choose only one external-observer phase: -PrepareDevice, -RunPrepared, or -RefreshObserver." }
 if ($RunPrepared -and $RefreshObserver) { throw "Choose either -RunPrepared or -RefreshObserver, not both." }
-if ($usesExternalObserver -and $DeviceOnly -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
-    $PrepareDevice = $true
-}
 if ($usesExternalObserver -and -not $PrepareDevice -and -not $RunPrepared -and -not $RefreshObserver) {
     $RunPrepared = $true
 }
@@ -431,14 +424,6 @@ try {
             ":e2eobserver:assembleDebugAndroidTest"
         )
         $gradleLogName = "observer-refresh-build.log"
-    } elseif ($DeviceOnly) {
-        $gradleTasks = @(
-            ":app:assembleDebug",
-            ":app:assembleDebugAndroidTest",
-            ":app:assembleRelease"
-        )
-        if ($usesExternalObserver) { $gradleTasks += @(":e2eobserver:assembleDebug", ":e2eobserver:assembleDebugAndroidTest") }
-        $gradleLogName = "device-apk-build.log"
     } else {
         $gradleTasks = @(
             ":app:testDebugUnitTest",
@@ -503,24 +488,25 @@ try {
     if ($releaseManifest -match "android:networkSecurityConfig") {
         throw "Release APK unexpectedly includes the debug network security configuration."
     }
-    if ($releaseManifest -match "LearningMonitorDiagnosticsProvider|READ_MONITOR_DIAGNOSTICS|monitor-diagnostics") {
-        throw "Release APK unexpectedly includes the debug-only diagnostics provider or permission."
+    if ($releaseManifest -match "LearningMonitorNotificationProvider|READ_NOTIFICATIONS|notification-observer") {
+        throw "Release APK unexpectedly includes the debug-only notification observer or permission."
     }
     if ($usesExternalObserver -and
-        ($debugManifest -notmatch "LearningMonitorDiagnosticsProvider" -or
-         $debugManifest -notmatch "READ_MONITOR_DIAGNOSTICS" -or
+        ($debugManifest -notmatch "LearningMonitorNotificationProvider" -or
+         $debugManifest -notmatch "com\.example\.todoschooltime\.debug\.notification-observer" -or
+         $debugManifest -notmatch "READ_NOTIFICATIONS" -or
          $debugManifest -notmatch "protectionLevel.*0x2")) {
-        throw "Debug APK is missing its signature-protected read-only diagnostics provider."
+        throw "Debug APK is missing its signature-protected read-only notification observer."
     }
     if ($usesExternalObserver -and
         ($observerManifest -notmatch "E: queries[\s\S]*?E: package[\s\S]*?com\.example\.todoschooltime\.debug" -or
          $observerManifest -notmatch "com\.enuma\.todohangeul" -or
          $observerManifest -notmatch "com\.enuma\.todoenglish" -or
          $observerManifest -notmatch "com\.enuma\.todomath" -or
-         $observerManifest -notmatch "READ_MONITOR_DIAGNOSTICS" -or
+         $observerManifest -notmatch "READ_NOTIFICATIONS" -or
          $observerManifest -notmatch "android:networkSecurityConfig" -or
          $observerManifest -notmatch "android:usesCleartextTraffic.*\(type 0x12\)0x0")) {
-        throw "External observer APK must query the debug and subject packages, request its diagnostics signature permission, and deny cleartext by default."
+        throw "External observer APK must query the debug and subject packages, request its notification observer signature permission, and deny cleartext by default."
     }
     if ($usesExternalObserver) {
         Write-Host "PASS observer manifest declares visibility for the debug and subject packages, requests its signature permission, and denies cleartext by default."
@@ -722,7 +708,7 @@ try {
     } elseif ($Scenario -eq "ticket03") {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.ForegroundPollingTest"
-        $observerExecution = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket03E2E" 22
+        $observerExecution = Invoke-ExternalObserver $apiBaseUrl $runId $instrumentationComponent $testClass "Ticket03Result" 22
     } elseif ($Scenario -eq "ticket05") {
         $instrumentationComponent = "$observerTestApplicationId/androidx.test.runner.AndroidJUnitRunner"
         $testClass = "com.example.todoschooltime.e2eobserver.AuthenticationRecoveryTest"

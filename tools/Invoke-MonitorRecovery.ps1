@@ -27,9 +27,7 @@ function Resolve-Ticket06ExecutionMode {
 $executionMode = Resolve-Ticket06ExecutionMode -RunPrepared:$RunPrepared -RefreshObserver:$RefreshObserver
 
 $repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$gitCommit = (& git -C $repositoryRoot rev-parse HEAD 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace([string]$gitCommit)) { throw "Could not identify the current repository commit." }
-$gitCommit = ([string]$gitCommit).Trim()
+$gitCommit = Get-CurrentRepositoryCommit -RepositoryRoot $repositoryRoot
 if ($executionMode -eq "refresh-observer") {
     $refreshRunner = Join-Path $PSScriptRoot "Invoke-IntegrationScenarios.ps1"
     $refreshArguments = @{ RefreshObserver = $true }

@@ -12,6 +12,31 @@
     }
 }
 
+function Get-CurrentRepositoryCommit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RepositoryRoot
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $gitOutput = @(& git -C $RepositoryRoot rev-parse HEAD 2>&1)
+        $gitExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    $gitCommit = if ($gitOutput.Count -gt 0) { ([string]$gitOutput[0]).Trim() } else { '' }
+    if ($gitExitCode -ne 0 -or $gitCommit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+        $gitDiagnostic = [string]::Join([Environment]::NewLine, @($gitOutput | ForEach-Object { [string]$_ }))
+        if ([string]::IsNullOrWhiteSpace($gitDiagnostic)) { $gitDiagnostic = 'Git returned no diagnostic output.' }
+        throw "Could not identify the current repository commit (git rev-parse exit code $gitExitCode): $gitDiagnostic"
+    }
+
+    return $gitCommit
+}
+
 function ConvertFrom-AppOwnedPreferenceRows {
     [CmdletBinding()]
     param(

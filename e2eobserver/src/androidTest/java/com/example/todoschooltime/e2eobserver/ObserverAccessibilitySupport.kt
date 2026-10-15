@@ -49,8 +49,8 @@ internal class ObserverAccessibilitySupport(
     fun waitForNode(
         automation: UiAutomation,
         timeoutMs: Long,
-        predicate: (AccessibilityNodeInfo) -> Boolean,
         failureMessage: String = "Timed out waiting for an app view",
+        predicate: (AccessibilityNodeInfo) -> Boolean,
     ): AccessibilityNodeInfo =
         findNodeOrNull(automation, timeoutMs, predicate)
             ?: throw AssertionError(failureMessage)

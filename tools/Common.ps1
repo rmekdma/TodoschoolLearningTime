@@ -8,7 +8,7 @@ function ConvertFrom-IntegrationResult {
         [ValidatePattern('^[0-9a-f]{32}$')]
         [string]$RunId,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('ticket02', 'ticket03', 'ticket04', 'ticket05', 'ticket06')]
+        [ValidateSet('ticket02', 'ticket03', 'ticket05', 'ticket06')]
         [string]$Scenario
     )
 
@@ -23,8 +23,8 @@ function ConvertFrom-IntegrationResult {
         throw "The $Scenario observer result does not belong to run '$RunId'."
     }
     $scenarioProperty = $result.PSObject.Properties['scenario']
-    if ($null -ne $scenarioProperty -and $scenarioProperty.Value -cne $Scenario) {
-        throw "The observer result belongs to scenario '$($scenarioProperty.Value)', not '$Scenario'."
+    if ($null -eq $scenarioProperty -or $scenarioProperty.Value -cne $Scenario) {
+        throw "The observer result is missing the '$Scenario' scenario identity or belongs to another scenario."
     }
 
     return $result
@@ -40,12 +40,12 @@ function Join-IntegrationResultChunks {
         [ValidatePattern('^[0-9a-f]{32}$')]
         [string]$RunId,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('ticket03', 'ticket04', 'ticket05', 'ticket06')]
+        [ValidateSet('ticket03', 'ticket05', 'ticket06')]
         [string]$Scenario
     )
 
     $marker = $Scenario.ToUpperInvariant() + '_RESULT_CHUNK:'
-    $markerPattern = 'TICKET0[3-6]_RESULT_CHUNK:'
+    $markerPattern = 'TICKET0[356]_RESULT_CHUNK:'
     $chunkPattern = '^(?<runId>[^:\s]+):(?<index>[0-9]+)/(?<count>[0-9]+):(?<payload>[A-Za-z0-9+/=]+)$'
     $chunks = @{}
     $expectedCount = $null
@@ -116,7 +116,7 @@ function Get-IntegrationResultJson {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$LogLines,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
-        [Parameter(Mandatory = $true)][ValidateSet('ticket02', 'ticket03', 'ticket04', 'ticket05', 'ticket06')][string]$Scenario
+        [Parameter(Mandatory = $true)][ValidateSet('ticket02', 'ticket03', 'ticket05', 'ticket06')][string]$Scenario
     )
 
     if ($Scenario -ne 'ticket02') {
@@ -145,14 +145,15 @@ function Assert-IntegrationFixtureSnapshot {
     param(
         [Parameter(Mandatory = $true)]$Snapshot,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
-        [Parameter(Mandatory = $true)][ValidateSet('ticket01', 'ticket02', 'ticket03', 'ticket04', 'ticket05', 'ticket06')][string]$Scenario
+        [Parameter(Mandatory = $true)][ValidateSet('ticket01', 'ticket02', 'ticket03', 'ticket05', 'ticket06')][string]$Scenario
     )
 
     if ($null -eq $Snapshot -or $null -eq $Snapshot.PSObject.Properties['runId'] -or $Snapshot.runId -cne $RunId) {
         throw "The $Scenario fixture snapshot is missing or belongs to another run."
     }
-    if ($null -ne $Snapshot.PSObject.Properties['scenario'] -and $Snapshot.scenario -cne $Scenario) {
-        throw "The fixture snapshot belongs to scenario '$($Snapshot.scenario)', not '$Scenario'."
+    $scenarioProperty = $Snapshot.PSObject.Properties['scenario']
+    if ($null -eq $scenarioProperty -or $scenarioProperty.Value -cne $Scenario) {
+        throw "The $Scenario fixture snapshot is missing its scenario identity or belongs to another scenario."
     }
     $inFlight = $Snapshot.PSObject.Properties['inFlightRequests']
     if ($null -ne $inFlight -and @($inFlight.Value).Count -gt 0) {
@@ -169,7 +170,7 @@ function Assert-IntegrationInstrumentationOutcome {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Output,
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ResultJson,
         [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-f]{32}$')][string]$RunId,
-        [Parameter(Mandatory = $true)][ValidateSet('ticket02', 'ticket03', 'ticket04', 'ticket05', 'ticket06')][string]$Scenario,
+        [Parameter(Mandatory = $true)][ValidateSet('ticket02', 'ticket03', 'ticket05', 'ticket06')][string]$Scenario,
         [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ExpectedTestClass,
         [string]$ExpectedPhase
     )
@@ -223,7 +224,7 @@ function Assert-IntegrationInstrumentationOutcome {
         launcherProcessExitCodeObserved = ($null -ne $LauncherProcessExitCode)
         instrumentationTestCount = 1
         expectedTestClass = $ExpectedTestClass
-        resultScenario = if ($null -eq $result.PSObject.Properties['scenario']) { $null } else { [string]$result.scenario }
+        resultScenario = [string]$result.scenario
     }
 }
 

@@ -14,8 +14,6 @@ open class TodoSchoolApplication : Application() {
         private set
     internal lateinit var learningMonitorScreenUseCases: LearningMonitorScreenUseCases
         private set
-    internal lateinit var learningMonitorDiagnostics: LearningMonitorDiagnostics
-        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -31,7 +29,6 @@ open class TodoSchoolApplication : Application() {
         val mainHandler = Handler(Looper.getMainLooper())
         val monitorPreferences = getSharedPreferences(MONITOR_PREFERENCES, MODE_PRIVATE)
         val notificationIdPreferences = getSharedPreferences(NOTIFICATION_ID_PREFERENCES, MODE_PRIVATE)
-        learningMonitorDiagnostics = LearningMonitorDiagnostics(enabled = BuildConfig.DEBUG)
         val targetCountStore = TargetCountStore(this)
         val learningReportRepository = createMonitorRepository()
 
@@ -52,12 +49,12 @@ open class TodoSchoolApplication : Application() {
             },
         )
         learningMonitor = engine
-        val monitorRuntime = LearningMonitorRuntimeAdapter(this, engine, learningMonitorDiagnostics)
+        val monitorRuntime = LearningMonitorRuntimeAdapter(this, engine)
         learningMonitorRuntime = monitorRuntime
         learningMonitorScreenUseCases = monitorRuntime
     }
 
-    protected open fun createMonitorRepository(): MonitorRepository = LearningReportRepository(learningMonitorDiagnostics)
+    protected open fun createMonitorRepository(): MonitorRepository = LearningReportRepository()
 
     protected open fun createMonitorClock(): MonitorClock = object : MonitorClock {
         override fun today() = DateHelper.today()
@@ -69,7 +66,6 @@ open class TodoSchoolApplication : Application() {
         AndroidChildNotificationSink(
             this,
             SharedPreferencesNotificationIdAllocator(notificationIdPreferences),
-            learningMonitorDiagnostics,
         )
 
     private companion object {

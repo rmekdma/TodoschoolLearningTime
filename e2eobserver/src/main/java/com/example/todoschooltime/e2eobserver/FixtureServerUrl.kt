@@ -3,7 +3,7 @@ package com.example.todoschooltime.e2eobserver
 import java.net.URI
 import java.net.URISyntaxException
 
-/** Validates the one local fixture endpoint the Ticket 05 observer is allowed to contact. */
+/** Validates the loopback fixture endpoint shared by observer scenarios. */
 object FixtureServerUrl {
     private const val ALLOWED_SCHEME = "http"
     private const val ALLOWED_HOST = "127.0.0.1"
@@ -14,7 +14,7 @@ object FixtureServerUrl {
         val uri = try {
             URI(value)
         } catch (error: URISyntaxException) {
-            throw IllegalArgumentException("Ticket 05 fixture URL must be a valid loopback URI", error)
+            throw IllegalArgumentException("Observer fixture URL must be a valid loopback URI", error)
         }
 
         require(
@@ -26,7 +26,7 @@ object FixtureServerUrl {
                 uri.rawQuery == null &&
                 uri.rawFragment == null,
         ) {
-            "Ticket 05 fixture URL must use http://127.0.0.1 with a port from 1024 through 65535 and no credentials, path, query, or fragment"
+            "Observer fixture URL must use http://127.0.0.1 with a port from 1024 through 65535 and no credentials, path, query, or fragment"
         }
         return value
     }

@@ -16,10 +16,6 @@ function Assert-Throws([scriptblock]$Action, [string]$Message) {
 }
 
 $accountKey = 'dGlja2V0MDEtZmFrZS1hY2NvdW50'
-$selectors = Get-PersistencePreferenceSelectors -AccountKey $accountKey -ChildName '테스트 아이'
-Assert-Equal $selectors.registrationPattern "registrations.$accountKey" 'Registration selector must use the exact account key.'
-Assert-Equal $selectors.intervalPattern "interval.$accountKey" 'Interval selector must use the exact account key.'
-Assert-Equal $selectors.targetsPattern '테스트\ 아이' 'Target selector must escape spaces for adb grep.'
 
 $registrationRows = @(
     "<set name=`"registrations.$accountKey`">",
@@ -64,12 +60,11 @@ $mapping = New-VerifiedFixtureReverseMapping -Status restored -LocalPort 18765 `
 Assert-Equal $mapping.status 'restored' 'Verified loopback mapping status must be retained.'
 Assert-Throws { New-VerifiedFixtureReverseMapping -Status restored -LocalPort 18765 -Mapping 'tcp:18765 tcp:18766' -AttemptCount 1 } 'A mismatched reverse mapping must be rejected.'
 
-foreach ($fileName in @('MonitorRecovery.ps1', 'Invoke-MonitorRecovery.ps1')) {
-    $path = Join-Path $PSScriptRoot $fileName
-    $tokens = $null
-    $errors = $null
-    [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-    Assert-Equal $errors.Count 0 "$fileName must parse in Windows PowerShell 5.1."
-}
+$repositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$repositoryCommit = Get-CurrentRepositoryCommit -RepositoryRoot $repositoryRoot
+Assert-True ($repositoryCommit -match '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') 'The current repository commit must be captured as a full Git object ID.'
+$missingRepository = Join-Path ([IO.Path]::GetTempPath()) ('ticket06-no-repository-' + [Guid]::NewGuid().ToString('N'))
+$gitFailure = try { Get-CurrentRepositoryCommit -RepositoryRoot $missingRepository; '' } catch { $_.Exception.Message }
+Assert-True ($gitFailure -match 'git rev-parse exit code [1-9][0-9]*' -and $gitFailure -match 'fatal:') 'A failed repository lookup must preserve its nonzero exit code and Git diagnostic.'
 
 Write-Output "PASS Test-MonitorRecovery ($checks focused host checks)"

@@ -37,7 +37,6 @@ internal interface LearningMonitorScreenUseCases {
 internal class LearningMonitorRuntimeAdapter(
     context: Context,
     private val engine: LearningMonitorEngine,
-    private val diagnostics: LearningMonitorDiagnostics? = null,
 ) : LearningMonitorScreenUseCases {
     private val appContext = context.applicationContext
     private val credentialStore = CredentialStore(appContext)
@@ -81,7 +80,6 @@ internal class LearningMonitorRuntimeAdapter(
     fun serviceConnected() {
         refreshExecutionConditions()
         engine.attachServiceLease()
-        diagnostics?.serviceLeaseChanged(true)
         registerScreenReceiver()
         engine.screenOnChanged(isScreenInteractive())
         startPermissionProbe()
@@ -100,11 +98,9 @@ internal class LearningMonitorRuntimeAdapter(
         // Reading settings here keeps enabled-but-unbound distinct from a revoked setting.
         refreshExecutionConditions()
         engine.detachServiceLease()
-        diagnostics?.serviceLeaseChanged(false)
     }
 
     fun foregroundPackageChanged(packageName: String?) {
-        diagnostics?.foregroundPackageObserved(packageName)
         engine.foregroundPackageChanged(packageName)
     }
 

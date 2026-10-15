@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import select
-import socket
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -19,9 +17,6 @@ TEST_PASSWORD = "not-a-real-password"
 AUTH_TOKEN = "ticket01-fake-token"
 ACCOUNT_ID = "ticket01-fake-account"
 CHILD_NAME = "테스트 아이"
-TICKET06_TASK_COMPONENT = "com.example.todoschooltime.debug/com.example.todoschooltime.MainActivity"
-TICKET06_PRODUCT_PACKAGE = "com.example.todoschooltime.debug"
-
 SUBJECTS = {
     "hangeul": ("/v3/todohangeul/user", "/v3/todoschool/report/daily/hangeul", "ticket01-hangeul", 2, 61),
     "math": ("/v3/math/user", "/v3/todoschool/report/daily/math", "ticket01-math", 5, 120),
@@ -38,25 +33,13 @@ class FixtureState:
         self.lock = threading.Lock()
         self.sequence = 0
         self.requests: list[dict[str, Any]] = []
-        self.released_report_holds: list[dict[str, Any]] = []
-        self.armed_report_hold: dict[str, Any] | None = None
-        self.active_report_hold: dict[str, Any] | None = None
         self.armed_report_response: dict[str, Any] | None = None
-        self.ticket06_pre_removal_preferences_captured = False
         self.ticket06_pre_reboot_preferences_captured = False
-        self.ticket06_recents_screenshot_sha256: str | None = None
-        self.ticket06_task_removal_target: dict[str, Any] | None = None
-        self.ticket06_task_removal_gate: dict[str, Any] | None = None
-        self.ticket06_task_removal_absence: dict[str, Any] | None = None
-        self.ticket06_task_removal_acknowledgement: dict[str, Any] | None = None
         self.report_counts = (
             {subject: 2 for subject in SUBJECTS}
             if scenario == "ticket03"
             else {subject: details[3] for subject, details in SUBJECTS.items()}
         )
-        if scenario == "ticket04":
-            self.report_counts = {"hangeul": 2, "math": 5, "english": 7}
-
     def record(self, path: str, body_text: str, body: Any, headers: dict[str, str]) -> dict[str, Any]:
         with self.lock:
             self.sequence += 1
@@ -73,11 +56,6 @@ class FixtureState:
                 "servedReportCount": None,
                 "serverReceivedMonotonicMs": received_monotonic_ns // 1_000_000,
                 "serverReceivedMonotonicNs": received_monotonic_ns,
-                "clientConnected": True,
-                "clientDisconnectedAt": None,
-                "clientDisconnectSignal": None,
-                "clientDisconnectElapsedMs": None,
-                "clientDisconnectMonotonicNs": None,
             }
             self.requests.append(event)
             return event
@@ -87,109 +65,10 @@ class FixtureState:
         event: dict[str, Any],
         status: int,
         served_report_count: int | None = None,
-        delivery_status: str = "written",
     ) -> None:
         with self.lock:
             event["responseStatus"] = status
             event["servedReportCount"] = served_report_count
-            event["deliveryStatus"] = delivery_status
-            case_id = event.get("holdCaseId")
-            if case_id is not None and not any(
-                hold["caseId"] == case_id and hold["sequence"] == event["sequence"]
-                for hold in self.released_report_holds
-            ):
-                self.released_report_holds.append({
-                    "sequence": event["sequence"],
-                    "caseId": case_id,
-                    "path": event["path"],
-                    "responseStatus": status,
-                    "servedReportCount": served_report_count,
-                    "deliveryStatus": delivery_status,
-                    "clientConnected": event["clientConnected"],
-                    "serverReceivedMonotonicNs": event["serverReceivedMonotonicNs"],
-                    "clientDisconnectedAt": event["clientDisconnectedAt"],
-                    "clientDisconnectSignal": event["clientDisconnectSignal"],
-                    "clientDisconnectAfterServerReceiveMs": event.get("clientDisconnectAfterServerReceiveMs"),
-                    "clientDisconnectMonotonicNs": event.get("clientDisconnectMonotonicNs"),
-                    "userId": event["body"].get("userId") if isinstance(event.get("body"), dict) else None,
-                    "yyyymmdd": event["body"].get("yyyymmdd") if isinstance(event.get("body"), dict) else None,
-                    "languageCode": event["body"].get("languageCode") if isinstance(event.get("body"), dict) else None,
-                })
-
-    def arm_report_hold(
-        self,
-        case_id: str,
-        path: str,
-        response_status: int,
-        response_count: int | None,
-    ) -> dict[str, Any]:
-        with self.lock:
-            if self.scenario != "ticket04":
-                raise ValueError("report holds are available only in Ticket 04")
-            if self.armed_report_hold is not None or self.active_report_hold is not None:
-                raise ValueError("a report hold is already armed or in flight")
-            if not case_id or len(case_id) > 80:
-                raise ValueError("caseId must be a non-empty string of at most 80 characters")
-            if path not in REPORT_PATHS:
-                raise ValueError("path must be one of the supported report paths")
-            if response_status not in (200, 401, 403):
-                raise ValueError("responseStatus must be 200, 401, or 403")
-            if response_count is not None and (isinstance(response_count, bool) or not 0 <= response_count <= 100):
-                raise ValueError("responseCount must be an integer from 0 to 100")
-            if response_status != 200 and response_count is not None:
-                raise ValueError("responseCount is only valid for a successful report response")
-            self.armed_report_hold = {
-                "caseId": case_id,
-                "path": path,
-                "responseStatus": response_status,
-                "responseCount": response_count,
-                "release": threading.Event(),
-            }
-            return {key: value for key, value in self.armed_report_hold.items() if key != "release"}
-
-    def hold_for_report(self, path: str, event: dict[str, Any]) -> dict[str, Any] | None:
-        with self.lock:
-            if self.armed_report_hold is None or self.armed_report_hold["path"] != path:
-                return None
-            hold = self.armed_report_hold
-            self.armed_report_hold = None
-            self.active_report_hold = {**hold, "sequence": event["sequence"]}
-            event["holdCaseId"] = hold["caseId"]
-            return self.active_report_hold
-
-    def release_report_hold(self, case_id: str, sequence: int) -> dict[str, Any]:
-        with self.lock:
-            hold = self.active_report_hold
-            if hold is None or hold["caseId"] != case_id or hold["sequence"] != sequence:
-                raise ValueError("caseId and sequence must identify the currently held report")
-            hold["release"].set()
-            return {"caseId": case_id, "sequence": sequence, "releaseRequested": True}
-
-    def finish_report_hold(self, sequence: int) -> None:
-        with self.lock:
-            if self.active_report_hold is not None and self.active_report_hold["sequence"] == sequence:
-                self.active_report_hold = None
-
-    def mark_client_disconnected(self, event: dict[str, Any], signal: str) -> None:
-        with self.lock:
-            if event["clientConnected"]:
-                disconnected_monotonic_ns = time.monotonic_ns()
-                disconnected_elapsed_ms = disconnected_monotonic_ns // 1_000_000
-                event["clientConnected"] = False
-                event["clientDisconnectedAt"] = datetime.now(timezone.utc).isoformat()
-                event["clientDisconnectSignal"] = signal
-                event["clientDisconnectElapsedMs"] = disconnected_elapsed_ms
-                event["clientDisconnectMonotonicNs"] = disconnected_monotonic_ns
-                event["clientDisconnectAfterServerReceiveMs"] = max(
-                    0,
-                    disconnected_elapsed_ms - event["serverReceivedMonotonicMs"],
-                )
-
-    def release_pending_for_shutdown(self) -> None:
-        with self.lock:
-            for hold in (self.armed_report_hold, self.active_report_hold):
-                if hold is not None:
-                    hold["release"].set()
 
     def report_count(self, subject: str) -> int:
         with self.lock:
@@ -231,26 +110,12 @@ class FixtureState:
 
     def reset_requests(self) -> None:
         with self.lock:
-            if self.armed_report_hold is not None or self.active_report_hold is not None or self.armed_report_response is not None:
+            if self.armed_report_response is not None:
                 raise ValueError("cannot reset request history while a response is armed or in flight")
             self.sequence = 0
             self.requests.clear()
             if self.scenario == "ticket06":
-                self.ticket06_pre_removal_preferences_captured = False
                 self.ticket06_pre_reboot_preferences_captured = False
-                self.ticket06_recents_screenshot_sha256 = None
-                self.ticket06_task_removal_target = None
-                self.ticket06_task_removal_gate = None
-                self.ticket06_task_removal_absence = None
-                self.ticket06_task_removal_acknowledgement = None
-
-    def acknowledge_ticket06_pre_removal_preferences(self, run_id: str) -> None:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 stage acknowledgements are available only in Ticket 06")
-            if run_id != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            self.ticket06_pre_removal_preferences_captured = True
 
     def acknowledge_ticket06_pre_reboot_preferences(self, run_id: str) -> None:
         with self.lock:
@@ -260,198 +125,6 @@ class FixtureState:
                 raise ValueError("runId does not match the active Ticket 06 fixture")
             self.ticket06_pre_reboot_preferences_captured = True
 
-    def record_ticket06_recents_screenshot(self, run_id: str, screenshot_sha256: Any) -> None:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 Recents screenshot recording is available only in Ticket 06")
-            if run_id != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            if not self.ticket06_pre_removal_preferences_captured:
-                raise ValueError("filtered pre-removal preference capture is required first")
-            if self.ticket06_recents_screenshot_sha256 is not None:
-                raise ValueError("the Ticket 06 Recents screenshot is already recorded")
-            if not isinstance(screenshot_sha256, str) or len(screenshot_sha256) != 64 or any(character not in "0123456789abcdef" for character in screenshot_sha256):
-                raise ValueError("screenshotSha256 must be a lowercase SHA-256 digest")
-            self.ticket06_recents_screenshot_sha256 = screenshot_sha256
-
-    def register_ticket06_task_removal_target(self, target: dict[str, Any]) -> None:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 task-removal registration is available only in Ticket 06")
-            if target.get("runId") != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            if not self.ticket06_pre_removal_preferences_captured:
-                raise ValueError("filtered pre-removal preference capture is required first")
-            if self.ticket06_recents_screenshot_sha256 is None:
-                raise ValueError("a host-captured Recents screenshot is required before registering the target")
-            if self.ticket06_task_removal_target is not None:
-                raise ValueError("the Ticket 06 task-removal target is already registered")
-
-            task_id = target.get("taskId")
-            if type(task_id) is not int or task_id < 1:
-                raise ValueError("taskId must be a positive integer")
-            if target.get("taskComponent") != TICKET06_TASK_COMPONENT:
-                raise ValueError("taskComponent is not the isolated debug MainActivity")
-            expected_app_label = target.get("expectedAppLabel")
-            if not isinstance(expected_app_label, str) or not expected_app_label.strip():
-                raise ValueError("expectedAppLabel must be a non-empty string")
-
-            label_observed = target.get("recentsCardLabelObserved")
-            card_label = target.get("recentsCardLabel")
-            label_window_package = target.get("recentsLabelWindowPackage")
-            if any(name not in target for name in ("recentsCardLabelObserved", "recentsCardLabel", "recentsLabelWindowPackage")):
-                raise ValueError("Recents label observation fields must all be explicitly present")
-            if type(label_observed) is not bool:
-                raise ValueError("recentsCardLabelObserved must be an explicit Boolean")
-            if label_observed:
-                if card_label != expected_app_label:
-                    raise ValueError("the observed Recents card label must match the installed app label")
-                if not isinstance(label_window_package, str) or not label_window_package.strip() or label_window_package == TICKET06_PRODUCT_PACKAGE:
-                    raise ValueError("an observed Recents label must identify a non-product window package")
-            elif card_label is not None or label_window_package is not None:
-                raise ValueError("unobserved Recents label and window package must be recorded as null")
-
-            other_task_ids = target.get("otherTaskIds")
-            if not isinstance(other_task_ids, list) or any(type(value) is not int or value < 1 for value in other_task_ids):
-                raise ValueError("otherTaskIds must be a list of positive integer task IDs")
-            if task_id in other_task_ids or len(other_task_ids) != len(set(other_task_ids)):
-                raise ValueError("otherTaskIds must be unique and exclude the target task")
-
-            self.ticket06_task_removal_target = {
-                "runId": self.run_id,
-                "taskId": task_id,
-                "taskComponent": TICKET06_TASK_COMPONENT,
-                "expectedAppLabel": expected_app_label,
-                "recentsCardLabelObserved": label_observed,
-                "recentsCardLabel": card_label,
-                "recentsLabelWindowPackage": label_window_package,
-                "otherTaskIds": list(other_task_ids),
-                "screenshotSha256": self.ticket06_recents_screenshot_sha256,
-                "registeredAtUtc": datetime.now(timezone.utc).isoformat(),
-            }
-
-    def record_ticket06_task_removal_gate(self, gate: dict[str, Any]) -> dict[str, Any]:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 task-removal gates are available only in Ticket 06")
-            if gate.get("runId") != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            target = self.ticket06_task_removal_target
-            if target is None:
-                raise ValueError("the exact Ticket 06 task-removal target has not been registered")
-            if self.ticket06_task_removal_gate is not None:
-                raise ValueError("the Ticket 06 task-removal gate is already recorded")
-            if type(gate.get("taskId")) is not int or gate.get("taskId") != target["taskId"]:
-                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
-            if gate.get("taskComponent") != target["taskComponent"]:
-                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
-            if gate.get("screenshotSha256") != target["screenshotSha256"]:
-                raise ValueError("screenshotSha256 does not match the host-captured Recents image")
-            try:
-                host_captured_at = datetime.fromisoformat(str(gate.get("capturedAtUtc")).replace("Z", "+00:00"))
-            except (TypeError, ValueError) as error:
-                raise ValueError("capturedAtUtc must be an ISO-8601 timestamp") from error
-            if host_captured_at.tzinfo is None:
-                raise ValueError("capturedAtUtc must include a timezone")
-
-            created_at = datetime.now(timezone.utc)
-            if host_captured_at.astimezone(timezone.utc) > created_at or (created_at - host_captured_at.astimezone(timezone.utc)).total_seconds() > 30:
-                raise ValueError("the host gate capture timestamp must be recent and cannot be in the future")
-            self.ticket06_task_removal_gate = {
-                "runId": self.run_id,
-                "taskId": target["taskId"],
-                "taskComponent": target["taskComponent"],
-                "screenshotSha256": target["screenshotSha256"],
-                "hostCapturedAtUtc": host_captured_at.astimezone(timezone.utc).isoformat(),
-                "createdAtUtc": created_at.isoformat(),
-            }
-            return dict(self.ticket06_task_removal_gate)
-
-    def record_ticket06_task_removal_absence(self, observation: dict[str, Any]) -> dict[str, Any]:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 task-removal observations are available only in Ticket 06")
-            if observation.get("runId") != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            target = self.ticket06_task_removal_target
-            gate = self.ticket06_task_removal_gate
-            if target is None or gate is None:
-                raise ValueError("the exact Ticket 06 task-removal gate has not been recorded")
-            if type(observation.get("taskId")) is not int or observation.get("taskId") != target["taskId"]:
-                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
-            if observation.get("taskComponent") != target["taskComponent"]:
-                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
-            other_task_ids = observation.get("otherTaskIds")
-            if other_task_ids != target["otherTaskIds"]:
-                raise ValueError("otherTaskIds do not match the registered Recents snapshot")
-
-            now = datetime.now(timezone.utc)
-            gate_created_at = datetime.fromisoformat(gate["createdAtUtc"])
-            if now < gate_created_at or now > gate_created_at + timedelta(minutes=30):
-                raise ValueError("the task-absence observation must occur within the 30-minute human gate")
-            if self.ticket06_task_removal_absence is not None:
-                saved = self.ticket06_task_removal_absence
-                if saved["taskId"] == target["taskId"] and saved["otherTaskIds"] == other_task_ids:
-                    return dict(saved)
-                raise ValueError("the Ticket 06 task-absence observation conflicts with the recorded target")
-
-            self.ticket06_task_removal_absence = {
-                "runId": self.run_id,
-                "taskId": target["taskId"],
-                "taskComponent": target["taskComponent"],
-                "otherTaskIds": list(other_task_ids),
-                "observedAtUtc": now.isoformat(),
-            }
-            return dict(self.ticket06_task_removal_absence)
-
-    def acknowledge_ticket06_task_removal(self, acknowledgement: dict[str, Any]) -> None:
-        with self.lock:
-            if self.scenario != "ticket06":
-                raise ValueError("Ticket 06 task-removal acknowledgement is available only in Ticket 06")
-            if acknowledgement.get("runId") != self.run_id:
-                raise ValueError("runId does not match the active Ticket 06 fixture")
-            target = self.ticket06_task_removal_target
-            if target is None:
-                raise ValueError("the exact Ticket 06 task-removal target has not been registered")
-            gate = self.ticket06_task_removal_gate
-            absence = self.ticket06_task_removal_absence
-            if gate is None:
-                raise ValueError("the exact Ticket 06 human gate has not been created")
-            if absence is None:
-                raise ValueError("the observer has not confirmed the exact task absent before acknowledgement")
-            if self.ticket06_task_removal_acknowledgement is not None:
-                raise ValueError("the Ticket 06 task-removal acknowledgement is already recorded")
-            if type(acknowledgement.get("taskId")) is not int or acknowledgement.get("taskId") != target["taskId"]:
-                raise ValueError("taskId does not match the registered Ticket 06 Recents target")
-            if acknowledgement.get("taskComponent") != target["taskComponent"]:
-                raise ValueError("taskComponent does not match the registered Ticket 06 Recents target")
-            other_task_ids = acknowledgement.get("otherTaskIds")
-            if other_task_ids != target["otherTaskIds"]:
-                raise ValueError("otherTaskIds do not match the registered Recents snapshot")
-            screenshot_sha256 = acknowledgement.get("screenshotSha256")
-            if screenshot_sha256 != target["screenshotSha256"]:
-                raise ValueError("screenshotSha256 does not match the host-captured Recents image")
-            confirmed_app_label = acknowledgement.get("confirmedAppLabel")
-            if confirmed_app_label != target["expectedAppLabel"]:
-                raise ValueError("confirmedAppLabel does not match the installed debug app label")
-
-            gate_created_at = datetime.fromisoformat(gate["createdAtUtc"])
-            absence_observed_at = datetime.fromisoformat(absence["observedAtUtc"])
-            acknowledged_at = datetime.now(timezone.utc)
-            deadline = gate_created_at + timedelta(minutes=30)
-            if not gate_created_at <= absence_observed_at <= acknowledged_at <= deadline:
-                raise ValueError("the exact task must be observed absent before acknowledgement and within 30 minutes of gate creation")
-
-            self.ticket06_task_removal_acknowledgement = {
-                "runId": self.run_id,
-                "taskId": target["taskId"],
-                "taskComponent": target["taskComponent"],
-                "otherTaskIds": list(other_task_ids),
-                "screenshotSha256": screenshot_sha256,
-                "confirmedAppLabel": confirmed_app_label,
-                "acknowledgedAtUtc": acknowledged_at.isoformat(),
-            }
-
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             snapshot_monotonic_ns = time.monotonic_ns()
@@ -460,49 +133,16 @@ class FixtureState:
                 "scenario": self.scenario,
                 "serverMonotonicNs": snapshot_monotonic_ns,
                 "sequence": self.sequence,
-                "ticket06PreRemovalPreferencesCaptured": self.ticket06_pre_removal_preferences_captured,
                 "ticket06PreRebootPreferencesCaptured": self.ticket06_pre_reboot_preferences_captured,
-                **({
-                    "ticket06RecentsScreenshotSha256": self.ticket06_recents_screenshot_sha256,
-                    "ticket06TaskRemovalTarget": None if self.ticket06_task_removal_target is None else dict(self.ticket06_task_removal_target),
-                    "ticket06TaskRemovalGate": None if self.ticket06_task_removal_gate is None else dict(self.ticket06_task_removal_gate),
-                    "ticket06TaskRemovalAbsence": None if self.ticket06_task_removal_absence is None else dict(self.ticket06_task_removal_absence),
-                    "ticket06TaskRemovalAcknowledgement": None if self.ticket06_task_removal_acknowledgement is None else dict(self.ticket06_task_removal_acknowledgement),
-                } if self.scenario == "ticket06" else {}),
                 "reportCounts": dict(self.report_counts),
                 "requests": list(self.requests),
-                "releasedReportHolds": [dict(hold) for hold in self.released_report_holds],
-                "armedReportHold": None if self.armed_report_hold is None else {
-                    key: value for key, value in self.armed_report_hold.items() if key != "release"
-                },
-                "activeReportHold": None if self.active_report_hold is None else {
-                    key: value for key, value in self.active_report_hold.items() if key != "release"
-                },
                 "armedReportResponse": None if self.armed_report_response is None else dict(self.armed_report_response),
                 "inFlightRequests": [
                     {
                         "sequence": request["sequence"],
                         "path": request["path"],
                         "receivedAt": request["receivedAt"],
-                        "caseId": request.get("holdCaseId"),
                         "serverReceivedMonotonicNs": request["serverReceivedMonotonicNs"],
-                        "clientConnected": request["clientConnected"],
-                    }
-                    for request in self.requests
-                    if request["responseStatus"] is None and request["clientConnected"]
-                ],
-                "serverHeldResponses": [
-                    {
-                        "sequence": request["sequence"],
-                        "path": request["path"],
-                        "receivedAt": request["receivedAt"],
-                        "caseId": request.get("holdCaseId"),
-                        "serverReceivedMonotonicNs": request["serverReceivedMonotonicNs"],
-                        "clientConnected": request["clientConnected"],
-                        "clientDisconnectedAt": request["clientDisconnectedAt"],
-                        "clientDisconnectSignal": request["clientDisconnectSignal"],
-                        "clientDisconnectAfterServerReceiveMs": request.get("clientDisconnectAfterServerReceiveMs"),
-                        "clientDisconnectMonotonicNs": request.get("clientDisconnectMonotonicNs"),
                     }
                     for request in self.requests
                     if request["responseStatus"] is None
@@ -559,12 +199,6 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
                 return
             if self.path == "/__ticket03/state" and state.scenario == "ticket03":
-                self._send_json(200, state.snapshot())
-                return
-            if self.path == "/__ticket04/health" and state.scenario == "ticket04":
-                self._send_json(200, {"ok": True, "runId": state.run_id, "scenario": state.scenario})
-                return
-            if self.path == "/__ticket04/state" and state.scenario == "ticket04":
                 self._send_json(200, state.snapshot())
                 return
             if self.path == "/__ticket05/health" and state.scenario == "ticket05":
@@ -641,63 +275,6 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                 })
                 return
 
-            if state.scenario == "ticket04" and self.path == "/__ticket04/arm-report-hold":
-                try:
-                    hold = state.arm_report_hold(
-                        case_id=body.get("caseId") if isinstance(body, dict) else "",
-                        path=body.get("path") if isinstance(body, dict) else "",
-                        response_status=body.get("responseStatus") if isinstance(body, dict) else None,
-                        response_count=body.get("responseCount") if isinstance(body, dict) else None,
-                    )
-                except (TypeError, ValueError) as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, **hold})
-                return
-
-            if state.scenario == "ticket04" and self.path == "/__ticket04/release-report-hold":
-                case_id = body.get("caseId") if isinstance(body, dict) else None
-                sequence = body.get("sequence") if isinstance(body, dict) else None
-                if not isinstance(case_id, str) or isinstance(sequence, bool) or not isinstance(sequence, int):
-                    self._send_json(400, {"error": "caseId and integer sequence are required"})
-                    return
-                try:
-                    released = state.release_report_hold(case_id, sequence)
-                except ValueError as error:
-                    self._send_json(409, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, **released})
-                return
-
-            if state.scenario == "ticket04" and self.path == "/__ticket04/reset-requests":
-                try:
-                    state.reset_requests()
-                except ValueError as error:
-                    self._send_json(409, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id})
-                return
-
-            if state.scenario == "ticket04" and self.path == "/__ticket04/set-report-counts":
-                reports = body.get("reports") if isinstance(body, dict) else None
-                if not isinstance(reports, dict) or not reports:
-                    self._send_json(400, {"error": "reports must be a non-empty object"})
-                    return
-                valid_updates: dict[str, int] = {}
-                for subject, count in reports.items():
-                    if subject not in SUBJECTS or isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 100:
-                        self._send_json(400, {"error": "reports must map supported subjects to integer counts from 0 to 100"})
-                        return
-                    valid_updates[subject] = count
-                report_counts, after_sequence = state.set_report_counts(valid_updates)
-                self._send_json(200, {
-                    "ok": True,
-                    "runId": state.run_id,
-                    "reportCounts": report_counts,
-                    "afterRequestSequence": after_sequence,
-                })
-                return
-
             if state.scenario == "ticket05" and self.path == "/__ticket05/reset-requests":
                 try:
                     state.reset_requests()
@@ -750,63 +327,6 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     "reportCounts": report_counts,
                     "afterRequestSequence": after_sequence,
                 })
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/ack-pre-removal-preferences":
-                run_id = body.get("runId") if isinstance(body, dict) else None
-                try:
-                    state.acknowledge_ticket06_pre_removal_preferences(run_id)
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "readyForTaskRemoval": True})
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/record-recents-screenshot":
-                run_id = body.get("runId") if isinstance(body, dict) else None
-                screenshot_sha256 = body.get("screenshotSha256") if isinstance(body, dict) else None
-                try:
-                    state.record_ticket06_recents_screenshot(run_id, screenshot_sha256)
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "recentsScreenshotRecorded": True})
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/register-task-removal-target":
-                try:
-                    state.register_ticket06_task_removal_target(body if isinstance(body, dict) else {})
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "readyForManualDismissal": True})
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/register-task-removal-gate":
-                try:
-                    gate = state.record_ticket06_task_removal_gate(body if isinstance(body, dict) else {})
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "ticket06TaskRemovalGate": gate})
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/observe-task-removal-absence":
-                try:
-                    observation = state.record_ticket06_task_removal_absence(body if isinstance(body, dict) else {})
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "ticket06TaskRemovalAbsence": observation})
-                return
-
-            if state.scenario == "ticket06" and self.path == "/__ticket06/ack-task-removal":
-                try:
-                    state.acknowledge_ticket06_task_removal(body if isinstance(body, dict) else {})
-                except ValueError as error:
-                    self._send_json(400, {"error": str(error)})
-                    return
-                self._send_json(200, {"ok": True, "runId": state.run_id, "manualDismissalAcknowledged": True})
                 return
 
             if state.scenario == "ticket06" and self.path == "/__ticket06/ack-pre-reboot-preferences":
@@ -884,34 +404,6 @@ def make_handler(state: FixtureState) -> type[BaseHTTPRequestHandler]:
                     state.complete(event, status)
                     self._send_json(status, {"error": f"ticket05 injected HTTP {status}"})
                     return
-                hold = state.hold_for_report(self.path, event)
-                if hold is not None:
-                    while not hold["release"].wait(0.05):
-                        try:
-                            readable, _, exceptional = select.select([self.connection], [], [self.connection], 0)
-                            if exceptional:
-                                state.mark_client_disconnected(event, "socket-exception")
-                            elif readable and self.connection.recv(1, socket.MSG_PEEK) == b"":
-                                state.mark_client_disconnected(event, "eof")
-                        except OSError:
-                            state.mark_client_disconnected(event, "socket-error")
-                    response_status = hold["responseStatus"]
-                    response_count = hold["responseCount"]
-                    if response_status == 200:
-                        count = state.report_count(subject) if response_count is None else response_count
-                        payload = envelope(report_data(count, seconds, expected_array))
-                    else:
-                        count = None
-                        payload = {"error": f"ticket04 held HTTP {response_status}"}
-                    try:
-                        self._send_json(response_status, payload)
-                    except OSError:
-                        state.complete(event, response_status, served_report_count=count, delivery_status="write-failed")
-                    else:
-                        state.complete(event, response_status, served_report_count=count, delivery_status="written")
-                    finally:
-                        state.finish_report_hold(event["sequence"])
-                    return
                 count = state.report_count(subject)
                 state.complete(event, 200, served_report_count=count)
                 self._send_json(200, envelope(report_data(count, seconds, expected_array)))
@@ -928,7 +420,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket04", "ticket05", "ticket06"), default="ticket01")
+    parser.add_argument("--scenario", choices=("ticket01", "ticket02", "ticket03", "ticket05", "ticket06"), default="ticket01")
     args = parser.parse_args()
     if args.host != "127.0.0.1":
         raise SystemExit("Ticket 01 fixture server must bind only to 127.0.0.1")

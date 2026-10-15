@@ -29,7 +29,7 @@ $foreignRunId = 'abcdef0123456789abcdef0123456789'
 $testClass = 'com.example.todoschooltime.e2eobserver.ForegroundPollingTest'
 
 # Every observer schema crosses the same chunk parser; input order is deliberately reversed.
-foreach ($scenario in @('ticket03', 'ticket04', 'ticket05', 'ticket06')) {
+foreach ($scenario in @('ticket03', 'ticket05', 'ticket06')) {
     $json = '{"runId":"' + $runId + '","scenario":"' + $scenario + '","phase":"run"}'
     $lines = New-ChunkLines $scenario $runId $json
     if ((Join-IntegrationResultChunks -LogLines $lines -RunId $runId -Scenario $scenario) -cne $json -or
@@ -49,32 +49,37 @@ Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUN
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/4097:e30=") -RunId $runId -Scenario $scenario } 'an excessive declared chunk count'
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:e30=tail") -RunId $runId -Scenario $scenario } 'a payload with trailing data'
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/2:e30=", "TICKET03_RESULT_CHUNK:$runId`:2/3:e30=") -RunId $runId -Scenario $scenario } 'chunks with inconsistent totals'
-$mixedLine = "TICKET04_RESULT_CHUNK:$runId`:1/1:e30="
+$mixedLine = "TICKET05_RESULT_CHUNK:$runId`:1/1:e30="
 Assert-Rejected { Join-IntegrationResultChunks -LogLines ($validLines + $mixedLine) -RunId $runId -Scenario $scenario } 'a current-run chunk marked for another scenario'
 $wrongRun = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"runId":"' + $foreignRunId + '","scenario":"ticket03"}'))
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:$wrongRun") -RunId $runId -Scenario $scenario } 'a payload with another run ID'
-$wrongScenario = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"runId":"' + $runId + '","scenario":"ticket04"}'))
+$wrongScenario = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"runId":"' + $runId + '","scenario":"ticket05"}'))
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:$wrongScenario") -RunId $runId -Scenario $scenario } 'a result for another scenario'
+$missingScenario = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"runId":"' + $runId + '"}'))
+Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:$missingScenario") -RunId $runId -Scenario $scenario } 'a result without its scenario identity'
 $badUtf8 = [Convert]::ToBase64String([byte[]]@(0xff, 0xfe))
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:$badUtf8") -RunId $runId -Scenario $scenario } 'invalid UTF-8'
 $badJson = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{'))
 Assert-Rejected { Join-IntegrationResultChunks -LogLines @("TICKET03_RESULT_CHUNK:$runId`:1/1:$badJson") -RunId $runId -Scenario $scenario } 'malformed JSON'
 
-$baselineJson = '{"runId":"' + $runId + '","apiBaseUrl":"http://127.0.0.1:18765"}'
+$baselineJson = '{"runId":"' + $runId + '","scenario":"ticket02","apiBaseUrl":"http://127.0.0.1:18765"}'
 $baselineLines = @()
-$baselineLines += 'I/Baseline: TICKET02_RESULT={"runId":"' + $foreignRunId + '"}'
+$baselineLines += 'I/Baseline: TICKET02_RESULT={"runId":"' + $foreignRunId + '","scenario":"ticket02"}'
 $baselineLines += 'I/Baseline: TICKET02_RESULT=' + $baselineJson
 if ((Get-IntegrationResultJson -LogLines $baselineLines -RunId $runId -Scenario 'ticket02') -cne $baselineJson) {
     throw 'The shared parser failed to select the current Ticket 02 result.'
 }
 Assert-Rejected { Get-IntegrationResultJson -LogLines @('TICKET02_RESULT=' + $baselineJson, 'TICKET02_RESULT=' + $baselineJson) -RunId $runId -Scenario 'ticket02' } 'duplicate direct result records'
 Assert-Rejected { Get-IntegrationResultJson -LogLines @('TICKET02_RESULT={"runId":"' + $runId + '"') -RunId $runId -Scenario 'ticket02' } 'malformed direct result JSON'
+Assert-Rejected { ConvertFrom-IntegrationResult -Json ('{"runId":"' + $runId + '"}') -RunId $runId -Scenario 'ticket02' } 'a direct result without its scenario identity'
 
 $fixture = [pscustomobject]@{ runId = $runId; scenario = 'ticket03'; inFlightRequests = @() }
 if ((Assert-IntegrationFixtureSnapshot $fixture $runId 'ticket03').runId -cne $runId) { throw 'The fixture check changed a current-run identity.' }
 $foreignFixture = [pscustomobject]@{ runId = $foreignRunId; scenario = 'ticket03' }
+$missingScenarioFixture = [pscustomobject]@{ runId = $runId; inFlightRequests = @() }
 $unfinishedFixture = [pscustomobject]@{ runId = $runId; scenario = 'ticket03'; inFlightRequests = @([pscustomobject]@{ sequence = 1 }) }
 Assert-Rejected { Assert-IntegrationFixtureSnapshot -Snapshot $foreignFixture -RunId $runId -Scenario 'ticket03' } 'a fixture from another run'
+Assert-Rejected { Assert-IntegrationFixtureSnapshot -Snapshot $missingScenarioFixture -RunId $runId -Scenario 'ticket03' } 'a fixture without its scenario identity'
 Assert-Rejected { Assert-IntegrationFixtureSnapshot -Snapshot $unfinishedFixture -RunId $runId -Scenario 'ticket03' } 'a fixture with an unfinished request'
 
 $transport = [pscustomobject]@{ runId = $runId; nativeExitCode = 0 }

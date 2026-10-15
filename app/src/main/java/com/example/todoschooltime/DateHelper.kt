@@ -56,7 +56,3 @@ object DateHelper {
     }
 }
 
-fun LocalDate.canGoNext(today: LocalDate = DateHelper.today()): Boolean = DateHelper.canGoNext(this, today)
-
-fun LocalDate.isToday(today: LocalDate = DateHelper.today()): Boolean = DateHelper.isToday(this, today)
-

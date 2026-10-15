@@ -10,6 +10,4 @@ object TargetCountValidator {
         val num = trimmed.toIntOrNull() ?: return null
         return if (num in MIN_TARGET..MAX_TARGET) num else null
     }
-
-    fun isValid(input: String?): Boolean = parse(input) != null
 }
